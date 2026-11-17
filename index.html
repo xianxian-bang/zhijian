@@ -591,7 +591,7 @@ table.ql-table tr:hover td { background: var(--gray-50); }
       <div class="ql-flow">
         <div class="ql-step"><b>① 业务编号掩码</b><small>先把订单号 / 物流号遮掉，避免误伤</small></div>
         <div class="ql-arrow">→</div>
-        <div class="ql-step"><b>② 逐项扫描 7 类禁忌</b></div>
+        <div class="ql-step"><b>② 逐项扫描 8 类禁忌</b></div>
         <div class="ql-arrow">→</div>
         <div class="ql-step stop"><b>命中任一 → 0 分 · 不达标</b><small>整单 0 分，其余五维强制 0 分</small></div>
         <div class="ql-arrow">|</div>
@@ -600,7 +600,7 @@ table.ql-table tr:hover td { background: var(--gray-50); }
       <div class="ql-sub">① 掩码规则（先遮住这些合法业务编号，再扫违规）</div>
       <div class="ql-code">订单号 / 案件号关键词 + 数字（order no / ordine / pedido / commande / 注文 / Bestellnummer / case no / reference / 订单号 / 平台单号 …）
 亚马逊 3-7-7 主号 · 3-7 短号 · 10 位以上纯数字 · UPS 的 1Z 单号 · 亚马逊 TBA 单号 · 3-3-4-4 格式号</div>
-      <div class="ql-sub">② 七类禁忌</div>
+      <div class="ql-sub">② 八类禁忌</div>
       <table class="ql-table">
         <thead><tr><th style="width:30px;">#</th><th style="width:200px;">类型</th><th>判定与豁免</th></tr></thead>
         <tbody>
@@ -611,11 +611,15 @@ table.ql-table tr:hover td { background: var(--gray-50); }
           <tr><td>5</td><td>利诱威胁改评价</td><td>出现 review / feedback / rating / A-to-Z 且同时出现 change / modify / update / remove / delete / close / positive / 5-star 才算。</td></tr>
           <tr><td>6</td><td>粗暴不礼貌用语</td><td>stupid / idiot / fool / damn / shit / fuck / hell / crazy / insane。</td></tr>
           <tr><td>7</td><td>非 Amazon 的可编辑链接</td><td>http(s) 链接中排除 amazon / amazn / sellercentral，再走<b>物流白名单</b>；白名单外才算违规。</td></tr>
+          <tr><td>8</td><td>敏感词（评价操纵语境）</td><td>词表见「质检知识库 · 敏感词」表格（283 词 · 7 语种）。只扫客服回邮、剔除中文；单词需与评价对象词（review / rating / Bewertung / recensione 等）同句且位于命中词之后，如 <b>change your review</b>；多语种操纵短语（give us a second chance / share your experience 等）出现即判。</td></tr>
         </tbody>
       </table>
       <div class="ql-sub">物流链接白名单（这三类不算违规）</div>
       <div class="ql-code">主机名含 track / trace / tracking 标签：track.yw56.com.cn · t.17track.net …
 承运商域名：17track · yunexpress · yw56 · yanwen · 4px · DHL · FedEx · UPS · USPS · RoyalMail · Correos · GLS · DPD · Yodel · Evri · Hermes · OnTrac · CanadaPost · AusPost · JapanPost · DeutschePost · LaPoste · Colissimo · bpost · PostNL · Purolator · Aramex · SingPost · SF-Express · ChinaPost · TrackingMore · AfterShip · TNT …</div>
+      <div class="ql-sub">⑧ 敏感词红线（2026-11-17 新增 · 语境化执行）</div>
+      <div class="ql-kv">词表来自「质检知识库」中维度含<b>平台禁忌</b>且上传了表格文件的知识条目（当前：敏感词 / 禁用词11月17.xlsx，283 词，覆盖英德法意荷捷日）。页面加载数据后自动解析最新表格并生效，解析失败时使用内置词表兜底；在知识库重新上传表格即完成换表，无需改代码。</div>
+      <div class="ql-kv">判定口径（避免误伤正常客服用语）：只扫<b>客服回邮</b>，不扫顾客来信与亚马逊来信；扫描前<b>剔除中文</b>（回邮常带中文译文，日文汉字词会把译文误伤）；单词命中需满足方向性语境——命中词之后 40 字符内出现评价对象词（review / rating / feedback / Bewertung / évaluation / recensione / valutazione / beoordeling / hodnocení / 評価 / レビュー 等），即「动作 → 评价对象」同句（如 change your review）；多语种操纵短语（give us a second chance / share your experience 等）出现即命中。命中任一 → 平台禁忌红线，整单 0 分。</div>
       <div class="ql-warn" style="margin-top:12px;">红线是全看板唯一的「整单归零」规则：命中后 <b>总分 0、等级不达标、六维度全部 0 分</b>，不再执行后面的语言 / 方案 / 流程 / 技巧 / 态度判定，也不会被知识库保底。</div>
       <div class="ql-kv" style="margin-top:10px;" id="qlLandProh"><b>本批数据落点：</b>进入本页时实时统计。</div>
     </div>

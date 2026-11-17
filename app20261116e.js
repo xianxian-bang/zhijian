@@ -45,7 +45,7 @@ var DEFAULT_GRADE_RULES = [
 var STANDARDS = JSON.parse(JSON.stringify(DEFAULT_STANDARDS));
 var GRADE_RULES = JSON.parse(JSON.stringify(DEFAULT_GRADE_RULES));
 // 质检引擎版本号：引擎判分逻辑升级时更新此值，页面加载后会自动重跑全部已上传数据（申诉记录保留）
-var QC_LOGIC_VERSION = '20261106-excellent-gate-v3';
+var QC_LOGIC_VERSION = '20261117-sensitive-words';
 var DEFAULT_KNOWLEDGE_BASE = [
   { id: 'kb-good-1', type: 'case-good', kind: 'can-do', title: '主动说明退款到账时间并承诺跟进', dimension: '流程&操作完整性', keywords: ['refund', '退款', '到账', 'follow up'], content: '退款场景应说明处理步骤和预计到账时间，并主动跟进结果，这是可推广的正确做法。' },
   { id: 'kb-bad-1', type: 'case-bad', kind: 'missed', title: '只让客户继续等待，没有进一步方案', dimension: '方案合理性', keywords: ['please wait', 'just wait', '继续等待'], content: '客户已明确表达不愿等待或要求退款时，不能重复让客户等待，应结合实际诉求提供替代方案并升级处理。' },
@@ -53,6 +53,41 @@ var DEFAULT_KNOWLEDGE_BASE = [
   { id: 'kb-knowledge-2', type: 'knowledge', kind: 'missed', title: '承诺时限后必须检查是否完成', dimension: '流程&操作完整性', keywords: ['within', '3 days', '72 hour', '承诺', '三天'], content: '客服承诺在某个时限内退款、更新或回复时，必须存在明确的跟进动作，否则属于流程漏检。' }
 ];
 var KNOWLEDGE_BASE = JSON.parse(JSON.stringify(DEFAULT_KNOWLEDGE_BASE));
+
+// ============ 平台禁忌敏感词（2026-11-17 语境化执行）============
+// 词表来源：质检知识库中「维度含平台禁忌 且 上传了表格文件」的知识条目（当前：敏感词 / 禁用词11月17.xlsx）。
+// 页面加载 / 知识库增删改后自动重新解析最新表格覆盖内置词表；解析失败时用内置词表兜底。
+// 判定口径：只扫客服回邮；扫描前剔除中文（回邮常含中文译文，日文汉字词会误伤中文译文）；
+// 单词命中需满足方向性语境：命中词之后 40 字符内出现「评价对象」词（动作 → 评价对象，如 change your review）；
+// 多语种操纵短语（give us a second chance / share your experience 等）出现即命中。
+// 命中任一 → 平台禁忌红线：平台禁忌 0 分 + 整单 0 分。
+var SENSITIVE_WORDS_BUILTIN = [{"w":"bearbeiten","lang":"德语"},{"w":"Životnost","lang":"捷克语"},{"w":"Ebene","lang":"德语"},{"w":"Perfecte","lang":"荷兰语"},{"w":"Änderung","lang":"德语"},{"w":"Durata della vita","lang":"意大利语"},{"w":"klacht","lang":"荷兰语"},{"w":"hodnocení","lang":"捷克语"},{"w":"annuleren","lang":"荷兰语"},{"w":"úroveň","lang":"捷克语"},{"w":"HauteQualité","lang":"法语"},{"w":"Gift","lang":"荷兰语"},{"w":"modifier","lang":"法语"},{"w":"retirer","lang":"法语"},{"w":"Regalo","lang":"意大利语"},{"w":"wijzig","lang":"荷兰语"},{"w":"cancella","lang":"意大利语"},{"w":"Durée de vie","lang":"法语"},{"w":"compensation","lang":"法语"},{"w":"verandering","lang":"荷兰语"},{"w":"mauvais","lang":"法语"},{"w":"NA","lang":"捷克语"},{"w":"スター","lang":"日语"},{"w":"condividi la tua esperienza","lang":"意大利语"},{"w":"Levensduur","lang":"荷兰语"},{"w":"supprimer","lang":"法语"},{"w":"sdílejte svou zkušenost","lang":"捷克语"},{"w":"pas encore décidé","lang":"法语"},{"w":"verwijderen","lang":"荷兰语"},{"w":"キャンセル","lang":"日语"},{"w":"stížnost","lang":"捷克语"},{"w":"Bewertung","lang":"德语"},{"w":"Claims","lang":"荷兰语"},{"w":"waarderen","lang":"荷兰语"},{"w":"フリースタンディング","lang":"日语"},{"w":"essere idoneo","lang":"意大利语"},{"w":"deel je ervaring","lang":"荷兰语"},{"w":"mise à jour","lang":"法语"},{"w":"stella","lang":"意大利语"},{"w":"effacer","lang":"法语"},{"w":"být způsobilý","lang":"捷克语"},{"w":"レベル","lang":"日语"},{"w":"悪い","lang":"日语"},{"w":"Rückmeldung","lang":"德语"},{"w":"Ansprüche","lang":"德语"},{"w":"annuler","lang":"法语"},{"w":"negativní","lang":"捷克语"},{"w":"niveau","lang":"荷兰语"},{"w":"Parfait","lang":"法语"},{"w":"negativ","lang":"德语"},{"w":"kritisch","lang":"荷兰语"},{"w":"alt","lang":"德语"},{"w":"livello","lang":"意大利语"},{"w":"odvolat","lang":"捷克语"},{"w":"smazat","lang":"捷克语"},{"w":"変更","lang":"日语"},{"w":"Wipeout","lang":"德语"},{"w":"Garantie","lang":"法语"},{"w":"まだ決めていない","lang":"日语"},{"w":"nicht berechtigt","lang":"德语"},{"w":"feedback","lang":"意大利语"},{"w":"wijzigen","lang":"荷兰语"},{"w":"vybrat","lang":"捷克语"},{"w":"noch zu entscheiden","lang":"德语"},{"w":"dacci una seconda possibilità","lang":"意大利语"},{"w":"Beschwerde","lang":"德语"},{"w":"étoile","lang":"法语"},{"w":"Dárek","lang":"捷克语"},{"w":"évaluation","lang":"法语"},{"w":"niet in aanmerking komen","lang":"荷兰语"},{"w":"補償","lang":"日语"},{"w":"cattivo","lang":"意大利语"},{"w":"doorverkopen","lang":"荷兰语"},{"w":"comment","lang":"法语"},{"w":"ster","lang":"荷兰语"},{"w":"aggiornamento","lang":"意大利语"},{"w":"hvězda","lang":"捷克语"},{"w":"AZ","lang":"日语"},{"w":"経験を共有する","lang":"日语"},{"w":"VysokáKvalita","lang":"捷克语"},{"w":"donnez-nous une seconde chance","lang":"法语"},{"w":"クリティカル","lang":"日语"},{"w":"ještě rozhodnout","lang":"捷克语"},{"w":"komentar","lang":"捷克语"},{"w":"Aktualisierung","lang":"德语"},{"w":"abbrechen","lang":"德语"},{"w":"評価","lang":"日语"},{"w":"plaintes","lang":"法语"},{"w":"teilen Sie Ihre Erfahrungen","lang":"德语"},{"w":"削除","lang":"日语"},{"w":"Gratuit","lang":"法语"},{"w":"modificare","lang":"意大利语"},{"w":"COPYPENDING","lang":"意大利语"},{"w":"être éligible","lang":"法语"},{"w":"positief","lang":"荷兰语"},{"w":"přeprodej","lang":"捷克语"},{"w":"annulla","lang":"意大利语"},{"w":"slecht","lang":"荷兰语"},{"w":"valutare","lang":"意大利语"},{"w":"compensatie","lang":"荷兰语"},{"w":"zpětná vazba","lang":"捷克语"},{"w":"změna","lang":"捷克语"},{"w":"Réclamations","lang":"法语"},{"w":"kritický","lang":"捷克语"},{"w":"Freistehend","lang":"德语"},{"w":"négatif","lang":"法语"},{"w":"non idoneo","lang":"意大利语"},{"w":"Perfetto","lang":"意大利语"},{"w":"AltaQualità","lang":"意大利语"},{"w":"ネガティブ","lang":"日语"},{"w":"reclamo","lang":"意大利语"},{"w":"編集","lang":"日语"},{"w":"請求","lang":"日语"},{"w":"完璧","lang":"日语"},{"w":"高品質","lang":"日语"},{"w":"rimuovere","lang":"意大利语"},{"w":"nepřijatelné","lang":"捷克语"},{"w":"KOPIE AUSSTEHEND","lang":"德语"},{"w":"revendre","lang":"法语"},{"w":"Kommentar","lang":"德语"},{"w":"In piedi","lang":"意大利语"},{"w":"retour d\\'information","lang":"法语"},{"w":"évaluer","lang":"法语"},{"w":"cambia","lang":"意大利语"},{"w":"negatief","lang":"荷兰语"},{"w":"bewerken","lang":"荷兰语"},{"w":"emendare","lang":"意大利语"},{"w":"フィードバック","lang":"日语"},{"w":"ライフタイム","lang":"日语"},{"w":"Vrijstaand","lang":"荷兰语"},{"w":"upravit","lang":"捷克语"},{"w":"schlecht","lang":"德语"},{"w":"geef ons een tweede kans","lang":"荷兰语"},{"w":"Hoogwaardige","lang":"荷兰语"},{"w":"Lebensdauer","lang":"德语"},{"w":"dejte nám druhou šanci","lang":"捷克语"},{"w":"beoordeling","lang":"荷兰语"},{"w":"löschen","lang":"德语"},{"w":"zrušit","lang":"捷克语"},{"w":"Samostatně stojící","lang":"捷克语"},{"w":"ritirare","lang":"意大利语"},{"w":"berechtigt sein","lang":"德语"},{"w":"Élimination","lang":"法语"},{"w":"Autonome","lang":"法语"},{"w":"špatný","lang":"捷克语"},{"w":"bijwerken","lang":"荷兰语"},{"w":"ワイプアウト","lang":"日语"},{"w":"再販","lang":"日语"},{"w":"Cadeau","lang":"法语"},{"w":"abheben","lang":"德语"},{"w":"nog te besluiten","lang":"荷兰语"},{"w":"再チャンスをください","lang":"日语"},{"w":"Zdarma","lang":"捷克语"},{"w":"Perfekt","lang":"德语"},{"w":"Cancellazione","lang":"意大利语"},{"w":"更新","lang":"日语"},{"w":"Smazání","lang":"捷克语"},{"w":"rivendere","lang":"意大利语"},{"w":"rétracter","lang":"法语"},{"w":"positif","lang":"法语"},{"w":"消去","lang":"日语"},{"w":"修正","lang":"日语"},{"w":"cambiare","lang":"意大利语"},{"w":"ancora da decidere","lang":"意大利语"},{"w":"適格であること","lang":"日语"},{"w":"amenderen","lang":"荷兰语"},{"w":"Pretese","lang":"意大利语"},{"w":"Hochwertig","lang":"德语"},{"w":"Nároky","lang":"捷克语"},{"w":"critico","lang":"意大利语"},{"w":"valutazione","lang":"意大利语"},{"w":"zurückziehen","lang":"德语"},{"w":"positivo","lang":"意大利语"},{"w":"terugtrekken","lang":"荷兰语"},{"w":"odškodnění","lang":"捷克语"},{"w":"amender","lang":"法语"},{"w":"wiederverkaufen","lang":"德语"},{"w":"コメント","lang":"日语"},{"w":"Záruka","lang":"捷克语"},{"w":"Stern","lang":"德语"},{"w":"ポジティブ","lang":"日语"},{"w":"不明确的","lang":"意大利语"},{"w":"コピー待ち","lang":"日语"},{"w":"entfernen","lang":"德语"},{"w":"ocenit","lang":"捷克语"},{"w":"bewerten","lang":"德语"},{"w":"Kostenlos","lang":"德语"},{"w":"modifizieren","lang":"德语"},{"w":"aktualizace","lang":"捷克语"},{"w":"Gratuito","lang":"意大利语"},{"w":"Vrijgesteld","lang":"荷兰语"},{"w":"cancellare","lang":"意大利语"},{"w":"撤回","lang":"日语"},{"w":"geschikt zijn","lang":"荷兰语"},{"w":"evaluatie","lang":"荷兰语"},{"w":"odebrat","lang":"捷克语"},{"w":"revidovat","lang":"捷克语"},{"w":"změnit","lang":"捷克语"},{"w":"critique","lang":"法语"},{"w":"positiv","lang":"德语"},{"w":"Dokonalé","lang":"捷克语"},{"w":"ändern","lang":"德语"},{"w":"適格ではない","lang":"日语"},{"w":"risarcimento","lang":"意大利语"},{"w":"éditer","lang":"法语"},{"w":"自由","lang":"日语"},{"w":"non applicable","lang":"法语"},{"w":"privátní","lang":"捷克语"},{"w":"苦情","lang":"日语"},{"w":"ギフト","lang":"日语"},{"w":"privé","lang":"荷兰语"},{"w":"pozitivní","lang":"捷克语"},{"w":"negativo","lang":"意大利语"},{"w":"partagez votre expérience","lang":"法语"},{"w":"該当なし","lang":"日语"},{"w":"überarbeiten","lang":"德语"},{"w":"Entschädigung","lang":"德语"},{"w":"gib uns eine zweite Chance","lang":"德语"},{"w":"Garanzia","lang":"意大利语"},{"w":"přepracovat produkt","lang":"捷克语"},{"w":"nicht anwendbar","lang":"德语"},{"w":"privato","lang":"意大利语"},{"w":"herzien","lang":"荷兰语"},{"w":"changer","lang":"法语"},{"w":"リトラクト","lang":"日语"},{"w":"変化","lang":"日语"},{"w":"レビュー","lang":"日语"},{"w":"das Produkt neu bewerten","lang":"德语"},{"w":"evalueer het product opnieuw","lang":"荷兰语"},{"w":"recensione","lang":"意大利语"},{"w":"製品を再評価する","lang":"日语"},{"w":"přehled","lang":"捷克语"},{"w":"nezapadá","lang":"捷克语"},{"w":"privat","lang":"德语"},{"w":"niet van toepassing","lang":"荷兰语"},{"w":"revue","lang":"法语"},{"w":"保証","lang":"日语"},{"w":"プライベート","lang":"日语"},{"w":"rivisitare","lang":"意大利语"},{"w":"rivalutare il prodotto","lang":"意大利语"},{"w":"non applicabile","lang":"意大利语"},{"w":"réviser","lang":"法语"},{"w":"non éligible","lang":"法语"},{"w":"réévaluer le produit","lang":"法语"},{"w":"delete","lang":"英语"},{"w":"Lifetime","lang":"英语"},{"w":"resell","lang":"英语"},{"w":"HighQuality","lang":"英语"},{"w":"not eligible","lang":"英语"},{"w":"update","lang":"英语"},{"w":"positive","lang":"英语"},{"w":"alter","lang":"英语"},{"w":"give us a second chance","lang":"英语"},{"w":"yet to decide","lang":"英语"},{"w":"to be eligible","lang":"英语"},{"w":"Guarrantee","lang":"英语"},{"w":"negative","lang":"英语"},{"w":"appraise","lang":"英语"},{"w":"Free-Standing","lang":"英语"},{"w":"Free","lang":"英语"},{"w":"erase","lang":"英语"},{"w":"complaint","lang":"英语"},{"w":"star","lang":"英语"},{"w":"evaluation","lang":"英语"},{"w":"bad","lang":"英语"},{"w":"rating","lang":"英语"},{"w":"cancel","lang":"英语"},{"w":"retract","lang":"英语"},{"w":"remove","lang":"英语"},{"w":"withdraw","lang":"英语"},{"w":"share your experience","lang":"英语"},{"w":"amend","lang":"英语"},{"w":"Perfect","lang":"英语"},{"w":"modify","lang":"英语"},{"w":"level","lang":"英语"},{"w":"critical","lang":"英语"},{"w":"change","lang":"英语"},{"w":"edit","lang":"英语"},{"w":"private","lang":"英语"},{"w":"reasses the product","lang":"英语"},{"w":"review","lang":"英语"},{"w":"revise","lang":"英语"},{"w":"not applicable","lang":"英语"}];
+var sensitiveWordList = SENSITIVE_WORDS_BUILTIN.slice();
+var SENSITIVE_WORD_MAP = {};
+var SENSITIVE_WORD_RE = null;
+var SENSITIVE_REVIEW_OBJ_RE = null;
+var SENSITIVE_RE_BUILD_OK = false;
+var sensitiveRefreshInFlight = false;
+var SENSITIVE_STRIP_CJK_RE = new RegExp('[\\u3000-\\u303f\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\uff01-\\uff5e]', 'g');
+function buildSensitiveRegex() {
+  SENSITIVE_WORD_MAP = {};
+  var alts = [];
+  for (var i = 0; i < sensitiveWordList.length; i++) {
+    var w = String(sensitiveWordList[i].w || '').trim();
+    if (!w) continue;
+    var key = w.toLowerCase();
+    if (SENSITIVE_WORD_MAP[key]) { if (!SENSITIVE_WORD_MAP[key].lang && sensitiveWordList[i].lang) SENSITIVE_WORD_MAP[key].lang = sensitiveWordList[i].lang; continue; }
+    SENSITIVE_WORD_MAP[key] = { w: w, lang: sensitiveWordList[i].lang || '' };
+    alts.push(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  }
+  SENSITIVE_RE_BUILD_OK = false;
+  try {
+    SENSITIVE_WORD_RE = new RegExp('(?<![\\p{L}\\p{N}_])(?:' + alts.join('|') + ')(?![\\p{L}\\p{N}_])', 'giu');
+    SENSITIVE_REVIEW_OBJ_RE = new RegExp('(?<![\\p{L}\\p{N}_])(?:review|reviews|rating|ratings|feedback|évaluation|avis|recensione|recensioni|valutazione|valutazioni|bewertung|bewertungen|rezension|rezensionen|beoordeling|beoordelingen|evaluatie|evaluaties|hodnocení|recenz|評価|レビュー)(?![\\p{L}\\p{N}_])', 'iu');
+    SENSITIVE_RE_BUILD_OK = true;
+  } catch (e) { SENSITIVE_WORD_RE = null; SENSITIVE_REVIEW_OBJ_RE = null; SENSITIVE_RE_BUILD_OK = false; }
+}
+buildSensitiveRegex();
 
 // ============================================================
 // 档位分值 / 叠加比例的唯一定义处（引擎与「质检逻辑」板块共用同一份来源）
@@ -1602,6 +1637,89 @@ function isLogisticsLink(url) {
   return false;
 }
 
+function findSensitiveWordHits(text) {
+  if (!SENSITIVE_RE_BUILD_OK || !SENSITIVE_WORD_RE) return [];
+  var t = String(text || '').replace(SENSITIVE_STRIP_CJK_RE, ' ');
+  if (!t.trim()) return [];
+  var clauses = t.split(/[.!?;\n\r]+/);
+  var seen = {}, out = [];
+  for (var ci = 0; ci < clauses.length; ci++) {
+    var clause = clauses[ci];
+    if (!clause || !clause.trim()) continue;
+    SENSITIVE_WORD_RE.lastIndex = 0;
+    var m;
+    while ((m = SENSITIVE_WORD_RE.exec(clause)) !== null) {
+      if (!m[0]) break;
+      var key = m[0].toLowerCase();
+      var entry = SENSITIVE_WORD_MAP[key];
+      if (!entry || seen[key]) continue;
+      if (sensitiveWordPass(entry, m, clause)) { seen[key] = true; out.push(entry); }
+    }
+  }
+  return out;
+}
+function sensitiveWordPass(entry, m, clause) {
+  var word = entry.w || '';
+  if (word.indexOf(' ') >= 0) return true; // 多语种操纵短语：出现即命中
+  var end = m.index + m[0].length;
+  var after = clause.slice(end, end + 40);
+  return !!(SENSITIVE_REVIEW_OBJ_RE && SENSITIVE_REVIEW_OBJ_RE.test(after)); // 动作 → 评价对象
+}
+function scheduleSensitiveWordsRefresh() {
+  if (sensitiveRefreshInFlight) return;
+  if (typeof cloudApp === 'undefined' || !cloudApp || !cloudApp.storage || typeof cloudApp.storage.from !== 'function') return;
+  sensitiveRefreshInFlight = true;
+  rebuildSensitiveWords().then(function(changed) {
+    sensitiveRefreshInFlight = false;
+    if (changed && rawData && rawData.length) { showToast('敏感词表已更新，正在重新质检全部数据', 'info'); runQualityCheck(); }
+  }).catch(function() { sensitiveRefreshInFlight = false; });
+}
+function rebuildSensitiveWords() {
+  return new Promise(function(resolve) {
+    var items = [];
+    for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
+      var k = KNOWLEDGE_BASE[i];
+      if (!k || k.sourceType !== 'file' || !k.fileCloudPath) continue;
+      var dims = getKnowledgeDimensions(k);
+      if (!dims || dims.indexOf('平台禁忌') < 0) continue;
+      var ft = String(k.fileType || '') + ' ' + String(k.fileName || '');
+      if (!/sheet|excel|csv|xlsx|xls/i.test(ft)) continue;
+      items.push(k);
+    }
+    if (!items.length || typeof XLSX === 'undefined') { resolve(false); return; }
+    var collected = {};
+    var pending = items.length;
+    var done = function() {
+      var words = [];
+      for (var key in collected) if (Object.prototype.hasOwnProperty.call(collected, key)) words.push({ w: collected[key].w, lang: collected[key].lang });
+      var changed = words.length > 0 && JSON.stringify(words.map(function(x) { return x.w.toLowerCase(); })) !== JSON.stringify(sensitiveWordList.map(function(x) { return x.w.toLowerCase(); }));
+      if (words.length > 0) { sensitiveWordList = words; buildSensitiveRegex(); }
+      resolve(changed);
+    };
+    var settle = function() { pending--; if (pending <= 0) done(); };
+    items.forEach(function(k) {
+      try {
+        cloudApp.storage.from('qc-appeals').createSignedUrl(k.fileCloudPath, 3600).then(function(res) {
+          var url = res && (res.fullSignedURL || res.signedUrl || res.url);
+          if (!url) throw new Error('no signed url');
+          return fetch(url);
+        }).then(function(r) { return r.arrayBuffer(); }).then(function(buf) {
+          var wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+          var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: '' });
+          for (var ri = 0; ri < rows.length; ri++) {
+            var w = String(rows[ri] && rows[ri][0] || '').trim();
+            if (!w) continue;
+            var lang = String(rows[ri] && rows[ri][1] || '').trim();
+            var key = w.toLowerCase();
+            if (!collected[key]) collected[key] = { w: w, lang: lang };
+            else if (lang && !collected[key].lang) collected[key].lang = lang;
+          }
+          settle();
+        }).catch(function() { settle(); });
+      } catch (e) { settle(); }
+    });
+  });
+}
 function checkProhibition(text, ctxText) {
   var issues = [], violations = [];
   var source = String(text || '');
@@ -1646,6 +1764,12 @@ function checkProhibition(text, ctxText) {
   var nonLogisticsLinks = [];
   if (links) for (var lk = 0; lk < links.length; lk++) if (!isLogisticsLink(links[lk])) nonLogisticsLinks.push(links[lk]);
   if (nonLogisticsLinks.length > 0) violations.push('邮件中含有非Amazon平台的可编辑链接');
+  var swHits = findSensitiveWordHits(source);
+  if (swHits.length > 0) {
+    var swParts = [];
+    for (var sw = 0; sw < swHits.length && sw < 3; sw++) swParts.push('「' + swHits[sw].w + '」' + (swHits[sw].lang ? '（' + swHits[sw].lang + '）' : ''));
+    violations.push('回邮中出现平台禁忌敏感词' + swParts.join('、') + (swHits.length > 3 ? ' 等' + swHits.length + '个词' : '') + '（评价操纵语境）');
+  }
   if (violations.length > 0) { issues.push.apply(issues, violations); return { score: 0, grade: '不达标', issues: issues, isRedline: true }; }
   return { score: -1, grade: '通过', issues: [], isRedline: false };
 }
@@ -3377,6 +3501,7 @@ function saveKnowledgeItem() { if (!requireAdmin('保存质检知识')) return;
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) { KNOWLEDGE_BASE[i] = item; found = true; break; }
   if (!found) KNOWLEDGE_BASE.push(item);
   closeKnowledgeModal(); renderKnowledgeBase();
+  scheduleSensitiveWordsRefresh();
   if (rawData.length) { runQualityCheck(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求，正在重新质检全部数据', 'info'); }
   else { cloudSaveState(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求', 'success'); }
 }
@@ -3386,7 +3511,7 @@ function deleteKnowledgeItem(id) { if (!requireAdmin('删除质检知识')) retu
   if (!item || !confirm('确认删除“' + item.title + '”？删除后会重新质检全部已有数据。')) return;
   if (item.fileCloudPath && cloudApp && cloudApp.storage) { try { cloudApp.storage.from('qc-appeals').delete(item.fileCloudPath).catch(function(){}); } catch (e) {} }
   KNOWLEDGE_BASE = KNOWLEDGE_BASE.filter(function(k) { return k.id !== id; });
-  renderKnowledgeBase();
+  renderKnowledgeBase(); scheduleSensitiveWordsRefresh();
   if (rawData.length) { runQualityCheck(); showToast('知识已删除，正在重新质检全部数据', 'info'); } else { cloudSaveState(); showToast('知识已删除并同步云端', 'success'); }
 }
 function exportKnowledgeBase() {
@@ -3864,6 +3989,7 @@ function importAllData(data) {
   if (data.gradeRules) { GRADE_RULES = data.gradeRules; }
   if (data.knowledgeBase && data.knowledgeBase.length) { KNOWLEDGE_BASE = data.knowledgeBase; }
   var kbBackfilled = ensureKnowledgeRequirements();
+  scheduleSensitiveWordsRefresh();
   document.getElementById('detailEmpty').style.display = 'none';
   document.getElementById('detailContent').style.display = 'block';
   document.getElementById('dashboardEmpty').style.display = 'none';
