@@ -255,6 +255,8 @@ table.ql-table tr:hover td { background: var(--gray-50); }
 .ql-list li { margin-bottom: 2px; }
 @media (max-width: 1024px) { .kpi-grid { grid-template-columns: repeat(2, 1fr); } .chart-grid { grid-template-columns: 1fr; } .knowledge-grid { grid-template-columns: 1fr; } }
 /* ===== 2026-11-17 added: detail overview + account jump ===== */
+/* 消除「质检明细」筛选栏（组别/账号/客服…）与概览条（客服·前5 / 账号·前5）之间的空隙 */
+#tab-detail .filter-bar { margin-bottom: 0; }
 .detail-overview { display:grid; grid-template-columns:1.18fr 1.18fr 1.25fr 1.4fr; gap:10px; margin-bottom:14px; align-items:stretch; }
 .ov-box { background:#fff; border:1px solid var(--gray-200); border-radius:var(--radius); padding:10px 12px; display:flex; flex-direction:column; }
 .ov-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; min-height:16px; }
@@ -265,17 +267,20 @@ table.ql-table tr:hover td { background: var(--gray-50); }
 /* 排名行：色块宽度 = 该项相对第 1 名的占比，点一下筛选该客服 / 账号 */
 .ov-rank { position:relative; display:flex; align-items:center; gap:7px; padding:7px 9px; border-radius:7px; cursor:pointer; background:var(--gray-50); overflow:hidden; margin-bottom:4px; transition:background .15s, box-shadow .15s; }
 .ov-rank:last-child { margin-bottom:0; }
+.ov-rank.r1 { background:#f2f1fd; }
+.ov-rank.r2 { background:#eaf3fc; }
+.ov-rank.r3 { background:#e8f6f0; }
 .ov-rank:hover { background:var(--primary-bg); }
 .ov-rank.on { background:var(--primary-bg); box-shadow:inset 0 0 0 1.5px var(--primary); }
-.ov-fill { position:absolute; left:0; top:0; bottom:0; max-width:calc(100% - 168px); background:linear-gradient(90deg, rgba(79,70,229,.20), rgba(79,70,229,.05)); border-right:2px solid rgba(79,70,229,.42); pointer-events:none; }
-.ov-rank.r2 .ov-fill { background:linear-gradient(90deg, rgba(99,102,241,.15), rgba(99,102,241,.03)); border-right-color:rgba(99,102,241,.30); }
-.ov-rank.r3 .ov-fill { background:linear-gradient(90deg, rgba(148,163,184,.18), rgba(148,163,184,.04)); border-right-color:rgba(148,163,184,.42); }
-.ov-rank.r4 .ov-fill, .ov-rank.r5 .ov-fill { background:linear-gradient(90deg, rgba(203,213,225,.30), rgba(203,213,225,.05)); border-right-color:rgba(203,213,225,.55); }
+.ov-fill { position:absolute; left:0; top:0; bottom:0; max-width:calc(100% - 168px); background:linear-gradient(90deg, rgba(83,74,183,.16), rgba(83,74,183,.03)); border-right:2px solid rgba(83,74,183,.34); pointer-events:none; }
+.ov-rank.r2 .ov-fill { background:linear-gradient(90deg, rgba(55,138,221,.16), rgba(55,138,221,.03)); border-right-color:rgba(55,138,221,.34); }
+.ov-rank.r3 .ov-fill { background:linear-gradient(90deg, rgba(29,158,117,.16), rgba(29,158,117,.03)); border-right-color:rgba(29,158,117,.34); }
+.ov-rank.r4 .ov-fill, .ov-rank.r5 .ov-fill { background:linear-gradient(90deg, rgba(148,163,184,.16), rgba(148,163,184,.03)); border-right-color:rgba(148,163,184,.35); }
 .ov-rk { width:19px; height:19px; border-radius:5px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:700; color:#fff; flex:none; position:relative; z-index:1; }
-.ov-rank.r1 .ov-rk { background:linear-gradient(135deg, #4f46e5, #818cf8); }
-.ov-rank.r2 .ov-rk { background:linear-gradient(135deg, #6366f1, #a5b4fc); }
-.ov-rank.r3 .ov-rk { background:linear-gradient(135deg, #94a3b8, #cbd5e1); }
-.ov-rank.r4 .ov-rk, .ov-rank.r5 .ov-rk { background:linear-gradient(135deg, #cbd5e1, #e2e8f0); color:var(--gray-600); }
+.ov-rank.r1 .ov-rk { background:#534AB7; }
+.ov-rank.r2 .ov-rk { background:#378ADD; }
+.ov-rank.r3 .ov-rk { background:#1D9E75; }
+.ov-rank.r4 .ov-rk, .ov-rank.r5 .ov-rk { background:#b0aea6; color:#fff; }
 .ov-nm { font-size:13.5px; font-weight:600; color:var(--gray-800); position:relative; z-index:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1 1 auto; min-width:0; }
 /* 行内三个数字列：总数 / 考核·不考核 / 均去信；.ov-cols 是同宽的表头 */
 .ov-c1, .ov-c2, .ov-c3 { position:relative; z-index:1; text-align:right; flex:none; }
@@ -307,9 +312,13 @@ table.ql-table tr:hover td { background: var(--gray-50); }
 .ov-fcard.amber:hover { box-shadow:0 2px 6px rgba(234,88,12,.16); border-color:#fdba74; }
 .ov-fcard .ov-frow { display:flex; align-items:center; gap:6px; padding:0; }
 .ov-fwhy { font-size:12px; color:var(--gray-500); line-height:1.5; margin-top:4px; }
-.ov-frest { flex:1 1 auto; display:flex; align-items:center; justify-content:center; min-height:44px; padding:8px; border-radius:6px; background:rgba(255,255,255,.6); font-size:12.5px; color:var(--gray-400); text-align:center; }
+.ov-frest { margin-top:auto; padding:8px 4px 2px; font-size:11.5px; color:var(--gray-400); text-align:center; }
 .ov-metrics { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:8px; }
-.ov-metric { background:var(--gray-50); border-radius:6px; padding:9px 11px; display:flex; flex-direction:column; justify-content:center; min-height:56px; }
+.ov-metric { background:var(--gray-50); border-radius:7px; padding:9px 11px; display:flex; flex-direction:column; justify-content:center; min-height:56px; border-top:3px solid transparent; }
+.ov-metric.m-purple { border-top-color:#534AB7; }
+.ov-metric.m-blue { border-top-color:#378ADD; }
+.ov-metric.m-amber { border-top-color:#BA7517; }
+.ov-metric.m-gray { border-top-color:#888780; }
 .ov-clk { cursor:pointer; transition:background .15s, box-shadow .15s; }
 .ov-clk:hover { background:var(--primary-bg); }
 .ov-clk.on { background:var(--primary-bg); box-shadow:inset 0 0 0 1.5px var(--primary); }
@@ -324,10 +333,89 @@ table.ql-table tr:hover td { background: var(--gray-50); }
 .ov-grade .g-wu { color:var(--gray-500); background:var(--gray-100); }
 .ov-grade .g-ref { color:var(--warning); background:var(--warning-bg); }
 .ov-grade span.on { box-shadow:inset 0 0 0 1.5px currentColor; }
+.ov-gradebar { display:flex; width:100%; height:8px; border-radius:5px; overflow:hidden; gap:2px; margin:2px 0 7px; background:var(--gray-100); }
+.ov-gradebar .gb-seg { display:block; height:100%; min-width:2px; cursor:pointer; }
+.ov-gradebar .gb-seg:hover { filter:brightness(.9); }
 .acct-link { color:var(--primary); cursor:pointer; text-decoration:underline; }
 .acct-link:hover { color:var(--primary-light); }
 @media (max-width:1280px) { .detail-overview { grid-template-columns:1fr 1fr; } }
 @media (max-width:1024px) { .detail-overview { grid-template-columns:1fr; } }
+/* ===== 2026-11-18 筛选栏重排：六项同一行、竖线分隔 3+3、右侧两行右对齐 ===== */
+#tab-detail .filter-bar { align-items:center; gap:12px; padding:12px 16px; flex-wrap:wrap; }
+.filter-line { display:flex; align-items:center; gap:11px; flex:1 1 auto; flex-wrap:nowrap; }
+.filter-line .filter-item { flex:0 0 auto; }
+.filter-line .filter-item label { font-size:12.5px; color:var(--gray-600); white-space:nowrap; }
+.filter-line .filter-item select, .filter-line .msel-btn { height:30px; padding:4px 8px; font-size:12.5px; min-width:88px; }
+.fdivider { width:1px; align-self:stretch; min-height:22px; background:var(--gray-200); flex:0 0 1px; margin:0 2px; }
+.fops { display:flex; flex-direction:column; gap:7px; flex:0 0 auto; margin-left:auto; align-items:flex-end; }
+.fops .btn-row { display:flex; gap:8px; justify-content:flex-end; }
+.fops .bulk-box { justify-content:flex-end; }
+.fops .bulk-box textarea { height:30px; width:120px; }
+.fops .bulk-box label { font-size:12px; color:var(--gray-600); white-space:nowrap; }
+.fops .bulk-hint { min-width:0; }
+
+/* ===== layout preview overrides ===== */
+.ov-toprow { display:flex; align-items:center; gap:8px; margin-bottom:6px; min-height:16px; }
+.ov-toprow .ov-label { flex:none; }
+.ov-toprow .ov-cols { margin:0 0 0 auto; }
+.ov-rank-more { text-align:center; padding:6px 0 2px; margin-top:3px; border-top:1px dashed var(--gray-200); }
+/* 排名配色：第1名用品牌紫蓝（突出、且非红，与重点关注警示红区分），其余橙/绿/蓝/紫 */
+.ov-rank.r1 { background:#eef2ff; } .ov-rank.r2 { background:#FFF8ED; } .ov-rank.r3 { background:#ECF9F0; } .ov-rank.r4 { background:#EDF5FF; } .ov-rank.r5 { background:#F8F6FE; }
+.ov-rank.r1 .ov-rk { background:linear-gradient(135deg,#4f46e5,#4338ca); box-shadow:0 0 0 2px rgba(79,70,229,.20); font-size:12px; } .ov-rank.r2 .ov-rk { background:#F59E0B; } .ov-rank.r3 .ov-rk { background:#16A34A; } .ov-rank.r4 .ov-rk { background:#3B82F6; } .ov-rank.r5 .ov-rk { background:#B9A6EA; }
+.ov-rank.r1 .ov-fill { background:linear-gradient(90deg,rgba(79,70,229,.18),rgba(79,70,229,.04)); border-right-color:rgba(79,70,229,.40); }
+.ov-rank.r2 .ov-fill { background:linear-gradient(90deg,rgba(245,158,11,.16),rgba(245,158,11,.03)); border-right-color:rgba(245,158,11,.34); }
+.ov-rank.r3 .ov-fill { background:linear-gradient(90deg,rgba(22,163,74,.16),rgba(22,163,74,.03)); border-right-color:rgba(22,163,74,.34); }
+.ov-rank.r4 .ov-fill { background:linear-gradient(90deg,rgba(59,130,246,.16),rgba(59,130,246,.03)); border-right-color:rgba(59,130,246,.34); }
+.ov-rank.r5 .ov-fill { background:linear-gradient(90deg,rgba(185,166,234,.12),rgba(185,166,234,.02)); border-right-color:rgba(185,166,234,.28); }
+/* 右侧四卡：白底 + 标签加大 + 浅边框/顶部色条保持格子感 */
+.ov-metrics .ov-metric { text-align:center; align-items:center; justify-content:space-between; padding:11px 12px; background:#fff; border:1px solid var(--gray-200); border-top:3px solid var(--gray-300); }
+.ov-metrics .m-purple { border-top-color:#4f46e5; }
+.ov-metrics .m-blue { border-top-color:#F59E0B; }
+.ov-metrics .m-amber { border-top-color:#16A34A; }
+.ov-metrics .m-gray { border-top-color:#8B5CF6; }
+.ov-metrics .ov-label { font-size:16px; font-weight:700; margin-bottom:2px; }
+.ov-metric.m-purple .ov-label { color:#4338ca; }
+.ov-metric.m-blue .ov-label { color:#F59E0B; }
+.ov-metric.m-amber .ov-label { color:#16A34A; }
+.ov-metric.m-gray .ov-label { color:#8B5CF6; }
+.ov-sub { font-size:11.5px; color:var(--gray-400); margin-top:5px; line-height:1.3; }
+.ov-asbar { width:100%; height:6px; border-radius:4px; background:var(--gray-200); margin-top:7px; overflow:hidden; }
+.ov-asbar span { display:block; height:100%; background:linear-gradient(90deg,#F59E0B,#3B82F6); border-radius:4px; }
+/* 筛选栏（组别那一行）：上下留很小的间隙，独立卡片感 */
+#tab-detail.active { padding-top:5px; }
+#tab-detail .filter-bar { margin-bottom:5px; flex-wrap:nowrap; gap:0; }
+/* 三块同一行：每块独立成块（浅底+边框+圆角），label贴近控件、项之间留距离；三块靠左，使组别左边距=导出Excel右边距(16px) */
+#tab-detail .filter-line { flex-wrap:nowrap; gap:0; flex:1 1 auto; min-width:0; align-items:stretch; justify-content:flex-start; }
+#tab-detail .fblock { display:flex; align-items:center; gap:12px; flex:0 0 auto; padding:6px 12px; background:var(--gray-50); border:1px solid var(--gray-200); border-radius:8px; }
+#tab-detail .filter-line .filter-item { display:flex; align-items:center; gap:4px; }
+#tab-detail .filter-line .filter-item label { margin-right:0; letter-spacing:0; }
+#tab-detail .filter-line .filter-item select, #tab-detail .filter-line .msel-btn { min-width:78px; }
+/* 竖线加重、加粗、贯通上下，块间有明显区隔 */
+#tab-detail .fdivider { width:3px; align-self:stretch; min-height:34px; margin:0 9px; background:var(--gray-300); border-radius:2px; }
+/* 第三块：批量粘贴在块内；导出按钮移出块外、无底色、垂直居中对齐 */
+#tab-detail .fops { flex-direction:row; align-items:center; gap:8px; margin-left:0; flex:0 0 auto; }
+#tab-detail .fops .bulk-box { gap:4px; }
+#tab-detail .export-row { align-self:center; gap:6px; flex:0 0 auto; margin-left:14px; }
+#tab-detail .fops .bulk-box textarea { width:150px; }
+#tab-detail .fops .bulk-box label { white-space:nowrap; }
+
+</style>
+<style id="twocol-layout-css">
+table.data-table td.cell-nowrap { white-space:nowrap; font-size:11.5px; padding:8px 6px; color:var(--gray-700); }
+table.data-table td.cell-center { text-align:center; font-size:12px; }
+table.data-table th.cell-center { text-align:center; }
+table.data-table th { font-size:11.5px; padding:9px 6px; }
+</style>
+
+<style id="ov-layout-final-css">
+/* 概览区定稿：四宫格数字放大 + 平均去信数纯数字居中 + 重点关注底部虚线 */
+/* 1) 四宫格黑色数字放大到 32px（满高满块、无虚线、内容居中保持原样） */
+.ov-metrics .ov-big { font-size:32px !important; }
+/* 2) 平均去信数(第3格 m-amber)：「封/单」单位绝对定位到数字右侧，不占居中宽度，使纯数字与上方138居中对齐 */
+.ov-metrics .ov-metric.m-amber .ov-big { position:relative; }
+.ov-metrics .ov-metric.m-amber .ov-big small { position:absolute; left:100%; bottom:3px; margin-left:3px; white-space:nowrap; }
+/* 3) 重点关注：底部说明行上方保留虚线，与左边 y=428 齐平 */
+.ov-focusbox .ov-frest { border-top:1px dashed var(--gray-200) !important; padding-top:6px !important; }
 </style>
 </head>
 <body>
@@ -356,15 +444,25 @@ table.ql-table tr:hover td { background: var(--gray-50); }
   <div id="detailEmpty" class="empty-state"><div class="empty-icon">📋</div><div class="empty-text">暂无质检明细数据</div><div class="empty-hint">点击右上角「上传数据」按钮上传邮件数据，或 <button class="btn-link" onclick="loadSampleData()">加载示例数据</button></div></div>
   <div id="detailContent" style="display:none;">
     <div class="filter-bar">
-      <div class="filter-item"><label>组别：</label><select id="detailFilterGroup" onchange="onDetailFilterChange()"><option value="">全部</option></select></div>
-      <div class="filter-item"><label>账号：</label><select id="detailFilterAccount" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_account"></span></div>
-      <div class="filter-item"><label>客服：</label><select id="detailFilterAgent" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_agent"></span></div>
-      <div class="filter-item"><label>等级：</label><select id="detailFilterGrade" style="display:none;"><option value="">全部</option><option value="优秀">优秀</option><option value="达标">达标</option><option value="不达标">不达标</option><option value="无法质检">无法质检</option><option value="参考案例">参考案例</option></select><span class="msel" id="msel_grade"></span></div>
-      <div class="filter-item"><label>是否考核：</label><select id="detailFilterAssessed" onchange="renderDetailTable()"><option value="">全部</option><option value="是">是</option><option value="否">否</option></select></div>
-      <div class="filter-item" style="display:none;"><label>维度：</label><select id="detailFilterDim" onchange="renderDetailTable()"><option value="">全部</option></select></div>
-      <div class="filter-item"><label>申诉状态：</label><select id="detailFilterAppeal" onchange="renderDetailTable()"><option value="">全部</option><option value="无申诉">无申诉</option><option value="待审核">待审核</option><option value="部分通过">部分通过</option><option value="申诉通过">申诉通过</option><option value="申诉被拒">申诉被拒</option></select></div>
-      <div class="filter-item"><label>批量粘贴：</label><div class="bulk-box"><textarea id="detailBulk" placeholder="每行一个单号/账号，或用逗号分隔" oninput="applyBulkFilter()"></textarea><button class="btn btn-outline btn-sm" onclick="applyBulkFilter()">筛选</button><button class="btn btn-outline btn-sm" onclick="clearBulkFilter()">清空</button><span class="bulk-hint" id="bulkHint"></span></div></div>
-      <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-outline btn-sm" onclick="exportDetail('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDetail('excel')">导出Excel</button><button class="btn btn-danger btn-sm admin-only" onclick="clearAllData()">清空数据</button></div>
+      <div class="filter-line">
+        <div class="fblock">
+          <div class="filter-item"><label>组别：</label><select id="detailFilterGroup" onchange="onDetailFilterChange()"><option value="">全部</option></select></div>
+          <div class="filter-item"><label>账号：</label><select id="detailFilterAccount" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_account"></span></div>
+          <div class="filter-item"><label>客服：</label><select id="detailFilterAgent" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_agent"></span></div>
+        </div>
+        <span class="fdivider"></span>
+        <div class="fblock">
+          <div class="filter-item"><label>等级：</label><select id="detailFilterGrade" style="display:none;"><option value="">全部</option><option value="优秀">优秀</option><option value="达标">达标</option><option value="不达标">不达标</option><option value="无法质检">无法质检</option><option value="参考案例">参考案例</option></select><span class="msel" id="msel_grade"></span></div>
+          <div class="filter-item"><label>是否考核：</label><select id="detailFilterAssessed" onchange="renderDetailTable()"><option value="">全部</option><option value="是">是</option><option value="否">否</option></select></div>
+          <div class="filter-item" style="display:none;"><label>维度：</label><select id="detailFilterDim" onchange="renderDetailTable()"><option value="">全部</option></select></div>
+          <div class="filter-item"><label>申诉状态：</label><select id="detailFilterAppeal" onchange="renderDetailTable()"><option value="">全部</option><option value="无申诉">无申诉</option><option value="待审核">待审核</option><option value="部分通过">部分通过</option><option value="申诉通过">申诉通过</option><option value="申诉被拒">申诉被拒</option></select></div>
+        </div>
+        <span class="fdivider"></span>
+        <div class="fblock fops">
+          <div class="bulk-box"><label>批量粘贴：</label><textarea id="detailBulk" placeholder="每行一个单号/账号，或用逗号分隔" oninput="applyBulkFilter()"></textarea><button class="btn btn-outline btn-sm" onclick="applyBulkFilter()">筛选</button><button class="btn btn-outline btn-sm" onclick="clearBulkFilter()">清空</button><span class="bulk-hint" id="bulkHint"></span></div>
+        </div>
+      </div>
+      <div class="btn-row export-row"><button class="btn btn-outline btn-sm" onclick="exportDetail('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDetail('excel')">导出Excel</button></div>
     </div>
     <div id="detailOverview" class="detail-overview"></div>
     <div class="card"><div class="table-wrap" style="max-height:600px;overflow-y:auto;"><table class="data-table" id="detailTable"><thead></thead><tbody></tbody></table></div></div>
@@ -849,6 +947,6 @@ table.ql-table tr:hover td { background: var(--gray-50); }
 <div class="modal-overlay" id="knowledgeModal"><div class="modal modal-sm"><div class="modal-header"><h3 id="knowledgeModalTitle">新增知识</h3><button class="modal-close" onclick="closeKnowledgeModal()">&times;</button></div><div class="modal-body"><input type="hidden" id="knowledgeEditId"><input type="hidden" id="knowledgeEditType"><div id="knowledgeDuplicateHint" style="display:none;margin-bottom:14px;padding:12px 14px;background:var(--warning-bg);border:1px solid #fdba74;border-radius:8px;color:var(--warning);font-size:13px;line-height:1.6;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">标题（必填）</label><input type="text" id="knowledgeTitle" placeholder="例如：退款场景主动说明到账时间" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识类型</label><select id="knowledgeKind" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"><option value="can-do">这个做法可以（正向知识）</option><option value="missed">应该质检但容易漏检（漏检知识）</option></select></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">适用维度（可多选，不选则默认「综合」）</label><div id="knowledgeDimensionBox" style="display:flex;flex-wrap:wrap;gap:8px 16px;padding:10px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;background:#fff;"><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="方案合理性" onchange="onKnowledgeDimensionChange()"><span>方案合理性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="流程&amp;操作完整性" onchange="onKnowledgeDimensionChange()"><span>流程&amp;操作完整性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务技巧" onchange="onKnowledgeDimensionChange()"><span>服务技巧</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务态度" onchange="onKnowledgeDimensionChange()"><span>服务态度</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="语言语法表达" onchange="onKnowledgeDimensionChange()"><span>语言语法表达</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="平台禁忌" onchange="onKnowledgeDimensionChange()"><span>平台禁忌</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="综合" onchange="onKnowledgeDimensionChange()"><span>综合（全部维度）</span></label></div><input type="hidden" id="knowledgeDimension" value="综合"><div style="margin-top:6px;font-size:12px;color:var(--gray-500);">可勾选多个维度；勾选「综合」表示该知识适用于全部维度。</div></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;"><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识来源</label><div class="radio-group" style="margin:0 0 10px;"><label class="radio-item"><input type="radio" name="knowledgeSource" value="text" checked onchange="onKnowledgeSourceChange()"><span>文本</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="file" onchange="onKnowledgeSourceChange()"><span>本地文档</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="url" onchange="onKnowledgeSourceChange()"><span>网页链接</span></label></div><div id="knowledgeFileWrap" style="display:none;margin-bottom:12px;"><div class="upload-zone" style="padding:22px 16px;cursor:pointer;" onclick="document.getElementById('knowledgeFile').click()"><div class="upload-icon" style="font-size:30px;margin-bottom:6px;">📎</div><div class="upload-title" style="font-size:15px;">点击选择文档（SOP / 规范 / 截图等）</div><div class="upload-desc">支持 PDF / Word / Excel / 图片 / TXT，单个不超过 20MB</div></div><div id="knowledgeFileStatus" style="display:none;margin-top:8px;padding:8px 10px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:6px;font-size:13px;align-items:center;gap:8px;"><span id="knowledgeFileName" style="flex:1;"></span><button type="button" class="btn-link danger" onclick="clearKnowledgeFile()">移除</button></div><input type="file" id="knowledgeFile" style="display:none" onchange="onKnowledgeFileSelect(event)"></div><div id="knowledgeUrlWrap" style="display:none;margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">网页链接（SOP / 文档地址）</label><input type="url" id="knowledgeUrl" placeholder="https://… 例如内部 Wiki 的 SOP 页面" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:16px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">内容 / 判断依据（文本类必填，文档 / 链接类可填备注）</label><textarea id="knowledgeContent" placeholder="描述什么情况、应该如何判断、正确或错误的处理方式" style="width:100%;min-height:120px;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;resize:vertical;"></textarea><div style="margin:4px 0 4px;font-size:12px;color:var(--gray-500);">❐ 系统将根据「标题 + 正文」自动提取判分依据，无需手动填写关键词；上传的知识即邮件质检的标准与资料，质检时据此自动判分。</div></div><div id="knowledgeHitPreview" style="margin:2px 0 10px;font-size:12px;color:var(--gray-600);"></div><div style="text-align:right;"><button class="btn btn-outline btn-sm" onclick="closeKnowledgeModal()" style="margin-right:8px;">取消</button><button class="btn btn-primary btn-sm" onclick="saveKnowledgeItem()">保存并重跑质检</button></div></div></div></div>
 <div class="progress-overlay" id="progressOverlay"><div class="progress-box"><div class="spinner"></div><div class="progress-text" id="progressText">正在质检...</div><div class="progress-detail" id="progressDetail"></div><div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBarFill" style="width:0%"></div></div></div></div>
 <div class="toast" id="toast"></div>
-<script src="app20261117j.js"></script>
+<script src="app20261117h.js"></script>
 </body>
 </html>
