@@ -417,6 +417,79 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
 /* 3) 重点关注：底部说明行上方保留虚线，与左边 y=428 齐平 */
 .ov-focusbox .ov-frest { border-top:1px dashed var(--gray-200) !important; padding-top:6px !important; }
 </style>
+<style id="reply-chat-css">
+.rc-wrap{position:relative;}
+.rc-msg{margin-bottom:12px;display:flex;flex-direction:column;align-items:flex-start;}
+.rc-msg.rc-agent{align-items:flex-end;}
+.rc-msg .rc-meta,.rc-msg .rc-bubble{max-width:92%;}
+.rc-meta{font-size:12.5px;line-height:1.6;margin-bottom:5px;}
+.rc-name{font-weight:700;}
+.rc-cust .rc-name{color:#2563eb;}
+.rc-agent .rc-name{color:#16a34a;}
+.rc-time{color:#334155;}
+.rc-meta .rc-status{font-weight:600;}
+.rc-meta .rc-unreplied{color:#dc2626;}
+.rc-meta .rc-replied{color:#16a34a;}
+.rc-meta .rc-sent{color:#dc2626;}
+.rc-bubble{border-radius:8px;padding:9px 12px;font-size:12.5px;line-height:1.75;white-space:pre-wrap;word-break:break-word;}
+.rc-cust .rc-bubble{background:#eef4ff;border:1px solid #dbe6ff;color:#1e293b;}
+.rc-agent .rc-bubble{background:#edfaf0;border:1px solid #d3ebd9;color:#1e293b;}
+.rc-line.rc-cn{color:#475569;margin-top:2px;}
+.rc-expand{text-align:center;padding:7px 0 3px;border-top:1px dashed #e2e8f0;font-size:12px;color:#2563eb;font-weight:600;cursor:pointer;}
+.rc-expand:hover{text-decoration:underline;}
+.rc-pop{position:absolute;left:-1px;right:-1px;top:-1px;z-index:30;height:auto;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 14px 32px rgba(15,23,42,.22);padding:10px 12px;overflow:visible;}
+.rc-pop-body{padding-right:2px;}
+.rc-pop-foot{position:sticky;bottom:-10px;display:flex;justify-content:flex-end;background:#fff;padding:8px 0 0;z-index:2;}
+.rc-pop-close{padding:3px 12px;border:1px solid #cbd5e1;border-radius:12px;background:#f8fafc;color:#2563eb;font-size:12px;font-weight:600;cursor:pointer;}
+.rc-pop-close:hover{background:#eff6ff;border-color:#2563eb;}
+
+/* 回邮框加大：默认框最多显示更多内容 */
+.detail-msg-box.rc-msgbox{max-height:none;min-height:0;overflow:visible;}
+/* 回邮数据卡片：标题独占一行 + 两行信息整齐排列 */
+.rc-card{border:1px solid var(--gray-200);border-radius:8px;overflow:hidden;margin-bottom:12px;}
+.rc-card-head{padding:9px 14px;background:#fff;border-bottom:1px solid var(--gray-200);}
+.detail-section .rc-title{font-size:16px !important;font-weight:800 !important;color:#111827 !important;margin:0 !important;padding:0 0 0 10px !important;border:none !important;border-left:3px solid var(--primary) !important;line-height:1.35 !important;}
+.rc-card-body{background:var(--gray-50);padding:10px 14px;}
+.rc-base-row{display:flex;align-items:center;gap:26px;flex-wrap:wrap;padding:0 0 9px;margin-bottom:9px;border-bottom:1px dashed var(--gray-200);}
+.rc-base{display:flex;align-items:center;gap:7px;font-size:12.5px;white-space:nowrap;}
+.rc-base-l{color:#64748b;font-weight:600;}
+.rc-base-v{color:#1e293b;font-weight:600;}
+.rc-reg-row{display:flex;align-items:center;gap:22px;flex-wrap:wrap;}
+.rc-reg{display:flex;align-items:center;gap:7px;font-size:12.5px;white-space:nowrap;}
+.rc-reg-l{color:#64748b;}
+.rc-reg-v{color:#1e293b;font-weight:600;background:#fff;border:1px solid var(--gray-200);padding:1px 10px;border-radius:4px;min-width:28px;text-align:center;}
+</style>
+<style id="ov-pop-draft-css">
+/* 展开浮层：框相对定位承载浮层 */
+.ov-popbox, .ov-focusbox { position:relative; }
+/* 排名前5：平均分布填满整框高度；展开条贴底（三框虚线齐平） */
+.ov-rank-list { flex:1 1 auto; display:flex; flex-direction:column; justify-content:space-evenly; min-height:0; }
+.ov-rank-list .ov-rank { margin-bottom:0; flex:0 0 auto; }
+/* 三个框底部展开行：居中 + 下拉箭头 + 顶部虚线 + 贴底 */
+.ov-expand-bar { margin-top:auto; text-align:center; padding:6px 0 2px; border-top:1px dashed var(--gray-200); font-size:11.5px; color:var(--primary); font-weight:600; cursor:pointer; }
+.ov-expand-bar:hover { text-decoration:underline; }
+.ov-frest { padding:6px 0 2px; }
+/* 浮层：绝对定位从框顶展开，放大到 560px（比框高、一次看更多行、向下盖住部分表格）；框本身尺寸不变 */
+.ov-pop { position:absolute; left:-1px; right:-1px; top:-1px; z-index:30; height:560px; background:#fff; border:1px solid var(--gray-200); border-radius:var(--radius); box-shadow:0 14px 32px rgba(15,23,42,.22); padding:8px 12px 6px; overflow-y:auto; overscroll-behavior:contain; }
+.ov-pop-focus { background:linear-gradient(180deg,#fff6f6,#fff 55%); border-color:#fecaca; }
+/* 浮层头部：与收起态框头同款，展开前后标题不跳变；sticky 固定顶部 */
+.ov-pop-head { position:sticky; top:-8px; background:#fff; z-index:3; display:flex; align-items:center; gap:8px; min-height:22px; padding:2px 0 8px 9px; border-bottom:1px solid var(--gray-200); margin:0 0 8px; }
+.ov-pop-head .ov-label { white-space:nowrap; flex:none; }
+.ov-pop-head .ov-allnum { font-size:11px; font-weight:600; color:var(--gray-400); white-space:nowrap; }
+.ov-pop-head .ov-cols { margin-left:auto; margin-bottom:0; padding-left:9px; padding-right:0; }
+.ov-pop-focus .ov-pop-head { background:#fff6f6; }
+/* 列头与数据行数字列精确对齐 */
+.ov-pop .ov-rank { padding-left:9px; padding-right:0; }
+.ov-pop .ov-pop-body { padding-left:0; padding-right:0; }
+/* 总数黑体数字居中 */
+.ov-pop-head .ov-cols .ov-c1, .ov-pop .ov-rank .ov-c1 { text-align:center !important; }
+.ov-pop-close { color:var(--primary); cursor:pointer; font-weight:600; white-space:nowrap; }
+/* 右下角收起：sticky 固定浮层底部右侧 */
+.ov-pop-foot { position:sticky; bottom:-6px; display:flex; justify-content:flex-end; background:#fff; padding:6px 2px 0; margin-top:4px; z-index:3; }
+.ov-pop-focus .ov-pop-foot { background:#fff; }
+.ov-pop-foot .ov-pop-close { padding:2px 10px; border:1px solid var(--gray-200); border-radius:12px; background:var(--gray-50); }
+.ov-pop-foot .ov-pop-close:hover { background:var(--primary-bg); border-color:var(--primary); }
+</style>
 </head>
 <body>
 <div class="header">

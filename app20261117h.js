@@ -2560,6 +2560,7 @@ function ovClearAll() {
 }
 var ovRankOpen = {};
 function ovToggleRank(key){ ovRankOpen[key] = !ovRankOpen[key]; if (typeof lastOvFiltered !== "undefined") renderDetailOverview(lastOvFiltered); }
+function ovTogglePop(popId){ var el = document.getElementById(popId); if(!el) return; el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none"; }
 function renderDetailOverview(filtered) {
   var host = document.getElementById('detailOverview');
   if (!host) return;
@@ -2591,35 +2592,46 @@ function renderDetailOverview(filtered) {
   }
   function rankBox(key, title) {
     var allArr = topN(key, 9999);
-    var showAll = !!ovRankOpen[key];
-    var arr = showAll ? allArr : allArr.slice(0, 5);
     var picked = getMultiValues(key);
-    var top = arr.length ? arr[0].n : 1;
-    var rows = '';
-    for (var i = 0; i < arr.length; i++) {
-      var x = arr[i];
-      var w = Math.max(24, Math.round(x.n / top * 100));
-      var on = (picked.length === 1 && picked[0] === x.k) ? ' on' : '';
-      var st = rankStat(key, x.k);
-      rows += '<div class="ov-rank r' + (i + 1) + on + '" title="只看 ' + escHtml(x.k) + ' 的数据（再点一次取消）" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(x.k) + ')">'
-            + '<span class="ov-fill" style="width:' + w + '%"></span>'
-            + '<span class="ov-rk">' + (i + 1) + '</span>'
-            + '<span class="ov-nm">' + escHtml(x.k) + '</span>'
-            + '<span class="ov-c1">' + x.n + '</span>'
-            + '<span class="ov-c2">' + st.assessed + '/' + st.unassessed + '</span>'
-            + '<span class="ov-c3">' + st.avg + '</span></div>';
+    var top = allArr.length ? allArr[0].n : 1;
+    function buildRows(list) {
+      var rows = '';
+      for (var i = 0; i < list.length; i++) {
+        var x = list[i];
+        var w = Math.max(24, Math.round(x.n / top * 100));
+        var on = (picked.length === 1 && picked[0] === x.k) ? ' on' : '';
+        var st = rankStat(key, x.k);
+        rows += '<div class="ov-rank r' + (i + 1) + on + '" title="只看 ' + escHtml(x.k) + ' 的数据（再点一次取消）" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(x.k) + ')">'
+              + '<span class="ov-fill" style="width:' + w + '%"></span>'
+              + '<span class="ov-rk">' + (i + 1) + '</span>'
+              + '<span class="ov-nm">' + escHtml(x.k) + '</span>'
+              + '<span class="ov-c1">' + x.n + '</span>'
+              + '<span class="ov-c2">' + st.assessed + '/' + st.unassessed + '</span>'
+              + '<span class="ov-c3">' + st.avg + '</span></div>';
+      }
+      return rows;
     }
-    if (allArr.length > 5) {
-      rows += '<div class="ov-more ov-rank-more" onclick="ovToggleRank(\'' + key + '\')">' + (showAll ? '▲ 收起' : '▼ 展开全部 ' + allArr.length + ' 人') + '</div>';
-    }
-    if (!rows) rows = '<div class="ov-empty">暂无数据</div>';
+    var rowsInner = buildRows(allArr.slice(0, 5));
+    var rows = !rowsInner ? '<div class="ov-empty">暂无数据</div>' : '<div class="ov-rank-list">' + rowsInner + '</div>';
     var reset = '';
     if (picked.length === 1) reset = '<span class="ov-reset" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(picked[0]) + ')" title="取消该筛选">✕ ' + escHtml(picked[0]) + '</span>';
     else if (picked.length > 1) reset = '<span class="ov-reset" onclick="ovClearKey(\'' + key + '\')" title="取消该筛选">✕ 已筛 ' + picked.length + ' 项</span>';
-    return '<div class="ov-box"><div class="ov-toprow"><span class="ov-label">' + title + '</span>' + reset
-         + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>'
-         + rows + '</div>';
+    var head = '<div class="ov-toprow"><span class="ov-label">' + title + '</span>' + reset
+         + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>';
+    var bar = '', pop = '';
+    if (allArr.length > 5) {
+      var popId = 'ovPop_' + key;
+      bar = '<div class="ov-expand-bar" onclick="ovTogglePop(\'' + popId + '\')">▼ 展开全部 ' + allArr.length + ' 人</div>';
+      pop = '<div class="ov-pop" id="' + popId + '" style="display:none">'
+          + '<div class="ov-pop-head"><span class="ov-label">' + title + '</span>'
+          + '<span class="ov-allnum">全部 ' + allArr.length + ' 人</span>'
+          + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>'
+          + '<div class="ov-pop-body">' + buildRows(allArr) + '</div>'
+          + '<div class="ov-pop-foot"><span class="ov-pop-close" onclick="ovTogglePop(\'' + popId + '\')">▲ 收起</span></div></div>';
+    }
+    return '<div class="ov-box ov-popbox">' + head + rows + bar + pop + '</div>';
   }
+
   var assessedN = 0, orderLetters = 0, accSet = {}, agtSet = {}, gradeCnt = {};
   for (var j = 0; j < filtered.length; j++) {
     var r = filtered[j];
@@ -2649,21 +2661,31 @@ function renderDetailOverview(filtered) {
   // 重点关注：做成卡片（标签 + 账号 + 单号 + 一句问题），不足 4 条时用占位把框撑满
   var focus = ovFocusList(filtered);
   var OV_FOCUS_MAX = 4;
-  var showN = ovFocusOpen ? focus.length : Math.min(focus.length, OV_FOCUS_MAX);
-  var frows = '';
-  for (var fi = 0; fi < showN; fi++) {
-    var it = focus[fi], rr = it.r;
-    frows += '<div class="ov-fcard' + (it.sev === 0 ? '' : ' amber') + '" title="点击定位到该单" onclick="ovPickOrder(' + htmlAttrJsStr(rr.order) + ')">'
+  var showN = Math.min(focus.length, OV_FOCUS_MAX);
+  function buildFCards(list) {
+    var h = '';
+    for (var fi = 0; fi < list.length; fi++) {
+      var it = list[fi], rr = it.r;
+      h += '<div class="ov-fcard' + (it.sev === 0 ? '' : ' amber') + '" title="点击定位到该单" onclick="ovPickOrder(' + htmlAttrJsStr(rr.order) + ')">'
            + '<div class="ov-frow"><span class="ov-tag ' + (it.sev === 0 ? 't-red' : 't-amber') + '">' + escHtml(it.tag) + '</span>'
            + '<span class="ov-facc">' + escHtml(rr.account || '未填写账号') + '</span>'
            + '<span class="ov-ford">' + escHtml(rr.order || '') + '</span></div>'
            + '<div class="ov-fwhy">' + escHtml(it.why) + '</div></div>';
+    }
+    return h;
   }
+  var frows = buildFCards(focus.slice(0, showN));
+  var fbar = '', fpop = '';
   if (focus.length > OV_FOCUS_MAX) {
-    frows += '<div class="ov-more" onclick="ovExpandFocus()">' + (ovFocusOpen ? '收起' : '展开全部 ' + focus.length + ' 条') + '</div>';
+    fbar = '<div class="ov-expand-bar" onclick="ovTogglePop(\'ovPop_focus\')">▼ 展开全部 ' + focus.length + ' 条</div>';
+    fpop = '<div class="ov-pop ov-pop-focus" id="ovPop_focus" style="display:none">'
+         + '<div class="ov-pop-head"><span class="ov-label ov-focus-title">⚠ 重点关注</span>'
+         + '<span class="ov-allnum">全部 ' + focus.length + ' 条</span></div>'
+         + '<div class="ov-pop-body">' + buildFCards(focus) + '</div>'
+         + '<div class="ov-pop-foot"><span class="ov-pop-close" onclick="ovTogglePop(\'ovPop_focus\')">▲ 收起</span></div></div>';
   }
   if (!focus.length) frows += '<div class="ov-frest">本范围内无需重点关注的记录</div>';
-  else if (showN < OV_FOCUS_MAX) frows += '<div class="ov-frest">其余记录无需重点关注</div>';
+  else if (focus.length < OV_FOCUS_MAX) frows += '<div class="ov-frest">其余记录无需重点关注</div>';
   // 等级分布堆叠条：各等级占比，点色块可直接筛选该等级
   var gradeBarHtml = '';
   (function () {
@@ -2684,7 +2706,7 @@ function renderDetailOverview(filtered) {
     rankBox('account', '账号 · 前 5') +
     '<div class="ov-box ov-focusbox"><div class="ov-head"><span class="ov-label ov-focus-title">⚠ 重点关注</span>'
       + (dirty ? '<span class="ov-reset" onclick="ovClearAll()" title="清空概览条上的全部联动筛选">✕ 重置全部</span>' : '<span class="ov-cnt">' + focus.length + '</span>')
-      + '</div>' + frows + '</div>' +
+      + '</div>' + frows + fbar + fpop + '</div>' +
     '<div class="ov-metrics">' +
       '<div class="ov-metric m-purple"><div class="ov-label">质检总数</div><div class="ov-big">' + filtered.length + '</div><div class="ov-sub">条质检记录</div></div>' +
       '<div class="ov-metric m-blue ov-clk' + (curAs ? ' on' : '') + '" title="点击只看参与考核 / 不参与考核的单"><div class="ov-label">考核 / 不考核</div><div class="ov-big"><span onclick="ovPickAssessed(\'是\')" style="cursor:pointer;">' + assessedN + '</span><small> / <span onclick="ovPickAssessed(\'否\')" style="cursor:pointer;">' + (filtered.length - assessedN) + '</span></small></div><div class="ov-asbar"><span style="width:' + (filtered.length ? (assessedN / filtered.length * 100).toFixed(0) : 0) + '%"></span></div></div>' +
@@ -2904,20 +2926,40 @@ function showDetail(index) {
   }
   html += '</tbody></table></div>';
   if (r.knowledgeEvidence && r.knowledgeEvidence.length) { html += '<div class="detail-section"><h4>知识库命中记录</h4><div class="detail-msg-box">'; for (var ke = 0; ke < r.knowledgeEvidence.length; ke++) { var kev = r.knowledgeEvidence[ke]; html += '<div style="margin-bottom:8px;"><b>' + escHtml(kev.title) + '</b>（' + escHtml(knowledgeTypeLabel(kev.type)) + '）<br>' + escHtml(kev.content); var kevb = findKnowledgeById(kev.id); if (kevb && kevb.sourceType === 'url') html += ' <a href="' + escHtml(kevb.url) + '" target="_blank" style="color:var(--primary);text-decoration:underline;">🔗 打开文档</a>'; else if (kevb && kevb.sourceType === 'file') html += ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(kevb.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 打开附件</a>'; html += '</div>'; } html += '</div></div>'; }
-  html += '<div class="detail-section"><h4>回邮数据</h4>';
+  html += '<div class="detail-section">';
+  // 回邮数据区顶部：账号 / 平台订单号 / 客服 / 总分（数据与基本信息一致）
+  var _sb = '<span class="score-badge ';
+  if (r.totalScore === -1) _sb += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
+  else if (isReferenceCaseResult(r)) _sb += 'score-na">参考案例（不参与统计）';
+  else if (r.grade === '优秀') _sb += 'score-excellent">' + r.totalScore + ' 分（优秀）';
+  else if (r.grade === '达标') _sb += 'score-pass">' + r.totalScore + ' 分（达标）';
+  else _sb += 'score-fail">' + r.totalScore + ' 分（不达标）';
+  _sb += '</span>';
+  html += '<div class="rc-card">';
+  html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
+  html += '<div class="rc-card-body">';
+  html += '<div class="rc-base-row">'
+        + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(r.agent) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
+        + '</div>';
+  var _reg = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
+  html += '<div class="rc-reg-row">';
+  for (var _ri = 0; _ri < _reg.length; _ri++) {
+    html += '<div class="rc-reg"><span class="rc-reg-l">' + _reg[_ri][0] + '</span><span class="rc-reg-v">' + escHtml(_reg[_ri][1] || '') + '</span></div>';
+  }
+  html += '</div>';
+  html += '</div></div>';
   if (r.noAgentReply) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">本单' + (r.amazonOnlySession ? '回邮段落全部为亚马逊系统来信、' : '') + '没有客服回邮，已标记为「无法质检」并 <b>不纳入任何统计</b>（不计入质检量 / 达标率 / 不达标率 / 等级分布）。</div>';
   else if (r.amazonExcluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:4px;color:#9a6700;font-size:12px;">已识别并排除 ' + r.amazonExcluded + ' 段亚马逊系统来信（如销售伙伴支持团队），这些内容不参与客诉质检。</div>';
   else if (r.amazonIncluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#eaf3ff;border:1px solid #b6d4fe;border-radius:4px;color:#1a5fb4;font-size:12px;">本单含亚马逊系统来信，因存在客服回邮，已按正常质检流程纳入判分。</div>';
   // 回邮数据：完整展示上传的全部内容（位置保持不变，超长时框内滚动，不再截断）
   var dr = r.reply || '';
-  html += '<div class="detail-msg-box" style="max-height:520px;overflow:auto;white-space:pre-wrap;">' + escHtml(dr) + '</div>';
-  // 与平台单号一一对应的登记信息：上传了就显示内容，未上传则显示空白
-  // 顺序：是否需要检查流程操作 → 是否有退款登记 → 是否有问题反馈 → 是否有补件
-  var extraFields = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
-  for (var ef = 0; ef < extraFields.length; ef++) {
-    html += '<div style="margin-top:12px;"><div style="font-weight:600;margin-bottom:4px;">' + extraFields[ef][0] + '</div>';
-    html += '<div class="detail-msg-box" style="min-height:34px;white-space:pre-wrap;">' + escHtml(extraFields[ef][1] || '') + '</div></div>';
-  }
+  var _qcAgentNames = [];
+  for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
+  html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, 'replyChat_' + index, _qcAgentNames) + '</div>';
+  // 四个登记字段已上移到“回邮数据”标题行横向并列
   html += '</div>';
   html += '<div class="detail-section"><h4>申诉状态</h4>' + appealStatusBadge(getAppealStatus(r)) + ' <button class="btn btn-outline btn-sm" onclick="closeRecordModal();openAppealModal(' + index + ')">查看/处理申诉</button></div>';
   document.getElementById('recordModalBody').innerHTML = html;
@@ -4858,3 +4900,107 @@ document.addEventListener('DOMContentLoaded', function() {
   loadFromUrlHash();
   if (window.CloudBaseSDK) initCloudBase();
 });
+
+
+// ===== 回邮数据气泡排版（落地 20261117-2221） =====
+function qcFmtTime(s) { return String(s || '').replace(/^(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}:\d{2})$/, '$1 $2'); }
+function qcCleanNoise(s) {
+  return String(s || '')
+    .replace(/(收起|复制|标签归类设置跟进标签|跟进标签请选择标签归类|客诉标签请选择模板|上传附件发送发票草稿|标签归类|跟进标签|客诉标签|请选择模板|发送发票|上传附件|草稿)/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function qcSplitBody(body) {
+  body = qcCleanNoise(body);
+  if (!body) return [];
+  var m = body.match(/[\u3400-\u9fff]/);
+  if (!m || m.index === 0) return [body];
+  var foreign = body.slice(0, m.index).trim();
+  var cn = body.slice(m.index).trim();
+  return [foreign, cn].filter(Boolean);
+}
+function parseReplyChat(text, agentNames) {
+  var src = String(text == null ? '' : text).replace(/\r/g, '');
+  agentNames = agentNames || [];
+  if (!src || src === '无联客记录') return [];
+  var re = /(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})\s*(\([^)]*拉取时间[^)]*\)|\[(?:发送成功|发送失败|已撤回)\])/g;
+  var marks = [], mm;
+  while ((mm = re.exec(src)) !== null) {
+    var tail = mm[2];
+    var isCust = tail.indexOf('拉取时间') >= 0;
+    var status = '';
+    var sm = tail.match(/(未回复|已回复|发送成功|发送失败|已撤回)/);
+    if (sm) status = sm[1];
+    var pm = tail.match(/拉取时间[:：]\s*(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})/);
+    marks.push({ timeStart: mm.index, markEnd: mm.index + mm[0].length, role: isCust ? 'customer' : 'agent', status: status, pullTime: pm ? qcFmtTime(pm[1]) : '', time: qcFmtTime(mm[1]) });
+  }
+  if (!marks.length) return [];
+  function nameStartOf(mk) {
+    var i = mk.timeStart - 1;
+    while (i >= 0 && /[\u4e00-\u9fa5A-Za-z\s]/.test(src.charAt(i))) i--;
+    var start = i + 1;
+    // 客服消息：以已知客服名为界限，名字只截到客服名本身；
+    // 客服名前面的正文（如“全额退款”）退回上一段顾客回邮，不再并入客服名。
+    if (mk.role === 'agent' && agentNames.length) {
+      var seg = src.slice(start, mk.timeStart);
+      var best = 0;
+      for (var a = 0; a < agentNames.length; a++) {
+        var nm = String(agentNames[a] || '').trim();
+        if (!nm) continue;
+        if (seg.length >= nm.length && seg.slice(seg.length - nm.length) === nm && nm.length > best) best = nm.length;
+      }
+      if (best > 0) return mk.timeStart - best;
+    }
+    return start;
+  }
+  var out = [];
+  for (var i = 0; i < marks.length; i++) {
+    var mk = marks[i];
+    var ns = nameStartOf(mk);
+    var nameRaw = src.slice(ns, mk.timeStart);
+    var np = nameRaw.split(/(?:收起|复制)/);
+    var name = np[np.length - 1].replace(/^[中，,\s]+/, '').replace(/\s+/g, ' ').trim();
+    if (name.length > 24) name = name.slice(-24);
+    var nextNs = (i + 1 < marks.length) ? nameStartOf(marks[i + 1]) : src.length;
+    var body = qcCleanNoise(src.slice(mk.markEnd, nextNs));
+    if (!name && !body) continue;
+    out.push({ role: mk.role, name: name, sendTime: mk.time, pullTime: mk.pullTime, status: mk.status, lines: qcSplitBody(body) });
+  }
+  return out;
+}
+function qcEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function rcBubbleHtml(x) {
+  var isCust = x.role === 'customer';
+  var name = x.name || (isCust ? '客户' : '客服');
+  var statusHtml = '';
+  if (x.status === '未回复') statusHtml = '<span class="rc-status rc-unreplied">未回复</span>';
+  else if (x.status === '已回复') statusHtml = '<span class="rc-status rc-replied">已回复</span>';
+  else if (x.status) statusHtml = '<span class="rc-status rc-sent">[' + qcEsc(x.status) + ']</span>';
+  var metaTail = x.pullTime
+    ? '（拉取时间：' + qcEsc(x.pullTime) + (statusHtml ? '，' + statusHtml : '') + '）'
+    : (statusHtml ? ' ' + statusHtml : '');
+  var linesHtml = x.lines.map(function (ln, j) {
+    var isCn = (x.lines.length > 1 && j === x.lines.length - 1);
+    return '<div class="rc-line' + (isCn ? ' rc-cn' : '') + '">' + qcEsc(ln) + '</div>';
+  }).join('');
+  return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + '">'
+    + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span> <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
+    + '<div class="rc-bubble">' + linesHtml + '</div></div>';
+}
+function renderReplyChatHtml(text, boxId, agentNames) {
+  boxId = boxId || 'replyChat';
+  var arr = parseReplyChat(text, agentNames);
+  if (!arr.length) return '<div class="detail-msg-box">' + qcEsc(text || '') + '</div>';
+  var N = arr.length, KEEP = 2;
+  var keepHtml = arr.slice(0, KEEP).map(rcBubbleHtml).join('');
+  var allHtml = arr.map(rcBubbleHtml).join('');
+  var popId = boxId + 'Pop';
+  var h = '<div class="rc-wrap" id="' + boxId + '">'
+    + '<div class="rc-keep">' + keepHtml + '</div>'
+    + (N > KEEP ? '<div class="rc-expand" onclick="rcToggle(\'' + popId + '\')">▼ 展开全部 ' + N + ' 封会话</div>' : '')
+    + '<div class="rc-pop" id="' + popId + '" style="display:none">'
+    + '<div class="rc-pop-body">' + allHtml + '</div>'
+    + '<div class="rc-pop-foot"><span class="rc-pop-close" onclick="rcToggle(\'' + popId + '\')">▲ 收起</span></div>'
+    + '</div></div>';
+  return h;
+}
+function rcToggle(id) { var el = document.getElementById(id); if (!el) return; el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none'; }
