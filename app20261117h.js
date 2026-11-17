@@ -443,6 +443,8 @@ function afterParse(data, mode) {
     else if (matchCol(h, lh, ['是否有退款登记', '退款登记', '是否退款', 'refundreg', 'refundregistration'])) colMap.refundReg = hi;
     else if (matchCol(h, lh, ['是否有问题反馈', '问题反馈', '是否反馈', 'issuefeedback', 'feedback'])) colMap.issueFeedback = hi;
     else if (matchCol(h, lh, ['是否有补件', '是否补件', '补件', '是否补发', '补发', 'replenishment', 'reissue'])) colMap.replenishment = hi;
+    else if (matchCol(h, lh, ['订单金额', '订单总额', '实付金额', '金额', 'orderamount', 'amount', 'ordertotal'])) colMap.orderAmount = hi;
+    else if (matchCol(h, lh, ['FBM订单缺陷率', '订单缺陷率', 'FBM缺陷率', '缺陷率', 'fbmdefectrate', 'orderdefectrate', 'defectrate', 'odr'])) colMap.fbmDefectRate = hi;
   }
   var missing = [];
   if (colMap.account === undefined) missing.push('账号');
@@ -470,7 +472,9 @@ function afterParse(data, mode) {
       processCheck: colMap.processCheck !== undefined ? String(row[colMap.processCheck] || '').trim() : '',
       refundReg: colMap.refundReg !== undefined ? String(row[colMap.refundReg] || '').trim() : '',
       issueFeedback: colMap.issueFeedback !== undefined ? String(row[colMap.issueFeedback] || '').trim() : '',
-      replenishment: colMap.replenishment !== undefined ? String(row[colMap.replenishment] || '').trim() : '' });
+      replenishment: colMap.replenishment !== undefined ? String(row[colMap.replenishment] || '').trim() : '',
+      orderAmount: colMap.orderAmount !== undefined ? String(row[colMap.orderAmount] || '').trim() : '',
+      fbmDefectRate: colMap.fbmDefectRate !== undefined ? String(row[colMap.fbmDefectRate] || '').trim() : '' });
   }
   if (newRawData.length === 0) { showToast('未解析到有效数据行' + (skippedUninspectable ? '（' + skippedUninspectable + ' 条因无法质检在导入时剔除）' : ''), 'error'); return; }
   if (mode === 'append' && rawData.length > 0) {
@@ -516,6 +520,8 @@ function runQualityCheck() {
       result.refundReg = rawData[i].refundReg || '';
       result.issueFeedback = rawData[i].issueFeedback || '';
       result.replenishment = rawData[i].replenishment || '';
+      result.orderAmount = rawData[i].orderAmount || '';
+      result.fbmDefectRate = rawData[i].fbmDefectRate || '';
       result.recordKey = getRecordKey(result);
       var _prevAppeal = previousAppeals[result.recordKey] || previousAppealsStable[getStableRecordKey(result)] || null;
       result.appeal = _prevAppeal ? normalizeAppeal(_prevAppeal) : createEmptyAppeal();
@@ -2552,6 +2558,8 @@ function ovClearAll() {
   refreshAllMultiSel();
   renderDetailTable();
 }
+var ovRankOpen = {};
+function ovToggleRank(key){ ovRankOpen[key] = !ovRankOpen[key]; if (typeof lastOvFiltered !== "undefined") renderDetailOverview(lastOvFiltered); }
 function renderDetailOverview(filtered) {
   var host = document.getElementById('detailOverview');
   if (!host) return;
@@ -2582,7 +2590,9 @@ function renderDetailOverview(filtered) {
     return { assessed: assessed, unassessed: unassessed, avg: assessed ? (letters / assessed).toFixed(1) : '0.0' };
   }
   function rankBox(key, title) {
-    var arr = topN(key, 5);
+    var allArr = topN(key, 9999);
+    var showAll = !!ovRankOpen[key];
+    var arr = showAll ? allArr : allArr.slice(0, 5);
     var picked = getMultiValues(key);
     var top = arr.length ? arr[0].n : 1;
     var rows = '';
@@ -2599,12 +2609,15 @@ function renderDetailOverview(filtered) {
             + '<span class="ov-c2">' + st.assessed + '/' + st.unassessed + '</span>'
             + '<span class="ov-c3">' + st.avg + '</span></div>';
     }
+    if (allArr.length > 5) {
+      rows += '<div class="ov-more ov-rank-more" onclick="ovToggleRank(\'' + key + '\')">' + (showAll ? '▲ 收起' : '▼ 展开全部 ' + allArr.length + ' 人') + '</div>';
+    }
     if (!rows) rows = '<div class="ov-empty">暂无数据</div>';
     var reset = '';
     if (picked.length === 1) reset = '<span class="ov-reset" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(picked[0]) + ')" title="取消该筛选">✕ ' + escHtml(picked[0]) + '</span>';
     else if (picked.length > 1) reset = '<span class="ov-reset" onclick="ovClearKey(\'' + key + '\')" title="取消该筛选">✕ 已筛 ' + picked.length + ' 项</span>';
-    return '<div class="ov-box"><div class="ov-head"><span class="ov-label">' + title + '</span>' + reset + '</div>'
-         + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div>'
+    return '<div class="ov-box"><div class="ov-toprow"><span class="ov-label">' + title + '</span>' + reset
+         + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>'
          + rows + '</div>';
   }
   var assessedN = 0, orderLetters = 0, accSet = {}, agtSet = {}, gradeCnt = {};
@@ -2649,8 +2662,22 @@ function renderDetailOverview(filtered) {
   if (focus.length > OV_FOCUS_MAX) {
     frows += '<div class="ov-more" onclick="ovExpandFocus()">' + (ovFocusOpen ? '收起' : '展开全部 ' + focus.length + ' 条') + '</div>';
   }
-  if (!focus.length) frows += '<div class="ov-frest">本范围内无特别严重的服务问题</div>';
-  else if (showN < OV_FOCUS_MAX) frows += '<div class="ov-frest">其余无特别严重的服务问题</div>';
+  if (!focus.length) frows += '<div class="ov-frest">本范围内无需重点关注的记录</div>';
+  else if (showN < OV_FOCUS_MAX) frows += '<div class="ov-frest">其余记录无需重点关注</div>';
+  // 等级分布堆叠条：各等级占比，点色块可直接筛选该等级
+  var gradeBarHtml = '';
+  (function () {
+    var defs = [['优秀', 'var(--success)'], ['达标', 'var(--primary)'], ['不达标', 'var(--danger)'], ['无法质检', 'var(--gray-400)'], ['参考案例', 'var(--warning)']];
+    var total = filtered.length || 1;
+    var segs = '';
+    for (var gi = 0; gi < defs.length; gi++) {
+      var gc = gradeCnt[defs[gi][0]] || 0;
+      if (!gc) continue;
+      var gp = (gc / total * 100).toFixed(1);
+      segs += '<span class="gb-seg" style="width:' + gp + '%;background:' + defs[gi][1] + '" title="' + defs[gi][0] + ' ' + gc + ' 条（点击筛选）" onclick="ovPickGrade(' + htmlAttrJsStr(defs[gi][0]) + ')"></span>';
+    }
+    gradeBarHtml = '<div class="ov-gradebar">' + segs + '</div>';
+  })();
   var dirty = getMultiValues('agent').length || getMultiValues('account').length || curGrade.length || curAs || (bulkTerms && bulkTerms.length);
   host.innerHTML =
     rankBox('agent', '客服 · 前 5') +
@@ -2659,13 +2686,38 @@ function renderDetailOverview(filtered) {
       + (dirty ? '<span class="ov-reset" onclick="ovClearAll()" title="清空概览条上的全部联动筛选">✕ 重置全部</span>' : '<span class="ov-cnt">' + focus.length + '</span>')
       + '</div>' + frows + '</div>' +
     '<div class="ov-metrics">' +
-      '<div class="ov-metric"><div class="ov-label">质检总数</div><div class="ov-big">' + filtered.length + '</div></div>' +
-      '<div class="ov-metric ov-clk' + (curAs ? ' on' : '') + '" title="点击只看参与考核 / 不参与考核的单"><div class="ov-label">考核 / 不考核</div><div class="ov-big"><span onclick="ovPickAssessed(\'是\')" style="cursor:pointer;">' + assessedN + '</span><small> / <span onclick="ovPickAssessed(\'否\')" style="cursor:pointer;">' + (filtered.length - assessedN) + '</span></small></div></div>' +
-      '<div class="ov-metric" title="全部客服去信总数 ÷ 参与考核的订单数：一单平均要回几封"><div class="ov-label">平均去信数</div><div class="ov-big">' + avgPerOrder + '<small> 封/单</small></div></div>' +
-      '<div class="ov-metric"><div class="ov-label">等级显示情况</div><div class="ov-grade">' + gradeHtml + '</div></div>' +
+      '<div class="ov-metric m-purple"><div class="ov-label">质检总数</div><div class="ov-big">' + filtered.length + '</div><div class="ov-sub">条质检记录</div></div>' +
+      '<div class="ov-metric m-blue ov-clk' + (curAs ? ' on' : '') + '" title="点击只看参与考核 / 不参与考核的单"><div class="ov-label">考核 / 不考核</div><div class="ov-big"><span onclick="ovPickAssessed(\'是\')" style="cursor:pointer;">' + assessedN + '</span><small> / <span onclick="ovPickAssessed(\'否\')" style="cursor:pointer;">' + (filtered.length - assessedN) + '</span></small></div><div class="ov-asbar"><span style="width:' + (filtered.length ? (assessedN / filtered.length * 100).toFixed(0) : 0) + '%"></span></div></div>' +
+      '<div class="ov-metric m-amber" title="全部客服去信总数 ÷ 参与考核的订单数：一单平均要回几封"><div class="ov-label">平均去信数</div><div class="ov-big">' + avgPerOrder + '<small> 封/单</small></div><div class="ov-sub">' + orderLetters + ' 封 / ' + assessedN + ' 考核单</div></div>' +
+      '<div class="ov-metric m-gray"><div class="ov-label">等级分布</div>' + gradeBarHtml + '<div class="ov-grade">' + gradeHtml + '</div></div>' +
     '</div>';
 }
 
+// 金额列：形如「外币值 / 人民币值」，用 / 分隔；取"不带货币符号"的那段作为人民币金额
+function qcMoney(account, amount) {
+  if (amount === undefined || amount === '' || amount === null) return '-';
+  var s = String(amount).trim();
+  // 外币标识：货币符号 或 外币文字代码/名称（带这些的一侧是外币，跳过）
+  var CUR = /[¥￥$€£]|\b(?:USD|EUR|GBP|JPY|AUD|CAD)\b|美元|欧元|英镑|日元|澳元|加元/i;
+  // 按 / 切成多段，逐段找"含数字但不带外币标识"的那一段 = 人民币
+  var parts = s.split('/');
+  for (var i = 0; i < parts.length; i++) {
+    var seg = parts[i].trim();
+    if (!seg) continue;
+    if (CUR.test(seg)) continue;           // 外币段，跳过
+    var m = seg.match(/(\d[\d,]*(?:\.\d+)?)/);
+    if (m) return '¥' + Number(m[1].replace(/,/g, '')).toFixed(2);
+  }
+  // 兜底1：整格是纯数字（无 / 分隔）→ 视为人民币
+  if (/^-?\d[\d,]*(?:\.\d+)?$/.test(s)) {
+    var neg = s.charAt(0) === '-';
+    return (neg ? '-' : '') + '¥' + Number(s.replace(/^-/, '').replace(/,/g, '')).toFixed(2);
+  }
+  // 兜底2：无 / 且带符号时，取最后一个不带符号的数字
+  var nums = s.match(/\d[\d,]*(?:\.\d+)?/g);
+  if (nums && nums.length) return '¥' + Number(nums[nums.length - 1].replace(/,/g, '')).toFixed(2);
+  return s;
+}
 function renderDetailTable() {
   var fG = document.getElementById('detailFilterGroup').value;
   var fA = getMultiValues('account');
@@ -2688,7 +2740,7 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  var html = '<thead><tr><th>序号</th><th>组别</th><th>账号</th><th>客服</th><th>平台单号</th><th>日期</th>';
+  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center">FBM订单缺陷率</th><th>客服</th><th>平台单号</th><th class="cell-center">订单金额</th>';
   for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
   html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
        + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
@@ -2696,11 +2748,11 @@ function renderDetailTable() {
        + '<th title="占比 ≥ 50% 参与考核，只有「是」的单计入数据看板">是否考核</th></tr></thead><tbody>';
   var sendStat = buildSendStat(); // 只用于单元格 tooltip（该客服跨单累计）
   if (filtered.length === 0) {
-    html += '<tr><td colspan="' + (6 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
+    html += '<tr><td colspan="' + (8 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
-      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td><a class="acct-link" href="https://xianxian-ui.github.io/amz-dashboard/?q=' + encodeURIComponent(r.account) + '#sum" target="_blank" rel="noopener" title="在 AMZ 汇总表中搜索该账号">' + escHtml(r.account) + '</a></td><td>' + escHtml(r.agent) + '</td><td>' + escHtml(r.order) + '</td><td>' + escHtml(r.date) + '</td>';
+      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(r.agent) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td><td class="cell-center">' + qcMoney(r.account, r.orderAmount) + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
         if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
@@ -2823,8 +2875,10 @@ function showDetail(index) {
   var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
   html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">FBM订单缺陷率</td><td>' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(r.agent) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (r.orderAmount !== undefined && r.orderAmount !== '' ? escHtml(r.orderAmount) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
   var _dp = sessionParticipation(r);
   html += '<tr><td style="font-weight:600;">客服去信</td><td>该客服 ' + _dp.mine + ' 封 / 本单客服合计 ' + _dp.total + ' 封 · 占比 ' + _dp.pct.toFixed(1) + '%'
@@ -4493,11 +4547,11 @@ function clearAllData() { if (!requireAdmin('清空数据')) return;
 // ============================================================
 function exportDetail(type) {
   if (results.length === 0) { showToast('无数据可导出', 'error'); return; }
-  var headers = ['序号', '组别', '账号', '客服', '平台单号', '日期'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
+  var headers = ['序号', '组别', '账号', 'FBM订单缺陷率', '客服', '平台单号', '订单金额', '日期'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var row = [i + 1, getGroupByAgent(r.agent), r.account, r.agent, r.order, r.date];
+    var row = [i + 1, getGroupByAgent(r.agent), r.account, r.fbmDefectRate || '', r.agent, r.order, r.orderAmount || '', r.date];
     for (var d = 0; d < DIM_NAMES.length; d++) { var s = r.scores[DIM_NAMES[d]]; row.push(s === -1 ? '-' : s); }
     var appeal = normalizeAppeal(r.appeal);
     row.push(r.processCheck || '', r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
