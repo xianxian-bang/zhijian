@@ -283,6 +283,7 @@ table.ql-table tr:hover td { background: var(--gray-50); }
   <div id="detailContent" style="display:none;">
     <div class="filter-bar">
       <div class="filter-item"><label>组别：</label><select id="detailFilterGroup" onchange="onDetailFilterChange()"><option value="">全部</option></select></div>
+      <div class="filter-item"><label>批量粘贴：</label><div class="bulk-box"><textarea id="detailBulk" placeholder="每行一个单号/账号，或用逗号分隔" oninput="applyBulkFilter()"></textarea><button class="btn btn-outline btn-sm" onclick="applyBulkFilter()">筛选</button><button class="btn btn-outline btn-sm" onclick="clearBulkFilter()">清空</button><span class="bulk-hint" id="bulkHint"></span></div></div>
       <div class="filter-item"><label>账号：</label><select id="detailFilterAccount" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_account"></span></div>
       <div class="filter-item"><label>客服：</label><select id="detailFilterAgent" style="display:none;"><option value="">全部</option></select><span class="msel" id="msel_agent"></span></div>
       <div class="filter-item"><label>等级：</label><select id="detailFilterGrade" style="display:none;"><option value="">全部</option><option value="优秀">优秀</option><option value="达标">达标</option><option value="不达标">不达标</option><option value="无法质检">无法质检</option><option value="参考案例">参考案例</option></select><span class="msel" id="msel_grade"></span></div>
@@ -290,7 +291,6 @@ table.ql-table tr:hover td { background: var(--gray-50); }
       <div class="filter-item" style="display:none;"><label>维度：</label><select id="detailFilterDim" onchange="renderDetailTable()"><option value="">全部</option></select></div>
       <div class="filter-item"><label>申诉状态：</label><select id="detailFilterAppeal" onchange="renderDetailTable()"><option value="">全部</option><option value="无申诉">无申诉</option><option value="待审核">待审核</option><option value="部分通过">部分通过</option><option value="申诉通过">申诉通过</option><option value="申诉被拒">申诉被拒</option></select></div>
       <div class="filter-item"><label>搜索：</label><input type="text" class="search-box" id="detailSearch" placeholder="搜索订单号/客服..." oninput="renderDetailTable()"></div>
-      <div class="filter-item"><label>批量粘贴：</label><div class="bulk-box"><textarea id="detailBulk" placeholder="每行一个单号/账号，或用逗号分隔" oninput="applyBulkFilter()"></textarea><button class="btn btn-outline btn-sm" onclick="applyBulkFilter()">筛选</button><button class="btn btn-outline btn-sm" onclick="clearBulkFilter()">清空</button><span class="bulk-hint" id="bulkHint"></span></div></div>
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-outline btn-sm" onclick="exportDetail('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDetail('excel')">导出Excel</button><button class="btn btn-danger btn-sm admin-only" onclick="clearAllData()">清空数据</button></div>
     </div>
     <div class="card"><div class="table-wrap" style="max-height:600px;overflow-y:auto;"><table class="data-table" id="detailTable"><thead></thead><tbody></tbody></table></div></div>
