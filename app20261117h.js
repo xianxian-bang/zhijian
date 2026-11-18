@@ -5925,8 +5925,10 @@ function qcApplyAuth() {
   if (role === 'admin') { try { qcLogicUnlock(); } catch (e) {} } else { try { qcLogicLock(); } catch (e) {} }
   var pwdBtn = document.getElementById('pwdBtn');
   var outBtn = document.getElementById('logoutBtn');
+  var aqBtn = document.getElementById('adminQuickLoginBtn');
   if (pwdBtn) pwdBtn.style.display = AUTH ? '' : 'none';
   if (outBtn) outBtn.style.display = AUTH ? '' : 'none';
+  if (aqBtn) aqBtn.style.display = AUTH ? '' : 'none';
   qcUpdateUserChip();
   try { updateAdminBadge(); } catch (e) {}
 }
@@ -5950,6 +5952,42 @@ function qcReRenderAuthed() {
   var logicTab = document.getElementById('tab-qclogic');
   if (logicTab && logicTab.classList.contains('active') && !qcCan('logic.view')) switchTabByName('detail');
 }
+// ---------- 管理员快捷登录入口（2026-11-18）：从「修改密码」左侧一键切到管理员 ----------
+function qcAdminQuickLogin() {
+  var m = document.getElementById('adminLoginModal');
+  if (m) m.classList.add('show');
+  var e = document.getElementById('adminLoginError'); if (e) e.textContent = '';
+  var p = document.getElementById('adminLoginPwd'); if (p) { p.value = ''; setTimeout(function(){ p.focus(); }, 120); }
+}
+function qcCloseAdminLogin() {
+  var m = document.getElementById('adminLoginModal'); if (m) m.classList.remove('show');
+}
+function qcAdminLoginSubmit() {
+  var p = document.getElementById('adminLoginPwd');
+  var e = document.getElementById('adminLoginError');
+  var pwd = String((p && p.value) || '');
+  if (!pwd) { if (e) e.textContent = '请输入管理员密码'; return; }
+  // 管理员入口专用密码（2026-11-18 起）：yafex2026，与账号表普通密码解耦
+  if (pwd !== 'yafex2026') { if (e) e.textContent = '管理员密码不正确'; return; }
+  // 取一个管理员账号作为会话身份；没有则用内置管理员名
+  var admins = [];
+  for (var i = 0; i < (typeof USERS !== 'undefined' && USERS ? USERS.length : 0); i++) {
+    var u0 = USERS[i];
+    if (u0 && (u0.role === 'admin' || qcRoleOfUser(u0) === 'admin')) admins.push(u0);
+  }
+  var hit = admins.length ? admins[0] : { name: '管理员', role: 'admin' };
+  qcCloseAdminLogin();
+  // 以管理员身份建立会话，并跳过强制改密（管理员入口登录后立即拥有全部权限）
+  if (typeof AUTH === 'undefined') { /* noop */ }
+  AUTH = { name: hit.name, role: 'admin', group: '', ts: Date.now(), mustChangePwd: false };
+  qcSessionWrite(AUTH);
+  qcApplyAuth();
+  qcHideLogin();
+  qcReRenderAuthed();
+  showToast('管理员已登录：' + hit.name + '，全部权限已开启', 'success');
+  try { qcRefreshAppealBadges(); } catch (ex) {}
+}
+
 // 兼容旧入口：右上角不再提供密钥登录
 function adminLogin() { showToast('请使用本人的姓名 + 密码登录', 'info'); if (!AUTH) qcShowLogin(); }
 function adminLogout() { qcLogout(); }
