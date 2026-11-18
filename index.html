@@ -521,14 +521,286 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
 .ov-pop-foot .ov-pop-close { padding:2px 10px; border:1px solid var(--gray-200); border-radius:12px; background:var(--gray-50); }
 .ov-pop-foot .ov-pop-close:hover { background:var(--primary-bg); border-color:var(--primary); }
 </style>
+<style id="leader-review-css">
+/* ===== 组长 · 申诉复核打分（2026-11-18） ===== */
+.org-leader-badge { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:10px; background:#eef2ff; color:#4f46e5; font-size:11px; font-weight:600; vertical-align:middle; }
+.org-leader-badge.org-leader-empty { background:var(--gray-100); color:var(--gray-500); font-weight:500; }
+.org-leader-row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 10px; margin-bottom:8px; background:#f5f7ff; border:1px dashed #c7d2fe; border-radius:6px; }
+.org-leader-label { font-size:12px; color:#4338ca; }
+.org-leader-select { border:1px solid #c7d2fe; border-radius:6px; padding:3px 6px; font-size:12px; background:#fff; color:var(--gray-700); max-width:150px; }
+.org-agent-item.is-leader { background:#eef2ff; }
+.org-leader-chip { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px; background:#4f46e5; color:#fff; font-size:10px; font-weight:700; letter-spacing:.3px; }
+.org-reviewer-bar { display:flex; align-items:center; gap:10px; margin:0 0 14px; padding:10px 14px; background:#fff; border:1px solid var(--gray-200); border-left:3px solid #4f46e5; border-radius:6px; font-size:13px; color:var(--gray-600); flex-wrap:wrap; }
+.org-reviewer-bar b { color:var(--gray-800); }
+.org-reviewer-cap { font-size:12px; color:var(--gray-500); }
+.org-reviewer-group { font-size:11px; color:#4f46e5; background:#eef2ff; border-radius:10px; padding:1px 8px; }
+.org-reviewer-none { color:var(--danger); }
+.org-reviewer-tip { font-size:12px; color:var(--gray-400); }
+.appeal-module-score { padding:10px 12px; }
+.appeal-module-head { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.appeal-orig { margin-left:auto; font-size:12px; color:var(--gray-500); }
+.appeal-orig b { color:var(--gray-800); font-size:13px; }
+.appeal-score-row { display:flex; align-items:center; gap:8px; margin:8px 0 0 22px; padding:8px 10px; background:#f8fafc; border:1px solid var(--gray-200); border-radius:6px; flex-wrap:wrap; font-size:12px; color:var(--gray-600); }
+.appeal-score-cap { color:#4f46e5; font-weight:600; }
+.appeal-score-input { width:76px; padding:4px 6px; border:1px solid #c7d2fe; border-radius:5px; font-size:14px; font-weight:700; color:var(--gray-800); text-align:center; }
+.appeal-score-input:focus { outline:none; border-color:#4f46e5; box-shadow:0 0 0 2px #e0e7ff; }
+.appeal-score-total { color:var(--gray-500); }
+.appeal-score-grade { padding:1px 8px; border-radius:10px; font-size:11px; font-weight:600; background:var(--gray-100); color:var(--gray-600); }
+.appeal-score-grade.is-pass { background:var(--success-bg); color:var(--success); }
+.appeal-score-grade.is-excellent { background:#eef2ff; color:#4f46e5; }
+.appeal-score-grade.is-fail { background:var(--danger-bg); color:var(--danger); }
+.appeal-recalc { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; padding:10px 12px; background:#f8fafc; border:1px solid var(--gray-200); border-radius:6px; font-size:13px; }
+.recalc-label { font-size:12px; color:var(--gray-500); }
+.recalc-old { color: var(--gray-500); }
+.recalc-old s { text-decoration: line-through; margin-right: 2px; }
+.recalc-arrow { color:var(--gray-400); }
+.recalc-new { font-size:16px; font-weight:800; color:#4f46e5; }
+.recalc-grade { font-size:12px; padding:1px 8px; border-radius:10px; background:var(--success-bg); color:var(--success); font-weight:600; margin-left:2px; }
+.recalc-grade.is-fail { background:var(--danger-bg); color:var(--danger); }
+.recalc-delta { font-size:12px; color:var(--success); }
+.recalc-delta.is-idle { color:var(--gray-400); }
+.appeal-reviewer-line { margin:-4px 0 10px; font-size:12px; color:var(--gray-600); }
+/* ===== 账号登录 / 人员权限（2026-11-18 · 海蓝/青配色，无紫色） ===== */
+body.qc-locked { overflow: hidden; }
+.login-shell { display: none; position: fixed; inset: 0; z-index: 3000; flex-direction: column;
+  background:
+    radial-gradient(880px 520px at 6% -12%, #d6f0f5 0%, rgba(214,240,245,0) 62%),
+    radial-gradient(720px 430px at 92% 4%, #dcecff 0%, rgba(220,236,255,0) 64%),
+    linear-gradient(180deg, #f2faff 0%, #f9fdff 46%, #f0f6fb 100%); }
+.login-shell.show { display: flex; }
+.login-topbar { height: 56px; flex: 0 0 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 26px; }
+.login-brand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; color: #0e6ba8; letter-spacing: .2px; }
+.login-brand-logo { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #0284c7, #0891b2); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 800; }
+.login-topbar-hint { font-size: 12px; color: #9aa3b2; }
+.login-main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 20px 20px 60px; overflow: auto; }
+.login-card { width: 396px; max-width: 100%; background: #fff; border-radius: 18px; padding: 30px 30px 22px; border: 1px solid #e6eef4;
+  box-shadow: 0 18px 50px rgba(2,132,199,.13), 0 2px 8px rgba(17,24,39,.05); }
+.login-logo { width: 46px; height: 46px; border-radius: 13px; background: linear-gradient(135deg, #0284c7, #0891b2); color: #fff; font-size: 23px; font-weight: 800; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+.login-card h2 { font-size: 20px; font-weight: 700; color: #1f2937; }
+.login-sub { margin: 7px 0 20px; font-size: 13px; color: #6b7280; line-height: 1.65; }
+.login-field { margin-bottom: 14px; }
+.login-field label { display: block; font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+.login-field input { width: 100%; height: 42px; padding: 0 12px; border: 1.5px solid #e5e7eb; border-radius: 9px; font-size: 14px; color: #111827; background: #fff; outline: none; transition: all .15s; font-family: inherit; }
+.login-field input:focus { border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,.2); }
+.login-field input::placeholder { color: #b6bcc8; }
+/* 登录页明示初始密码 */
+.login-initpwd { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 2px 0 14px; padding: 10px 13px;
+  border: 1px solid #bae6fd; border-left: 3px solid #0284c7; border-radius: 9px; background: #f0f9ff; }
+.login-initpwd .lip-label { font-size: 12.5px; font-weight: 600; color: #075985; white-space: nowrap; }
+.login-initpwd .lip-val { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 18px; font-weight: 800; letter-spacing: 1.5px; color: #0369a1; background: #fff; border: 1px solid #bae6fd; border-radius: 6px; padding: 1px 12px; }
+.login-initpwd .lip-note { flex: 1 1 100%; font-size: 11.5px; color: #64748b; line-height: 1.55; }
+.login-initpwd .lip-note b { color: #0369a1; font-weight: 700; }
+.login-error { min-height:16px; font-size:12.5px; color: #dc2626; line-height: 1.45; margin-bottom: 4px; overflow: hidden; }
+.login-btn { width: 100%; height: 44px; border: none; border-radius: 9px; background: linear-gradient(135deg, #1d4ed8, #0284c7); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; font-family: inherit; transition: filter .15s; }
+.login-btn:hover { filter: brightness(1.06); }
+.login-btn:disabled { opacity: .62; cursor: not-allowed; }
+.login-links { margin-top: 16px; text-align: center; font-size: 12.5px; color: #6b7280; }
+.login-links b { color: #0284c7; font-weight: 600; cursor: default; }
+.login-foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid #f1f2f6; font-size: 11.5px; color: #9ca3af; text-align: center; line-height: 1.7; }
+.login-sync { font-size: 11.5px; color: #9ca3af; text-align: center; margin-top: 8px; min-height: 15px; }
+
+/* 顶栏登录身份 */
+.user-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 12px; border-radius: 999px; background: #e0f2fe; font-size: 12.5px; font-weight: 600; color: #0e6ba8; white-space: nowrap; }
+.user-chip .uc-role { background: #fff; color: #0284c7; border-radius: 999px; padding: 1px 7px; font-size: 11px; font-weight: 600; }
+
+/* 权限可见性 */
+body:not(.admin-mode):not(.leader-mode) .case-edit-only { display: none !important; }
+body:not(.admin-mode) .admin-only { display: none !important; }
+/* 无编辑权限时整列「操作」收起（含表头），让内容列拿到更多宽度 */
+body:not(.admin-mode):not(.leader-mode) #caseLibraryWrap th:last-child,
+body:not(.admin-mode):not(.leader-mode) #caseLibraryWrap td:last-child,
+body:not(.admin-mode) #knowledgeLibraryWrap th:last-child,
+body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !important; }
+
+/* 质检标准只读态 */
+.std-ro-banner { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 9px 14px; border-radius: 8px; background: var(--info-bg); border: 1px solid #a5e3ef; color: #0e7490; font-size: 12.5px; }
+.std-ro-banner b { color: #155e75; }
+.std-ro-text { display: block; padding: 4px 6px; font-size: 13px; line-height: 1.65; color: var(--gray-700); white-space: pre-wrap; word-break: break-word; }
+.std-ro-score { display: inline-block; min-width: 34px; text-align: center; font-weight: 700; color: var(--gray-800); }
+
+/* 人员管理 */
+.user-role { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.ur-admin { background: #e0f2fe; color: #0369a1; }
+.ur-leader { background: #fff7ed; color: #c2410c; }
+.ur-member { background: var(--gray-100); color: var(--gray-600); }
+.pwd-val { display: inline-block; min-width: 64px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; letter-spacing: .5px; color: var(--gray-700); }
+.user-flag { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: var(--warning-bg); color: #b45309; }
+.user-flag.ok { background: var(--success-bg); color: #15803d; }
+.user-flag.off { background: var(--gray-100); color: var(--gray-500); }
+.user-table td { vertical-align: middle; }
+.user-table .ops { white-space: nowrap; }
+.user-table .ops .btn-link { padding: 2px 5px; }
+.perm-matrix { width: 100%; border-collapse: collapse; font-size: 13px; }
+.perm-matrix th, .perm-matrix td { border-bottom: 1px solid var(--gray-200); padding: 9px 10px; text-align: left; }
+.perm-matrix th { background: var(--gray-50); font-size: 12px; color: var(--gray-600); font-weight: 600; }
+.perm-matrix .yes { color: var(--success); font-weight: 700; }
+.perm-matrix .no { color: var(--gray-400); }
+.perm-matrix .ro { color: #b45309; font-weight: 600; }
+.perm-tip { margin-top: 12px; font-size: 12px; color: var(--gray-500); line-height: 1.8; }
+
+/* 登录后的身份提示（组织架构页） */
+.org-reviewer-noauth { color: var(--danger); }
+
+/* 改密 / 新增人员弹窗底部按钮 */
+#pwdModal .modal-footer, #userModal .modal-footer { padding: 2px 24px 20px; display: flex; justify-content: flex-end; gap: 8px; }
+#pwdModal .modal-body, #userModal .modal-body { padding-bottom: 8px; }
+
+
+/* ===== 申诉状态三色角标 + 申诉消息中心（2026-11-18） =====
+   待审核=红 / 申诉通过=绿 / 申诉被拒=黄
+   数字按登录账号 + 客服组织架构分范围统计 */
+.appeal-badge-bar { display: inline-flex; align-items: center; gap: 6px; margin-right: 2px; }
+.ab-scope { font-size: 11px; color: var(--gray-400); margin-right: 2px; white-space: nowrap; }
+.ab-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--gray-200); background: #fff;
+  font-size: 12.5px; font-weight: 600; color: var(--gray-500);
+  transition: all .15s; user-select: none; white-space: nowrap; line-height: 1.25;
+}
+.ab-chip:hover { box-shadow: var(--shadow-sm); transform: translateY(-1px); }
+.ab-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray-300); flex: none; }
+.ab-num { font-size: 13px; font-weight: 800; min-width: 14px; text-align: center; display: none; }
+.ab-chip.has-count .ab-num { display: inline-flex; align-items: center; justify-content: center; }
+.ab-chip.has-count { box-shadow: inset 0 0 0 1px currentColor; }
+.ab-chip.ab-pending.has-count { background: #fef2f2; border-color: #fecaca; color: #dc2626; }
+.ab-chip.ab-pending.has-count .ab-dot { background: #dc2626; }
+.ab-chip.ab-passed.has-count { background: #f0fdf4; border-color: #bbf7d0; color: #16a34a; }
+.ab-chip.ab-passed.has-count .ab-dot { background: #16a34a; }
+.ab-chip.ab-rejected.has-count { background: #fffbeb; border-color: #fde68a; color: #d97706; }
+.ab-chip.ab-rejected.has-count .ab-dot { background: #f59e0b; }
+@media (max-width: 1000px) { .ab-scope { display: none; } }
+
+/* 消息中心弹窗 */
+#appealInboxModal .modal { max-width: 760px; }
+#appealInboxModal .modal-footer { padding: 2px 24px 18px; display: flex; justify-content: flex-end; gap: 8px; }
+.ai-tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+.ai-tab {
+  padding: 6px 14px; border-radius: 8px; border: 1px solid var(--gray-200);
+  background: #fff; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--gray-600);
+  transition: all .15s;
+}
+.ai-tab:hover { background: var(--gray-50); }
+.ai-tab.active { color: #fff; }
+.ai-tab.t-pending.active { background: #dc2626; border-color: #dc2626; }
+.ai-tab.t-passed.active { background: #16a34a; border-color: #16a34a; }
+.ai-tab.t-rejected.active { background: #d97706; border-color: #d97706; }
+.ai-tab .ai-tab-num { display: inline-block; margin-left: 6px; font-weight: 800; opacity: .9; }
+.ai-list { display: flex; flex-direction: column; gap: 10px; }
+.ai-item {
+  border: 1px solid var(--gray-200); border-radius: 10px; padding: 12px 14px;
+  background: #fff; display: flex; gap: 12px; align-items: flex-start;
+}
+.ai-item:hover { background: var(--gray-50); }
+.ai-main { flex: 1; min-width: 0; }
+.ai-line1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 5px; }
+.ai-name { font-weight: 700; color: var(--gray-800); font-size: 14px; }
+.ai-order { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--gray-700); }
+.ai-meta { font-size: 12px; color: var(--gray-500); }
+.ai-reason { font-size: 12.5px; color: var(--gray-600); margin-top: 5px; line-height: 1.65; word-break: break-word; }
+.ai-reason b { color: var(--gray-700); }
+.ai-ops { flex: none; display: flex; align-items: center; }
+.ai-unread-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #dc2626; margin-left: 5px; vertical-align: middle; }
+.ai-empty { text-align: center; padding: 44px 0; color: var(--gray-400); font-size: 13px; }
+.ai-empty .ai-empty-icon { font-size: 30px; display: block; margin-bottom: 8px; opacity: .6; }
+.ai-foot-note { font-size: 12px; color: var(--gray-400); margin-top: 14px; line-height: 1.8; border-top: 1px dashed var(--gray-200); padding-top: 10px; }
+
+</style>
 </head>
 <body>
+<!-- 申诉消息中心弹窗 -->
+<div class="modal-overlay" id="appealInboxModal"><div class="modal" style="max-width:760px;">
+  <div class="modal-header">
+    <h3>申诉消息中心</h3>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <span id="appealInboxScope" style="font-size:12px;color:var(--gray-500);"></span>
+      <button class="modal-close" onclick="qcCloseAppealInbox()">&times;</button>
+    </div>
+  </div>
+  <div class="modal-body" style="padding-top:16px;">
+    <div class="ai-tabs" id="appealInboxTabs"></div>
+    <div class="ai-list" id="appealInboxList"></div>
+    <div class="ai-foot-note">
+      <b>待审核（红）</b>：实时待处理数量，审核后自动减少；组长看本组、客服看本人、管理员看全部。<br>
+      <b>申诉通过（绿）/ 申诉被拒（黄）</b>：结果通知，只统计尚未查看的结果；打开对应分类即视为已读，彩色数字随之清除。<br>
+      统计范围按登录账号 + 客服组织架构自动确定，每条记录可点「查看详情」跳转到该单申诉。
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button class="btn btn-outline btn-sm" onclick="qcCloseAppealInbox()">关闭</button>
+  </div>
+</div></div>
+<div class="login-shell" id="loginShell">
+  <div class="login-topbar">
+    <div class="login-brand"><div class="login-brand-logo">Q</div><span>邮件质检看板</span></div>
+    <span class="login-topbar-hint">内部系统 · 请使用本人姓名登录</span>
+  </div>
+  <div class="login-main">
+    <div class="login-card">
+      <div class="login-logo">Q</div>
+      <h2>邮件质检看板</h2>
+      <p class="login-sub">用姓名 + 密码登录，登录后只看到你被授权的模块。</p>
+      <div class="login-field">
+        <label for="loginName">姓名</label>
+        <input type="text" id="loginName" placeholder="与客服组织架构一致的中文姓名" autocomplete="username" onkeydown="if(event.key==='Enter')document.getElementById('loginPwd').focus()">
+      </div>
+      <div class="login-field">
+        <label for="loginPwd">密码</label>
+        <input type="password" id="loginPwd" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key==='Enter')qcLoginSubmit()">
+      </div>
+      <div class="login-initpwd">
+        <span class="lip-label">统一初始密码</span><b class="lip-val">123</b>
+        <span class="lip-note">「客服组织架构」里的<b>所有姓名（含组长、带编号的姓名）都能登录</b>（<span id="loginUserCount">账号同步中</span>）；首次登录后会要求改成自己的密码。</span>
+      </div>
+      <div class="login-error" id="loginError"></div>
+      <button class="login-btn" id="loginBtn" onclick="qcLoginSubmit()">登录</button>
+      <div class="login-links"><span>没有账号 / 需要权限？</span><b>联系管理员开通</b></div>
+      <div class="login-sync" id="loginSync"></div>
+      <div class="login-foot">忘记密码请联系管理员重置</div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="pwdModal"><div class="modal modal-sm" style="max-width:420px;">
+  <div class="modal-header"><h3 id="pwdModalTitle">修改密码</h3><button class="modal-close" id="pwdModalClose" onclick="qcClosePwdModal()">&times;</button></div>
+  <div class="modal-body">
+    <div id="pwdForceHint" style="display:none;margin-bottom:12px;padding:10px 12px;border-radius:8px;background:var(--warning-bg);border:1px solid #fdba74;color:#b45309;font-size:12.5px;line-height:1.6;">首次登录需要修改初始密码（初始密码：<b>123</b>）：新密码设置成功后才会进入看板。</div>
+    <div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">原密码</label><input type="password" id="pwdOld" class="search-box" style="width:100%;height:38px;padding:0 10px;" autocomplete="current-password"></div>
+    <div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">新密码</label><input type="password" id="pwdNew" class="search-box" style="width:100%;height:38px;padding:0 10px;" autocomplete="new-password"></div>
+    <div style="margin-bottom:8px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">确认新密码</label><input type="password" id="pwdNew2" class="search-box" style="width:100%;height:38px;padding:0 10px;" autocomplete="new-password"></div>
+    <div id="pwdError" style="min-height:18px;font-size:12.5px;color:var(--danger);"></div>
+  </div>
+  <div class="modal-footer"><button class="btn btn-outline btn-sm" id="pwdCancelBtn" onclick="qcClosePwdModal()">取消</button><button class="btn btn-primary btn-sm" onclick="qcSubmitPwd()">保存新密码</button></div>
+</div></div>
+<div class="modal-overlay" id="userModal"><div class="modal modal-sm" style="max-width:430px;">
+  <div class="modal-header"><h3 id="userModalTitle">新增人员</h3><button class="modal-close" onclick="qcCloseUserModal()">&times;</button></div>
+  <div class="modal-body">
+    <div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">姓名（同时是登录账号）</label><input type="text" id="userName" class="search-box" style="width:100%;height:38px;padding:0 10px;" placeholder="请输入中文姓名，例如：戴海燕"></div>
+    <div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">角色</label><select id="userRole" class="search-box" style="width:100%;height:38px;padding:0 10px;"><option value="member">客服（只读）</option><option value="admin">管理员（全部权限）</option></select></div>
+    <div style="margin-bottom:6px;"><label style="display:block;font-size:13px;font-weight:600;color:var(--gray-600);margin-bottom:6px;">初始密码</label><input type="text" id="userPwd" class="search-box" style="width:100%;height:38px;padding:0 10px;" value="123"></div>
+    <div style="font-size:12px;color:var(--gray-500);line-height:1.7;">首次登录会用这个密码，登录后强制修改。组长权限不用在这里设置：在「客服组织架构」里被设为组长的人，登录后自动获得本组申诉复核权。</div>
+    <div id="userError" style="min-height:18px;font-size:12.5px;color:var(--danger);margin-top:6px;"></div>
+  </div>
+  <div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="qcCloseUserModal()">取消</button><button class="btn btn-primary btn-sm" onclick="qcSubmitUser()">保存</button></div>
+</div></div>
 <div class="header">
   <div class="header-left"><div class="header-logo">Q</div><h1>邮件质检看板</h1></div>
   <div class="header-actions">
     <div class="header-info" id="dataInfo" style="display:none;">共 <span id="dataCount">0</span> 条数据</div>
     <div class="header-info" id="cloudStatus" style="font-size:12px;color:var(--gray-500);">云端连接中</div>
-    <span class="admin-badge" id="adminBadge" style="display:none;">🔒 管理模式</span><button class="btn btn-outline btn-sm" id="adminLoginBtn" onclick="adminLogin()">管理员登录</button><button class="btn btn-outline btn-sm" id="adminLogoutBtn" style="display:none;" onclick="adminLogout()">退出管理</button>
+    <span class="admin-badge" id="adminBadge" style="display:none;">🔒 管理模式</span><span class="user-chip" id="userChip" style="display:none;"></span>
+    <!-- 申诉状态三色角标（顶栏） -->
+<div class="appeal-badge-bar" id="appealBadgeBar" style="display:none;">
+  <span class="ab-scope" id="appealBadgeScope">我的申诉</span>
+  <div class="ab-chip ab-pending" id="abPending" onclick="qcOpenAppealInbox('pending')" title="待审核：待处理的申诉">
+    <span class="ab-dot"></span><span>待审核</span><span class="ab-num" id="abNumPending">0</span>
+  </div>
+  <div class="ab-chip ab-passed" id="abPassed" onclick="qcOpenAppealInbox('passed')" title="申诉通过：点击查看结果，看过数字即清除">
+    <span class="ab-dot"></span><span>申诉通过</span><span class="ab-num" id="abNumPassed">0</span>
+  </div>
+  <div class="ab-chip ab-rejected" id="abRejected" onclick="qcOpenAppealInbox('rejected')" title="申诉被拒：点击查看结果，看过数字即清除">
+    <span class="ab-dot"></span><span>申诉被拒</span><span class="ab-num" id="abNumRejected">0</span>
+  </div>
+</div><button class="btn btn-outline btn-sm" id="pwdBtn" style="display:none;" onclick="qcOpenPwdModal(false)">修改密码</button><button class="btn btn-outline btn-sm" id="logoutBtn" style="display:none;" onclick="qcLogout()">退出登录</button>
     <button class="btn btn-outline btn-sm" onclick="downloadTemplate()">下载模板</button>
     <button class="btn btn-outline btn-sm" onclick="exportAllData()">导出数据</button>
     <div class="header-info" id="urlDataStatus" style="display:none;font-size:12px;color:var(--success);">数据已保存到完整网址（请复制地址栏网址）</div>
@@ -543,6 +815,7 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
   <div class="tab-item admin-only" onclick="switchTab('qclogic', this)"><span>质检逻辑</span><span class="badge" style="background:var(--gray-400);">🔒</span></div>
   <div class="tab-item" onclick="switchTab('knowledge', this)"><span>质检知识库</span><span class="badge" id="knowledgeBadge">0</span></div>
   <div class="tab-item" onclick="switchTab('org', this)"><span>客服组织架构</span></div>
+  <div class="tab-item admin-only" onclick="switchTab('users', this)"><span>人员管理</span></div>
 </div>
 <div class="tab-content active" id="tab-detail">
   <div id="detailEmpty" class="empty-state"><div class="empty-icon">📋</div><div class="empty-text">暂无质检明细数据</div><div class="empty-hint">点击右上角「上传数据」按钮上传邮件数据，或 <button class="btn-link" onclick="loadSampleData()">加载示例数据</button></div></div>
@@ -596,7 +869,7 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
 <div class="tab-content" id="tab-standard">
   <div class="card">
     <div class="card-header"><h3>亚飞客服质检标准-V1.0</h3><div style="display:flex;gap:8px;"><button class="btn btn-outline btn-sm admin-only" onclick="resetStandard()">重置标准</button><button class="btn btn-success btn-sm admin-only" onclick="saveStandard()">保存标准</button><button class="btn btn-outline btn-sm" onclick="exportStandard()">导出标准</button></div></div>
-    <div class="card-body"><div id="standardTableWrap"></div><div id="gradeRulesWrap" style="margin-top:20px;"></div><div style="margin-top:16px;padding:12px 16px;background:var(--warning-bg);border-radius:6px;font-size:13px;color:var(--warning);">⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。</div></div>
+    <div class="card-body"><div id="standardTableWrap"></div><div id="gradeRulesWrap" style="margin-top:20px;"></div><div id="stdNotice" style="margin-top:16px;padding:12px 16px;background:var(--warning-bg);border-radius:6px;font-size:13px;color:var(--warning);">⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。</div></div>
   </div>
 </div>
 <div class="tab-content admin-only" id="tab-qclogic">
@@ -1021,8 +1294,8 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
     <div class="filter-item"><label style="font-size:15px;font-weight:600;">质检知识库</label></div>
     <div style="margin-left:auto;display:flex;gap:8px;">
       <button class="btn btn-outline btn-sm" onclick="exportKnowledgeBase()">导出知识库</button>
-      <button class="btn btn-primary btn-sm admin-only" onclick="openKnowledgeModal('case-good')">新增好案例</button>
-      <button class="btn btn-danger btn-sm admin-only" onclick="openKnowledgeModal('case-bad')">新增不好案例</button>
+      <button class="btn btn-primary btn-sm case-edit-only" onclick="openKnowledgeModal('case-good')">新增好案例</button>
+      <button class="btn btn-danger btn-sm case-edit-only" onclick="openKnowledgeModal('case-bad')">新增不好案例</button>
       <button class="btn btn-success btn-sm admin-only" onclick="openKnowledgeModal('knowledge')">新增质检知识</button>
     </div>
   </div>
@@ -1038,19 +1311,30 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
   </div>
 </div>
 <div class="tab-content" id="tab-org">
-  <div class="filter-bar"><div class="filter-item"><label style="font-size:15px;font-weight:600;">客服组织架构映射</label></div><div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-primary btn-sm" onclick="openAmzSyncModal()">从 AMZ 同步</button><button class="btn btn-outline btn-sm" onclick="document.getElementById('orgFileInput').click()">导入架构</button><input type="file" id="orgFileInput" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleOrgFileSelect(event)"><button class="btn btn-outline btn-sm" onclick="exportOrg()">导出架构</button><button class="btn btn-primary btn-sm" onclick="showAddGroupModal()">添加组别</button></div></div>
+  <div class="filter-bar"><div class="filter-item"><label style="font-size:15px;font-weight:600;">客服组织架构映射</label></div><div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-primary btn-sm admin-only" onclick="openAmzSyncModal()">从 AMZ 同步</button><button class="btn btn-outline btn-sm admin-only" onclick="document.getElementById('orgFileInput').click()">导入架构</button><input type="file" id="orgFileInput" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleOrgFileSelect(event)"><button class="btn btn-outline btn-sm" onclick="exportOrg()">导出架构</button><button class="btn btn-primary btn-sm admin-only" onclick="showAddGroupModal()">添加组别</button></div></div>
+  <div id="orgReviewerBar" class="org-reviewer-bar"></div>
   <div class="org-grid" id="orgGrid"></div>
-  <div style="margin-top:16px;padding:12px 16px;background:var(--info-bg);border-radius:6px;font-size:13px;color:var(--info);">💡 说明：组织架构用于数据看板中的「组别统计」和「组别筛选」。修改客服名字后，已有质检数据中的客服名不会自动更新，但看板会按映射关系归类统计。</div>
+  <div style="margin-top:16px;padding:12px 16px;background:var(--info-bg);border-radius:6px;font-size:13px;color:var(--info);">💡 说明：组织架构用于数据看板中的「组别统计」和「组别筛选」。每组可设 1 名组长，组长拥有本组申诉的复核权限（可逐项重新打分）。修改客服名字后，已有质检数据中的客服名不会自动更新，但看板会按映射关系归类统计。</div>
+</div>
+<div class="tab-content admin-only" id="tab-users">
+  <div class="filter-bar">
+    <div class="filter-item"><label style="font-size:15px;font-weight:600;">人员管理</label></div>
+    <span style="font-size:12px;color:var(--gray-500);">登录账号＝组织架构里的中文姓名 · 初始密码 123 · 首次登录强制改密</span>
+    <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-outline btn-sm" onclick="qcSyncUsersFromOrg()">从组织架构同步人员</button><button class="btn btn-primary btn-sm" onclick="qcOpenUserModal()">新增人员</button></div>
+  </div>
+  <div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>账号与密码</h3><div style="display:flex;align-items:center;gap:10px;"><span style="font-size:12px;color:var(--gray-500);">管理员可见全部账号与密码，可重置、改名、设管理员</span><input type="search" class="search-box" id="userSearch" placeholder="搜索姓名..." oninput="renderUsersPage()"></div></div><div class="card-body"><div id="usersTableWrap"></div></div></div>
+  <div class="card"><div class="card-header"><h3>权限说明</h3></div><div class="card-body" id="permMatrixWrap"></div></div>
 </div>
 <div class="modal-overlay" id="amzSyncModal"><div class="modal modal-sm"><div class="modal-header"><h3>从 AMZ 看板同步组织架构</h3><button class="modal-close" onclick="closeAmzSyncModal()">&times;</button></div><div class="modal-body"><div style="font-size:13px;color:var(--gray-600);margin-bottom:12px;line-height:1.7;">读取 AMZ 看板「模块设置 - 达标设置 - ② 客服 → 分类组」的映射，按<b>组别 = 分类组</b>重建本页组织架构。AMZ 管理员口令只保存在本次浏览器会话（sessionStorage），不会写进任何文件。</div><div style="margin-bottom:10px;"><label style="display:block;font-size:13px;margin-bottom:4px;">AMZ 用户名</label><input type="text" id="amzSyncUser" class="search-box" style="width:100%;" value="李鲜"></div><div style="margin-bottom:10px;"><label style="display:block;font-size:13px;margin-bottom:4px;">AMZ 口令</label><input type="password" id="amzSyncPwd" class="search-box" style="width:100%;" placeholder="AMZ 看板登录口令"></div><div id="amzSyncMsg" style="font-size:12px;color:var(--gray-500);min-height:18px;margin-bottom:8px;"></div></div><div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="closeAmzSyncModal()">取消</button><button class="btn btn-primary btn-sm" id="amzSyncBtn" onclick="confirmSyncOrgFromAMZ()">同步</button></div></div></div>
 <div class="modal-overlay" id="uploadModal"><div class="modal modal-sm"><div class="modal-header"><h3>上传邮件数据</h3><button class="modal-close" onclick="closeUploadModal()">&times;</button></div><div class="modal-body"><div class="radio-group"><label class="radio-item"><input type="radio" name="uploadMode" value="clear" checked><span>清空后上传</span><span class="radio-desc">(清除已有数据，重新上传)</span></label><label class="radio-item"><input type="radio" name="uploadMode" value="append"><span>累计上传</span><span class="radio-desc">(保留已有数据，追加新数据)</span></label></div><div class="upload-zone" onclick="document.getElementById('fileInput').click()" id="uploadZone"><div class="upload-icon">📁</div><div class="upload-title">点击或拖拽文件到此处</div><div class="upload-desc">支持 CSV / Excel (.xlsx / .xls) 格式</div><div class="upload-formats">必填列：账号、客服、平台单号、回邮数据</div></div><div style="margin-top:16px;text-align:center;"><button class="btn btn-outline btn-sm" onclick="closeUploadModal();loadSampleData();">加载示例数据</button></div></div></div></div>
 <div class="modal-overlay" id="detailModal"><div class="modal"><div class="modal-header"><h3 id="modalTitle">质检详情</h3><div style="display:flex;align-items:center;gap:6px;"><button class="modal-min" onclick="toggleModalMinimize()" title="最小化到右下角">&#8213;</button><button class="modal-close" onclick="closeModal()">&times;</button></div></div><div class="modal-body" id="modalBody"></div></div></div>
 <div class="modal-overlay" id="recordModal"><div class="modal"><div class="modal-header"><h3 id="recordModalTitle">记录详情</h3><button class="modal-close" onclick="closeRecordModal()">&times;</button></div><div class="modal-body" id="recordModalBody"></div></div></div>
-<div class="modal-overlay" id="appealModal"><div class="modal"><div class="modal-header"><h3 id="appealModalTitle">申诉处理</h3><button class="modal-close" onclick="closeAppealModal()">&times;</button></div><div class="modal-body"><input type="hidden" id="appealRecordIndex"><div class="detail-section"><h4>当前状态</h4><div id="appealCurrentStatus"></div></div><div id="appealSubmitPanel" class="appeal-panel"><h4 style="margin-bottom:10px;">提交申诉</h4><div style="font-size:12px;color:var(--gray-500);margin-bottom:8px;">请填写异议理由，可附上质检截图或其他证据。</div><textarea id="appealReason" placeholder="请输入申诉理由（必填）"></textarea><div style="margin-top:12px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">申诉模块（仅显示不达标模块，默认全选）</label><div class="appeal-actions" style="margin:0 0 8px;"><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealModuleList', 'appealModules', true)">全选模块</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealModuleList', 'appealModules', false)">一键取消</button></div><div id="appealModuleList" class="appeal-module-list-wrap"></div></div><div style="margin-top:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">附件截图（可选，最多5个，每个不超过10MB）</label><input type="file" id="appealFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div><div class="appeal-actions"><button class="btn btn-primary btn-sm" id="appealSubmitButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'submit')">提交申诉</button></div></div><div id="appealReviewPanel" class="appeal-panel" style="display:none;margin-top:14px;"><h4 style="margin-bottom:10px;">审核申诉</h4><div style="font-size:12px;color:var(--gray-500);margin-bottom:8px;">只有“待审核”状态可以审批；仅显示已提交申诉且未达标的模块；通过或拒绝时必须填写审核理由，可附上截图。</div><div style="margin-bottom:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">审核模块（仅显示已提交申诉模块，达标模块默认隐藏）</label><div class="appeal-actions" style="margin:0 0 8px;"><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealReviewModuleList', 'appealReviewModules', true)">全选模块</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealReviewModuleList', 'appealReviewModules', false)">一键取消</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealReviewDecision('通过')">批量通过</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealReviewDecision('被拒')">批量拒绝</button></div><div id="appealReviewModuleList" class="appeal-module-list-wrap"></div></div><textarea id="appealReviewReason" placeholder="请输入审核理由（必填）"></textarea><div style="margin-top:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">审核附件（可选）</label><input type="file" id="appealReviewFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div><label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:var(--gray-700);"><input type="checkbox" id="appealAddToKnowledge"> 申诉通过后，将该案例自动总结并加入质检知识库（自动归类为好案例、不好案例或质检知识；后续命中时作为参考案例，不参与达标/不达标统计）</label><div class="appeal-actions"><button class="btn btn-success btn-sm" id="appealApproveButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'approve')">申诉通过</button><button class="btn btn-danger btn-sm" id="appealRejectButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'reject')">申诉被拒</button></div></div><div class="detail-section"><h4>申诉记录</h4><div id="appealHistory"></div><div id="appealExistingFiles"></div></div></div></div></div>
+<div class="modal-overlay" id="appealModal"><div class="modal"><div class="modal-header"><h3 id="appealModalTitle">申诉处理</h3><button class="modal-close" onclick="closeAppealModal()">&times;</button></div><div class="modal-body"><input type="hidden" id="appealRecordIndex"><div class="detail-section"><h4>当前状态</h4><div id="appealCurrentStatus"></div></div><div id="appealSubmitPanel" class="appeal-panel"><h4 style="margin-bottom:10px;">提交申诉</h4><div style="font-size:12px;color:var(--gray-500);margin-bottom:8px;">请填写异议理由，可附上质检截图或其他证据。</div><textarea id="appealReason" placeholder="请输入申诉理由（必填）"></textarea><div style="margin-top:12px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">申诉模块（仅显示不达标模块，默认全选）</label><div class="appeal-actions" style="margin:0 0 8px;"><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealModuleList', 'appealModules', true)">全选模块</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealModuleList', 'appealModules', false)">一键取消</button></div><div id="appealModuleList" class="appeal-module-list-wrap"></div></div><div style="margin-top:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">附件截图（可选，最多5个，每个不超过10MB）</label><input type="file" id="appealFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div><div class="appeal-actions"><button class="btn btn-primary btn-sm" id="appealSubmitButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'submit')">提交申诉</button></div></div><div id="appealReviewPanel" class="appeal-panel" style="display:none;margin-top:14px;"><h4 style="margin-bottom:10px;">复核申诉（组长重新打分）</h4><div id="appealReviewerLine" class="appeal-reviewer-line"></div><div style="font-size:12px;color:var(--gray-500);margin-bottom:8px;">组长对每个模块直接<b>重新打分</b>（左侧是自动打分给出的原得分）。改分后下方会实时重算总分，保存后同步到数据表与数据看板。</div><div style="margin-bottom:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">审核模块（仅显示已提交申诉模块，达标模块默认隐藏）</label><div class="appeal-actions" style="margin:0 0 8px;"><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealReviewModuleList', 'appealReviewModules', true)">全选模块</button><button type="button" class="btn btn-outline btn-sm" onclick="setAppealModules('appealReviewModuleList', 'appealReviewModules', false)">一键取消</button><button type="button" class="btn btn-outline btn-sm" onclick="qcAppealBulkScore('max')">全部按满分</button><button type="button" class="btn btn-outline btn-sm" onclick="qcAppealBulkScore('orig')">全部恢复原分</button></div><div id="appealReviewModuleList" class="appeal-module-list-wrap"></div></div><div id="appealRecalcPreview" class="appeal-recalc"></div><textarea id="appealReviewReason" placeholder="请输入审核理由（必填）"></textarea><div style="margin-top:10px;"><label style="font-size:13px;color:var(--gray-600);display:block;margin-bottom:6px;">审核附件（可选）</label><input type="file" id="appealReviewFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div><label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;color:var(--gray-700);"><input type="checkbox" id="appealAddToKnowledge"> 申诉通过后，将该案例自动总结并加入质检知识库（自动归类为好案例、不好案例或质检知识；后续命中时作为参考案例，不参与达标/不达标统计）</label><div class="appeal-actions"><button class="btn btn-success btn-sm" id="appealApproveButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'approve')">保存重打分并生效</button><button class="btn btn-danger btn-sm" id="appealRejectButton" onclick="saveAppeal(Number(document.getElementById('appealRecordIndex').value), 'reject')">维持原分（驳回申诉）</button></div></div><div class="detail-section"><h4>申诉记录</h4><div id="appealHistory"></div><div id="appealExistingFiles"></div></div></div></div></div>
+<div class="modal-overlay" id="reviewerModal"><div class="modal modal-sm"><div class="modal-header"><h3>选择复核身份（组长）</h3><button class="modal-close" onclick="closeReviewerModal()">&times;</button></div><div class="modal-body"><div style="font-size:13px;color:var(--gray-600);line-height:1.7;margin-bottom:12px;">申诉复核由<b>组长</b>执行：选择你在组织架构里的组长身份后，就能在申诉弹窗里逐项重新打分。组长只能复核<b>本组</b>的申诉。</div><div style="margin-bottom:8px;"><label style="display:block;font-size:13px;margin-bottom:6px;color:var(--gray-600);">我的组长身份</label><select id="reviewerSelect" class="search-box" style="width:100%;padding:8px 10px;"></select></div><div id="reviewerModalHint" style="font-size:12px;color:var(--gray-500);min-height:18px;"></div></div><div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="closeReviewerModal()">取消</button><button class="btn btn-primary btn-sm" onclick="confirmReviewer()">确认</button></div></div></div>
 <div class="modal-overlay" id="addGroupModal"><div class="modal modal-sm"><div class="modal-header"><h3>添加组别</h3><button class="modal-close" onclick="closeAddGroupModal()">&times;</button></div><div class="modal-body"><div style="margin-bottom:16px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">组别名称</label><input type="text" id="newGroupName" placeholder="如：4组" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="text-align:right;"><button class="btn btn-outline btn-sm" onclick="closeAddGroupModal()" style="margin-right:8px;">取消</button><button class="btn btn-primary btn-sm" onclick="confirmAddGroup()">确认添加</button></div></div></div></div>
 <div class="modal-overlay" id="knowledgeModal"><div class="modal modal-sm"><div class="modal-header"><h3 id="knowledgeModalTitle">新增知识</h3><button class="modal-close" onclick="closeKnowledgeModal()">&times;</button></div><div class="modal-body"><input type="hidden" id="knowledgeEditId"><input type="hidden" id="knowledgeEditType"><div id="knowledgeDuplicateHint" style="display:none;margin-bottom:14px;padding:12px 14px;background:var(--warning-bg);border:1px solid #fdba74;border-radius:8px;color:var(--warning);font-size:13px;line-height:1.6;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">标题（必填）</label><input type="text" id="knowledgeTitle" placeholder="例如：退款场景主动说明到账时间" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识类型</label><select id="knowledgeKind" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"><option value="can-do">这个做法可以（正向知识）</option><option value="missed">应该质检但容易漏检（漏检知识）</option></select></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">适用维度（可多选，不选则默认「综合」）</label><div id="knowledgeDimensionBox" style="display:flex;flex-wrap:wrap;gap:8px 16px;padding:10px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;background:#fff;"><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="方案合理性" onchange="onKnowledgeDimensionChange()"><span>方案合理性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="流程&amp;操作完整性" onchange="onKnowledgeDimensionChange()"><span>流程&amp;操作完整性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务技巧" onchange="onKnowledgeDimensionChange()"><span>服务技巧</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务态度" onchange="onKnowledgeDimensionChange()"><span>服务态度</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="语言语法表达" onchange="onKnowledgeDimensionChange()"><span>语言语法表达</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="平台禁忌" onchange="onKnowledgeDimensionChange()"><span>平台禁忌</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="综合" onchange="onKnowledgeDimensionChange()"><span>综合（全部维度）</span></label></div><input type="hidden" id="knowledgeDimension" value="综合"><div style="margin-top:6px;font-size:12px;color:var(--gray-500);">可勾选多个维度；勾选「综合」表示该知识适用于全部维度。</div></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;"><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识来源</label><div class="radio-group" style="margin:0 0 10px;"><label class="radio-item"><input type="radio" name="knowledgeSource" value="text" checked onchange="onKnowledgeSourceChange()"><span>文本</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="file" onchange="onKnowledgeSourceChange()"><span>本地文档</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="url" onchange="onKnowledgeSourceChange()"><span>网页链接</span></label></div><div id="knowledgeFileWrap" style="display:none;margin-bottom:12px;"><div class="upload-zone" style="padding:22px 16px;cursor:pointer;" onclick="document.getElementById('knowledgeFile').click()"><div class="upload-icon" style="font-size:30px;margin-bottom:6px;">📎</div><div class="upload-title" style="font-size:15px;">点击选择文档（SOP / 规范 / 截图等）</div><div class="upload-desc">支持 PDF / Word / Excel / 图片 / TXT，单个不超过 20MB</div></div><div id="knowledgeFileStatus" style="display:none;margin-top:8px;padding:8px 10px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:6px;font-size:13px;align-items:center;gap:8px;"><span id="knowledgeFileName" style="flex:1;"></span><button type="button" class="btn-link danger" onclick="clearKnowledgeFile()">移除</button></div><input type="file" id="knowledgeFile" style="display:none" onchange="onKnowledgeFileSelect(event)"></div><div id="knowledgeUrlWrap" style="display:none;margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">网页链接（SOP / 文档地址）</label><input type="url" id="knowledgeUrl" placeholder="https://… 例如内部 Wiki 的 SOP 页面" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:16px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">内容 / 判断依据（文本类必填，文档 / 链接类可填备注）</label><textarea id="knowledgeContent" placeholder="描述什么情况、应该如何判断、正确或错误的处理方式" style="width:100%;min-height:120px;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;resize:vertical;"></textarea><div style="margin:4px 0 4px;font-size:12px;color:var(--gray-500);">❐ 系统将根据「标题 + 正文」自动提取判分依据，无需手动填写关键词；上传的知识即邮件质检的标准与资料，质检时据此自动判分。</div></div><div id="knowledgeHitPreview" style="margin:2px 0 10px;font-size:12px;color:var(--gray-600);"></div><div style="text-align:right;"><button class="btn btn-outline btn-sm" onclick="closeKnowledgeModal()" style="margin-right:8px;">取消</button><button class="btn btn-primary btn-sm" onclick="saveKnowledgeItem()">保存并重跑质检</button></div></div></div></div>
 <div class="progress-overlay" id="progressOverlay"><div class="progress-box"><div class="spinner"></div><div class="progress-text" id="progressText">正在质检...</div><div class="progress-detail" id="progressDetail"></div><div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBarFill" style="width:0%"></div></div></div></div>
 <div class="toast" id="toast"></div>
-<script src="app20261117h.js?v=20261118b"></script>
+<script src="app20261117h.js?v=20261118f"></script>
 </body>
 </html>

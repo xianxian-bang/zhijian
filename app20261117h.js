@@ -122,6 +122,133 @@ var DEFAULT_ORG = [
 ];
 
 var ORG_DATA = loadOrg();
+
+// ===== 组长与复核身份（2026-11-18）=====
+// 每个组别可以有 1 名组长（grp.leader），组长拥有本组申诉的复核打分权限。
+function normalizeOrgData() {
+  if (!Array.isArray(ORG_DATA)) ORG_DATA = [];
+  for (var i = 0; i < ORG_DATA.length; i++) {
+    var g = ORG_DATA[i];
+    if (!g || typeof g !== 'object') { ORG_DATA[i] = { group: '', agents: [] }; g = ORG_DATA[i]; }
+    if (!Array.isArray(g.agents)) g.agents = [];
+    g.leader = String(g.leader == null ? '' : g.leader).trim();
+    if (g.leader && g.agents.indexOf(g.leader) < 0) g.leader = '';
+  }
+  return ORG_DATA;
+}
+var REVIEWER_KEY = 'qc_reviewer_v1';
+function qcLeaderList() {
+  normalizeOrgData();
+  var out = [];
+  for (var i = 0; i < ORG_DATA.length; i++) if (ORG_DATA[i] && ORG_DATA[i].leader) out.push({ name: ORG_DATA[i].leader, group: ORG_DATA[i].group });
+  return out;
+}
+function qcGetReviewer() {
+  if (typeof AUTH !== 'undefined' && AUTH) {
+    if (AUTH.role === 'leader') return { name: AUTH.name, group: AUTH.group || qcLeaderGroup(AUTH.name) || '' };
+    return null;
+  }
+  var raw = null;
+  try { raw = JSON.parse(localStorage.getItem(REVIEWER_KEY) || 'null'); } catch (e) { raw = null; }
+  if (!raw || !raw.name) return null;
+  var list = qcLeaderList();
+  for (var i = 0; i < list.length; i++) if (list[i].name === raw.name) return { name: list[i].name, group: list[i].group };
+  return null;
+}
+function qcSetReviewer(name) {
+  var val = String(name == null ? '' : name).trim();
+  if (!val) { try { localStorage.removeItem(REVIEWER_KEY); } catch (e) {} }
+  else {
+    var list = qcLeaderList(), hit = null;
+    for (var i = 0; i < list.length; i++) if (list[i].name === val) { hit = list[i]; break; }
+    if (!hit) { showToast('该客服不是组长：' + val, 'error'); return false; }
+    try { localStorage.setItem(REVIEWER_KEY, JSON.stringify({ name: hit.name, group: hit.group })); } catch (e) {}
+  }
+  renderReviewerBar();
+  showToast(val ? ('已切换复核身份：' + val) : '已清除复核身份', 'success');
+  return true;
+}
+function qcReviewerLabel() {
+  var rv = qcGetReviewer();
+  if (rv) return rv.name + '（' + rv.group + '组长）';
+  return isAdminMode() ? '管理员' : '';
+}
+function renderReviewerBar() {
+  var el = document.getElementById('orgReviewerBar');
+  if (!el) return;
+  var html = '<span class="org-reviewer-cap">申诉复核身份</span>';
+  if (!AUTH) {
+    html += '<span class="org-reviewer-none org-reviewer-noauth">未登录</span><span class="org-reviewer-tip">请先用本人账号登录；组长登录后自动获得本组申诉复核权限</span>';
+  } else if (AUTH.role === 'leader') {
+    html += '<b>' + escHtml(AUTH.name) + '</b><span class="org-reviewer-group">' + escHtml(AUTH.group || '') + ' · 组长</span><span class="org-reviewer-tip">可复核本组申诉并逐项重新打分</span>';
+  } else if (AUTH.role === 'admin') {
+    html += '<b>' + escHtml(AUTH.name) + '</b><span class="org-reviewer-group">管理员</span><span class="org-reviewer-tip">管理员可复核全部组的申诉</span>';
+  } else {
+    html += '<b>' + escHtml(AUTH.name) + '</b><span class="org-reviewer-group">客服</span><span class="org-reviewer-tip">没有申诉复核权限，可查看质检明细与看板</span>';
+  }
+  el.innerHTML = html;
+}
+function qcClearReviewer() { try { localStorage.removeItem(REVIEWER_KEY); } catch (e) {} renderReviewerBar(); showToast('已清除复核身份', 'success'); }
+function openReviewerModal() {
+  var list = qcLeaderList();
+  var sel = document.getElementById('reviewerSelect');
+  if (!sel) return;
+  var opts = '<option value="">— 请选择 —</option>';
+  for (var i = 0; i < list.length; i++) opts += '<option value="' + escHtml(list[i].name) + '">' + escHtml(list[i].group) + ' · ' + escHtml(list[i].name) + '（组长）</option>';
+  sel.innerHTML = opts;
+  var rv = qcGetReviewer();
+  if (rv) sel.value = rv.name;
+  document.getElementById('reviewerModalHint').textContent = list.length ? ('共 ' + list.length + ' 位组长。选择后本机将以此身份复核申诉。') : '还没有设置任何组长：请先在组别卡片里选择组长。';
+  document.getElementById('reviewerModal').classList.add('show');
+}
+function closeReviewerModal() { document.getElementById('reviewerModal').classList.remove('show'); }
+function confirmReviewer() {
+  var sel = document.getElementById('reviewerSelect');
+  if (!sel || !sel.value) { showToast('请选择一个组长', 'error'); return; }
+  if (qcSetReviewer(sel.value)) closeReviewerModal();
+}
+// 复核权限：管理员全组可审；组长只审本组
+function requireAppealReviewer(result) {
+  if (typeof AUTH !== 'undefined' && AUTH) {
+    if (AUTH.role === 'admin') return true;
+    if (AUTH.role !== 'leader') { showToast('申诉复核只有组长和管理员可以做，当前账号没有该权限', 'error'); return false; }
+    var map = getAgentGroupMap();
+    var grp = String(map[result && result.agent] || '');
+    var mine = AUTH.group || qcLeaderGroup(AUTH.name) || '';
+    if (!mine) { showToast('没有找到你的组长分组：请联系管理员在「客服组织架构」里把你设为组长', 'error'); return false; }
+    if (!grp) { showToast('这一单的客服不在组织架构里，只有管理员可以复核', 'error'); return false; }
+    if (mine !== grp) { showToast('你是「' + mine + '」组长，只能复核本组申诉；这一单属于「' + grp + '」', 'error'); return false; }
+    return true;
+  }
+  // 未登录（本地调试）沿用旧的组长身份选择
+  var rv = qcGetReviewer();
+  if (!rv) { showToast('请先登录：申诉复核需要组长或管理员账号', 'error'); return false; }
+  var map2 = getAgentGroupMap();
+  var grp2 = String(map2[result && result.agent] || '');
+  if (!grp2 || rv.group !== grp2) { showToast('你是「' + rv.group + '」组长，只能复核本组申诉；这一单属于「' + (grp2 || '未分组') + '」', 'error'); return false; }
+  return true;
+}
+// 把重新打分换算成该维度的等级（取标准里最接近的档位）
+function qcDimGradeForScore(dim, score) {
+  var s = Number(score);
+  if (isNaN(s)) return '';
+  for (var i = 0; i < STANDARDS.length; i++) {
+    for (var j = 0; j < STANDARDS[i].items.length; j++) {
+      var item = STANDARDS[i].items[j];
+      if (item.name !== dim) continue;
+      var levels = item.levels || [], best = null, bestDiff = Infinity;
+      for (var k = 0; k < levels.length; k++) {
+        var lvScore = Number(levels[k].score) || 0;
+        var diff = Math.abs(lvScore - s);
+        if (diff < bestDiff) { bestDiff = diff; best = levels[k]; }
+      }
+      return best ? best.grade : '';
+    }
+  }
+  return '';
+}
+normalizeOrgData();
+
 function loadOrg() {
   try { var s = localStorage.getItem('qc_org_data'); if (s) return JSON.parse(s); } catch(e) {}
   return JSON.parse(JSON.stringify(DEFAULT_ORG));
@@ -166,8 +293,8 @@ function getRecordKey(item) { return [item.account || '', item.agent || '', item
 // 日期无关的稳定键：上传表 date 为空时 inspectOne 会用“当天日期”补齐 result.date，导致 recordKey 每天变化、
 // 跨天重跑时申诉匹配不上而被丢弃（2026-10-15 修复）。申诉保留一律先用完整键、再用稳定键兜底。
 function getStableRecordKey(item) { return [item.account || '', item.agent || '', item.order || ''].join('||'); }
-function createEmptyAppeal() { return { status: '无申诉', reason: '', submittedAt: '', reviewer: '', reviewReason: '', reviewedAt: '', attachments: [], modules: [], moduleDecisions: {}, moduleReviewReasons: {}, referenceAdded: false, referenceKnowledgeId: '', referenceAddedAt: '', referenceType: '', referenceKind: '', referenceTitle: '', referenceSummary: '' }; }
-function normalizeAppeal(appeal) { var a = appeal || {}; var base = createEmptyAppeal(); for (var k in base) if (base.hasOwnProperty(k)) base[k] = a[k] !== undefined && a[k] !== null ? a[k] : base[k]; if (APPEAL_STATUSES.indexOf(base.status) < 0) base.status = '无申诉'; if (!Array.isArray(base.attachments)) base.attachments = []; if (!Array.isArray(base.modules)) base.modules = []; if (!base.moduleDecisions || typeof base.moduleDecisions !== 'object') base.moduleDecisions = {}; if (!base.moduleReviewReasons || typeof base.moduleReviewReasons !== 'object') base.moduleReviewReasons = {}; base.referenceAdded = !!base.referenceAdded; return base; }
+function createEmptyAppeal() { return { status: '无申诉', reason: '', submittedAt: '', reviewer: '', reviewReason: '', reviewedAt: '', attachments: [], modules: [], moduleDecisions: {}, moduleReviewReasons: {}, moduleScores: {}, referenceAdded: false, referenceKnowledgeId: '', referenceAddedAt: '', referenceType: '', referenceKind: '', referenceTitle: '', referenceSummary: '' }; }
+function normalizeAppeal(appeal) { var a = appeal || {}; var base = createEmptyAppeal(); for (var k in base) if (base.hasOwnProperty(k)) base[k] = a[k] !== undefined && a[k] !== null ? a[k] : base[k]; if (APPEAL_STATUSES.indexOf(base.status) < 0) base.status = '无申诉'; if (!Array.isArray(base.attachments)) base.attachments = []; if (!Array.isArray(base.modules)) base.modules = []; if (!base.moduleDecisions || typeof base.moduleDecisions !== 'object') base.moduleDecisions = {}; if (!base.moduleReviewReasons || typeof base.moduleReviewReasons !== 'object') base.moduleReviewReasons = {}; if (!base.moduleScores || typeof base.moduleScores !== 'object') base.moduleScores = {}; base.referenceAdded = !!base.referenceAdded; return base; }
 function getAppealPassScore() { for (var i = 0; i < GRADE_RULES.length; i++) if (GRADE_RULES[i].grade === '达标') return Number(GRADE_RULES[i].minScore) || 80; return 80; }
 function getAppealModules(result) { return DIM_NAMES.slice(); }
 function isAppealPassedModule(result, dim) { var detail = result && result.details && result.details[dim] || {}; return ['优秀', '达标', '通过'].indexOf(detail.grade) >= 0; }
@@ -179,7 +306,48 @@ function setAppealModules(containerId, name, checked) { var box = document.getEl
 function setAppealReviewDecision(decision) { var box = document.getElementById('appealReviewModuleList'); if (!box) return; var selected = getCheckedValues('appealReviewModuleList', 'appealReviewModules'); if (!selected.length) { showToast('请先选择审核模块', 'error'); return; } var radios = box.querySelectorAll('input[type="radio"]'); for (var i = 0; i < radios.length; i++) { for (var j = 0; j < selected.length; j++) if (radios[i].name === 'decision-' + selected[j]) radios[i].checked = radios[i].value === decision; } }
 function getAppealApprovedModules(result) { var a = normalizeAppeal(result && result.appeal); var selected = a.modules.length ? a.modules : getAppealModules(result); var decisions = a.moduleDecisions || {}; var approved = []; if (!Object.keys(decisions).length && a.status === '申诉通过') return selected; for (var i = 0; i < selected.length; i++) if (decisions[selected[i]] === '通过') approved.push(selected[i]); return approved; }
 function updateAppealStatusFromModules(result) { var a = normalizeAppeal(result && result.appeal); var selected = a.modules.length ? a.modules : getAppealModules(result); var decisions = a.moduleDecisions || {}; var pending = 0, approved = 0, rejected = 0; for (var i = 0; i < selected.length; i++) { var d = decisions[selected[i]]; if (d === '通过') approved++; else if (d === '被拒') rejected++; else pending++; } if (pending > 0) a.status = approved > 0 ? '部分通过' : '待审核'; else if (approved > 0 && rejected > 0) a.status = '部分通过'; else if (approved > 0) a.status = '申诉通过'; else if (rejected > 0) a.status = '申诉被拒'; result.appeal = a; return a.status; }
-function applyAppealApprovedGrade(result) { if (!result || !result.appeal || result.referenceCase) return result; var approved = getAppealApprovedModules(result); if (!approved.length) return result; if (!result.appealAdjusted) { result.originalTotalScore = result.totalScore; result.originalGrade = result.grade; result.originalScores = JSON.parse(JSON.stringify(result.scores || {})); } for (var i = 0; i < approved.length; i++) { var dim = approved[i]; if (result.scores && result.scores[dim] !== undefined && result.scores[dim] >= 0) { var passScore = getStandardScore(dim, '达标'); if (passScore !== null && passScore !== undefined) { result.scores[dim] = passScore; if (result.details && result.details[dim]) { result.details[dim].score = passScore; result.details[dim].grade = '达标'; result.details[dim].issues = (result.details[dim].issues || []).concat(['申诉审核通过，模块调整为达标']); } } } } var total = 0; for (var j = 0; j < DIM_NAMES.length; j++) if (result.scores[DIM_NAMES[j]] >= 0 && DIM_NAMES[j] !== '平台禁忌') total += result.scores[DIM_NAMES[j]]; result.totalScore = total; result.grade = determineGrade(total); if (!result.redlineViolation && typeof applyExcellentGate === 'function') applyExcellentGate(result); result.appealAdjusted = true; result.appealApprovedModules = approved; return result; }
+function applyAppealApprovedGrade(result) {
+  if (!result || !result.appeal || result.referenceCase) return result;
+  var approved = getAppealApprovedModules(result);
+  if (!approved.length) return result;
+  if (!result.appealAdjusted) {
+    result.originalTotalScore = result.totalScore;
+    result.originalGrade = result.grade;
+    result.originalScores = JSON.parse(JSON.stringify(result.scores || {}));
+  }
+  var manual = result.appeal.moduleScores || {};
+  for (var i = 0; i < approved.length; i++) {
+    var dim = approved[i];
+    if (!result.scores || result.scores[dim] === undefined) continue;
+    var hasManual = manual[dim] !== undefined && manual[dim] !== null && manual[dim] !== '';
+    var target = hasManual ? Number(manual[dim]) : Number(getStandardScore(dim, '达标'));
+    if (isNaN(target)) continue;
+    var dimMax = getDimMax(dim);
+    if (dimMax > 0 && target > dimMax) target = dimMax;
+    if (target < 0) target = 0;
+    target = Math.round(target);
+    result.scores[dim] = target;
+    if (result.details && result.details[dim]) {
+      result.details[dim].score = target;
+      result.details[dim].grade = qcDimGradeForScore(dim, target);
+      var note = '组长复核重打分：' + target + ' 分（' + result.details[dim].grade + '）';
+      var issues = result.details[dim].issues || (result.details[dim].issues = []);
+      var dup = false;
+      for (var k = 0; k < issues.length; k++) {
+        if (String(issues[k]).indexOf('组长复核重打分') === 0) { issues[k] = note; dup = true; break; }
+      }
+      if (!dup) issues.push(note);
+    }
+  }
+  var total = 0;
+  for (var j = 0; j < DIM_NAMES.length; j++) if (result.scores[DIM_NAMES[j]] >= 0 && DIM_NAMES[j] !== '平台禁忌') total += result.scores[DIM_NAMES[j]];
+  result.totalScore = total;
+  result.grade = determineGrade(total);
+  // 组长的重新打分视为人工终裁：不再用「优秀门槛」把它降档
+  result.appealAdjusted = true;
+  result.appealApprovedModules = approved;
+  return result;
+}
 function summarizeAppealKnowledge(result) {
   var appeal = normalizeAppeal(result && result.appeal);
   var originalGrade = result && (result.originalGrade || result.grade) || '';
@@ -233,7 +401,7 @@ function appealStatusClass(status) { return status === '待审核' ? 'appeal-pen
 function appealStatusBadge(status) { return '<span class="appeal-badge ' + appealStatusClass(status) + '">' + escHtml(status || '无申诉') + '</span>'; }
 function cloudStatePayload() { return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: results, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
 function qcLoadSnapshotFallback() { try { if (rawData && rawData.length > 0) return; } catch(e) {} fetch('qc-snapshot-20261016.json', { cache: 'no-store' }).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function(data) { if (!data || !data.rawData || !data.results || (rawData && rawData.length > 0)) return; importAllData(data); setCloudStatus('云端数据库隔离中，已加载本地快照（只读）', 'var(--warning)'); showToast('云端数据库暂不可用，已加载本地快照数据；云端恢复并刷新页面后将自动同步', 'info'); }).catch(function(e) { setCloudStatus('云端读取失败', 'var(--danger)'); }); }
-function cloudLoadState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = JSON.parse(row.state_json); if (data && data.results && data.rawData) { importAllData(data); } } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
+function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = JSON.parse(row.state_json); if (data && data.results && data.rawData) { importAllData(data); } } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
 function cloudSaveState() { if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化')); var payload = { state_key: 'main', state_json: JSON.stringify(cloudStatePayload()), updated_by: 'anonymous' }; return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); return res; }).catch(function(err){ showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error'); throw err; }); }
 function cloudClearState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').delete().eq('state_key','main').then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); }).catch(function(err){ showToast('云端清空失败：' + (err.message || ''), 'error'); throw err; }); }
 function initCloudBase() { if (!window.CloudBaseSDK) { setCloudStatus('云端SDK加载失败', 'var(--danger)'); return; } try { cloudApp = window.CloudBaseSDK.init({ env: CLOUDBASE_ENV_ID, region: CLOUDBASE_REGION, accessKey: CLOUDBASE_ACCESS_KEY, auth: { detectSessionInUrl: true } }); cloudDb = cloudApp.rdb(); cloudReady = true; var auth = cloudApp.auth; if (auth && typeof auth.signInAnonymously === 'function') { auth.signInAnonymously().then(function(res) { if (res && res.error) throw res.error; cloudLoadState(); }).catch(function(err) { setCloudStatus('匿名认证失败', 'var(--danger)'); showToast('云端匿名认证失败，尝试加载本地快照…', 'info'); qcLoadSnapshotFallback(); }); } else { cloudLoadState(); } } catch(e) { setCloudStatus('云端初始化失败', 'var(--danger)'); showToast('云端初始化失败：' + (e.message || ''), 'error'); } }
@@ -245,8 +413,8 @@ window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 // ===== 管理员权限（2026-11-03）：底层逻辑仅管理员可修改，其他人只读 =====
 var ADMIN_KEY = 'XianXian-QC-2026';
 function isAdminMode() { return document.body && document.body.classList.contains('admin-mode'); }
-function requireAdmin(label) { if (isAdminMode()) return true; showToast('「' + (label || '该操作') + '」需要管理员权限：请用管理员链接打开页面', 'error'); return false; }
-function updateAdminBadge() { var on = isAdminMode(); var b = document.getElementById('adminBadge'); var li = document.getElementById('adminLoginBtn'); var lo = document.getElementById('adminLogoutBtn'); if (b) b.style.display = on ? '' : 'none'; if (li) li.style.display = on ? 'none' : ''; if (lo) lo.style.display = on ? '' : 'none'; }
+function requireAdmin(label) { if (isAdminMode()) return true; showToast('「' + (label || '该操作') + '」需要管理员权限：请用管理员账号登录', 'error'); return false; }
+function updateAdminBadge() { var b = document.getElementById('adminBadge'); if (b) b.style.display = 'none'; if (typeof qcUpdateUserChip === 'function') qcUpdateUserChip(); }
 // ---- 质检逻辑板块：仅管理员可见（非管理员时把内容从 DOM 摘掉，防止直接查看元素） ----
 var QC_LOGIC_HTML_CACHE = null;
 function qcLogicLock() {
@@ -261,11 +429,12 @@ function qcLogicUnlock() {
   if (QC_LOGIC_HTML_CACHE !== null) { box.innerHTML = QC_LOGIC_HTML_CACHE; QC_LOGIC_HTML_CACHE = null; }
   if (document.getElementById('qcLogicScoreTableWrap')) renderQcLogic();
 }
-function initAdminMode() { var h = location.hash || ''; var s = location.search || ''; var mk = ''; if (h.indexOf('admin=') >= 0) mk = h.split('admin=')[1].split('&')[0]; else if (s.indexOf('admin=') >= 0) mk = s.split('admin=')[1].split('&')[0]; if (mk && decodeURIComponent(mk) === ADMIN_KEY) { sessionStorage.setItem('qc_admin', '1'); try { history.replaceState(null, '', location.pathname); } catch (e) {} } if (sessionStorage.getItem('qc_admin') === '1') { document.body.classList.add('admin-mode'); } updateAdminBadge(); if (!isAdminMode()) qcLogicLock(); }
+function initAdminMode() { updateAdminBadge(); if (isAdminMode()) { qcLogicUnlock(); } else { qcLogicLock(); } }
 function adminLogin() { var k = prompt('请输入管理员密钥：'); if (k === null) return; if (k === ADMIN_KEY) { sessionStorage.setItem('qc_admin', '1'); document.body.classList.add('admin-mode'); updateAdminBadge(); qcLogicUnlock(); showToast('管理模式已开启：可修改底层逻辑', 'success'); } else { showToast('管理员密钥错误', 'error'); } }
 function adminLogout() { sessionStorage.removeItem('qc_admin'); document.body.classList.remove('admin-mode'); updateAdminBadge(); var qcTab = document.getElementById('tab-qclogic'); if (qcTab && qcTab.classList.contains('active')) switchTabByName('detail'); qcLogicLock(); showToast('已退出管理模式，页面转为只读', 'info'); }
 function switchTab(tabName, el) {
   if (tabName === 'qclogic' && !isAdminMode()) { showToast('「质检逻辑」仅管理员可查看', 'error'); return; }
+  if (tabName === 'users' && !qcCan('user.manage')) { showToast('「人员管理」仅管理员可见', 'error'); return; }
   var tabs = document.querySelectorAll('.tab-item');
   var contents = document.querySelectorAll('.tab-content');
   for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove('active');
@@ -2804,6 +2973,7 @@ function renderDetailTable() {
   if (badge) badge.textContent = filtered.length;
   renderDetailOverview(filtered);
   qcDashSyncCheck();
+  try { if (typeof qcRefreshAppealBadges === "function") qcRefreshAppealBadges(); } catch (e) {}
 }
 
 // ============================================================
@@ -3037,12 +3207,109 @@ function appealAttachmentList(appeal) {
   }
   return html + '</div>';
 }
+function qcAppealScoreId(dim) { return 'appealScore-' + String(dim == null ? '' : dim).replace(/[^0-9A-Za-z\u3400-\u9fff]/g, '_'); }
 function renderAppealReviewModules(result) {
   var modules = getAppealReviewModules(result);
-  var reviewHtml = '<div class="appeal-module-list">';
-  for (var ri = 0; ri < modules.length; ri++) { var rd = modules[ri], rdet = result.details && result.details[rd] || {}, decision = result.appeal.moduleDecisions[rd] || '', passed = isAppealPassedModule(result, rd); reviewHtml += '<label class="appeal-module-item"><input type="checkbox" name="appealReviewModules" value="' + escHtml(rd) + '" ' + (passed ? '' : 'checked') + '> <b>' + escHtml(rd) + '</b> <span class="score-badge ' + (passed ? 'score-pass' : 'score-fail') + '">原始质检：' + escHtml(rdet.grade || '-') + '</span>' + renderDimensionReasonHtml(rd, rdet, result, '自动打分理由（含回邮证据）') + '<div class="appeal-module-decision"><label><input type="radio" name="decision-' + escHtml(rd) + '" value="通过" ' + (decision === '通过' ? 'checked' : '') + '> 审核通过</label> <label><input type="radio" name="decision-' + escHtml(rd) + '" value="被拒" ' + (decision === '被拒' ? 'checked' : '') + '> 审核拒绝</label></div></label>'; }
-  reviewHtml += '</div>';
-  document.getElementById('appealReviewModuleList').innerHTML = reviewHtml || '<div style="color:var(--gray-500);font-size:12px;">暂无待审核模块</div>';
+  var html = '<div class="appeal-module-list">';
+  for (var ri = 0; ri < modules.length; ri++) {
+    var dim = modules[ri];
+    var det = (result.details && result.details[dim]) || {};
+    var cur = result.scores ? result.scores[dim] : undefined;
+    var curVal = (cur === undefined || cur === null || Number(cur) < 0 || isNaN(Number(cur))) ? '' : Number(cur);
+    var max = getDimMax(dim) || 0;
+    var sid = qcAppealScoreId(dim);
+    html += '<div class="appeal-module-item appeal-module-score">'
+      + '<label class="appeal-module-head"><input type="checkbox" name="appealReviewModules" value="' + escHtml(dim) + '" checked> <b>' + escHtml(dim) + '</b>'
+      + '<span class="appeal-orig">原得分 <b>' + (curVal === '' ? '-' : curVal) + '</b> / ' + max + ' 分 · 原等级 ' + escHtml(det.grade || '-') + '</span></label>'
+      + renderDimensionReasonHtml(dim, det, result, '自动打分理由（含回邮证据）')
+      + '<div class="appeal-score-row"><span class="appeal-score-cap">组长重新打分</span>'
+      + '<input type="number" class="appeal-score-input" id="' + sid + '" data-dim="' + escHtml(dim) + '" min="0" max="' + max + '" step="1" value="' + (curVal === '' ? 0 : curVal) + '" oninput="qcAppealPreview()" onchange="qcAppealPreview()">'
+      + '<span class="appeal-score-total">/ ' + max + ' 分</span>'
+      + '<span class="appeal-score-grade" id="' + sid + '-grade">' + escHtml(qcDimGradeForScore(dim, curVal === '' ? 0 : curVal)) + '</span>'
+      + '<button type="button" class="btn-link" onclick="qcAppealSetScore(\'' + sid + '\',' + max + ')">按满分</button>'
+      + '<button type="button" class="btn-link" onclick="qcAppealSetScore(\'' + sid + '\',' + (curVal === '' ? 0 : curVal) + ')">恢复原分</button>'
+      + '</div></div>';
+  }
+  html += '</div>';
+  document.getElementById('appealReviewModuleList').innerHTML = html || '<div style="color:var(--gray-500);font-size:12px;">暂无待复核模块</div>';
+  qcAppealPreview();
+}
+function qcAppealSetScore(sid, val) {
+  var el = document.getElementById(sid);
+  if (!el) return;
+  el.value = val;
+  qcAppealPreview();
+}
+function qcAppealCollectScores() {
+  var out = {};
+  var box = document.getElementById('appealReviewModuleList');
+  if (!box) return out;
+  var inputs = box.querySelectorAll('.appeal-score-input');
+  for (var i = 0; i < inputs.length; i++) {
+    var dim = inputs[i].getAttribute('data-dim');
+    var v = Number(inputs[i].value);
+    if (isNaN(v)) v = 0;
+    var max = getDimMax(dim) || 0;
+    if (v < 0) v = 0;
+    if (max > 0 && v > max) v = max;
+    out[dim] = Math.round(v);
+  }
+  return out;
+}
+function qcAppealPreview() {
+  var idx = Number(document.getElementById('appealRecordIndex').value);
+  var r = results[idx];
+  var box = document.getElementById('appealReviewModuleList');
+  if (!r || !box) return;
+  var scores = JSON.parse(JSON.stringify(r.scores || {}));
+  var inputs = box.querySelectorAll('.appeal-score-input');
+  var changed = 0;
+  for (var i = 0; i < inputs.length; i++) {
+    var dim = inputs[i].getAttribute('data-dim');
+    var max = getDimMax(dim) || 0;
+    var v = Number(inputs[i].value);
+    if (isNaN(v)) v = 0;
+    if (v < 0) v = 0;
+    if (max > 0 && v > max) v = max;
+    scores[dim] = v;
+    var gEl = document.getElementById(qcAppealScoreId(dim) + '-grade');
+    if (gEl) {
+      var g = qcDimGradeForScore(dim, v);
+      gEl.textContent = g;
+      gEl.className = 'appeal-score-grade' + (g === '不达标' ? ' is-fail' : (g === '优秀' ? ' is-excellent' : ' is-pass'));
+    }
+    if (Number(r.scores && r.scores[dim]) !== v) changed++;
+  }
+  var total = 0;
+  for (var d = 0; d < DIM_NAMES.length; d++) if (scores[DIM_NAMES[d]] >= 0 && DIM_NAMES[d] !== '平台禁忌') total += scores[DIM_NAMES[d]];
+  var before = Number(r.totalScore);
+  if (isNaN(before)) before = 0;
+  var grade = determineGrade(total);
+  var delta = total - before;
+  var el = document.getElementById('appealRecalcPreview');
+  if (!el) return;
+  el.innerHTML = '<span class="recalc-label">重算后总分</span>'
+    + '<span class="recalc-old"><s>' + before + ' 分</s> ' + escHtml(r.grade || '') + '</span>'
+    + '<span class="recalc-arrow">→</span>'
+    + '<span class="recalc-new">' + total + ' 分</span>'
+    + '<span class="recalc-grade' + (grade === '不达标' ? ' is-fail' : '') + '">' + escHtml(grade) + '</span>'
+    + (changed ? '<span class="recalc-delta">改了 ' + changed + ' 项（' + (delta > 0 ? '+' : '') + delta + ' 分）</span>' : '<span class="recalc-delta is-idle">未改动任何项</span>');
+}
+function qcAppealBulkScore(mode) {
+  var box = document.getElementById('appealReviewModuleList');
+  if (!box) return;
+  var idx = Number(document.getElementById('appealRecordIndex').value);
+  var r = results[idx];
+  var inputs = box.querySelectorAll('.appeal-score-input');
+  for (var i = 0; i < inputs.length; i++) {
+    var dim = inputs[i].getAttribute('data-dim');
+    if (mode === 'max') { inputs[i].value = getDimMax(dim) || 0; }
+    else {
+      var orig = r && r.scores ? Number(r.scores[dim]) : 0;
+      inputs[i].value = (isNaN(orig) || orig < 0) ? 0 : orig;
+    }
+  }
+  qcAppealPreview();
 }
 function openAppealModal(index) {
   var r = results[index];
@@ -3062,11 +3329,16 @@ function openAppealModal(index) {
   moduleHtml += '</div>';
   document.getElementById('appealModuleList').innerHTML = moduleHtml;
   renderAppealReviewModules(r);
+  var _rvLine = document.getElementById('appealReviewerLine');
+  if (_rvLine) { var _rvLabel = qcReviewerLabel(); _rvLine.innerHTML = '当前复核身份：' + (_rvLabel ? '<b>' + escHtml(_rvLabel) + '</b>' : '<span style="color:var(--danger);">未设置（请到「客服组织架构」选择组长身份）</span>'); }
   document.getElementById('appealCurrentStatus').innerHTML = appealStatusBadge(r.appeal.status);
-  document.getElementById('appealHistory').innerHTML = (r.appeal.submittedAt || r.appeal.reviewedAt) ? '<div class="appeal-review-box"><b>申诉理由：</b>' + escHtml(r.appeal.reason || '-') + '<br><b>提交时间：</b>' + escHtml(r.appeal.submittedAt || '-') + (r.appeal.reviewedAt ? '<br><b>审核理由：</b>' + escHtml(r.appeal.reviewReason || '-') + '<br><b>审核时间：</b>' + escHtml(r.appeal.reviewedAt || '-') : '') + '</div>' : '';
+  document.getElementById('appealHistory').innerHTML = (r.appeal.submittedAt || r.appeal.reviewedAt) ? '<div class="appeal-review-box"><b>申诉理由：</b>' + escHtml(r.appeal.reason || '-') + '<br><b>提交时间：</b>' + escHtml(r.appeal.submittedAt || '-') + (r.appeal.reviewedAt ? '<br><b>审核理由：</b>' + escHtml(r.appeal.reviewReason || '-') + '<br><b>复核人：</b>' + escHtml(r.appeal.reviewer || '-') + '<br><b>审核时间：</b>' + escHtml(r.appeal.reviewedAt || '-') : '') + '</div>' : '';
   document.getElementById('appealExistingFiles').innerHTML = appealAttachmentList(r.appeal);
   document.getElementById('appealSubmitPanel').style.display = r.appeal.status === '无申诉' ? 'block' : 'none';
-  document.getElementById('appealReviewPanel').style.display = (r.appeal.status === '待审核' && reviewModules.length) ? 'block' : 'none';
+  var _rvShow = (r.appeal.status === '待审核' && reviewModules.length);
+  var _canRv = (typeof qcCanReviewResult === 'function') ? qcCanReviewResult(r) : true;
+  document.getElementById('appealReviewPanel').style.display = (_rvShow && _canRv) ? 'block' : 'none';
+  if (_rvShow && !_canRv && _rvLine) _rvLine.innerHTML += ' <span style="color:var(--danger);font-weight:600;">· 没有这一单的复核权限</span>';
   document.getElementById('appealModalTitle').textContent = '申诉：' + (r.order || '当前质检记录');
   document.getElementById('appealModal').classList.add('show');
 }
@@ -3084,30 +3356,76 @@ function uploadAppealFiles(index, files) {
 }
 function openAppealAttachmentByIndex(attachmentIndex) { var index = Number(document.getElementById('appealRecordIndex').value); var r = results[index]; var attachment = r && r.appeal && r.appeal.attachments ? r.appeal.attachments[attachmentIndex] : null; if (!attachment) { showToast('附件地址不可用', 'error'); return; } openAppealAttachment(attachment.path, attachment.name); }
 function openAppealAttachment(path, name) { if (!path || !cloudApp || !cloudApp.storage) { showToast('附件地址不可用', 'error'); return; } cloudApp.storage.from('qc-appeals').createSignedUrl(path, 3600).then(function(res) { var url = res && (res.fullSignedURL || res.signedUrl || res.url); if (!url) throw new Error('未获取到附件访问地址'); window.open(url, '_blank'); }).catch(function(err) { showToast('附件打开失败：' + ((err && (err.message || err.details)) || '请稍后重试'), 'error'); }); }
-function saveAppeal(index, action) { if (action !== 'submit' && !requireAdmin('申诉审核')) return;
+function saveAppeal(index, action) {
   var r = results[index];
   if (!r) return;
   normalizeResultAppeal(r);
   if (action === 'submit' && r.appeal.status !== '无申诉') { showToast('该质检已提交过申诉，不能重复提交', 'error'); return; }
-  if (action !== 'submit' && r.appeal.status !== '待审核') { showToast('只有待审核状态可以审批', 'error'); return; }
-  var reason = document.getElementById(action === 'submit' ? 'appealReason' : 'appealReviewReason').value.trim();
-  if (!reason) { showToast(action === 'submit' ? '请填写申诉理由' : '请填写审核理由', 'error'); return; }
-  var files = document.getElementById(action === 'submit' ? 'appealFiles' : 'appealReviewFiles').files;
-  var submitButton = document.getElementById(action === 'submit' ? 'appealSubmitButton' : (action === 'approve' ? 'appealApproveButton' : 'appealRejectButton'));
-  if (submitButton) submitButton.disabled = true;
+  if (action !== 'submit') {
+    if (!requireAppealReviewer(r)) return;
+    if (r.appeal.status !== '待审核') { showToast('只有「待审核」状态可以复核打分', 'error'); return; }
+  }
+  var reason = String((document.getElementById(action === 'submit' ? 'appealReason' : 'appealReviewReason') || {}).value || '').trim();
+  if (!reason) { showToast(action === 'submit' ? '请填写申诉理由' : '请填写复核说明', 'error'); return; }
+  var filesEl = document.getElementById(action === 'submit' ? 'appealFiles' : 'appealReviewFiles');
+  var files = filesEl ? filesEl.files : [];
   var selectedModules = action === 'submit' ? getCheckedValues('appealModuleList', 'appealModules') : getCheckedValues('appealReviewModuleList', 'appealReviewModules');
   if (!selectedModules.length) { showToast('请至少选择一个模块', 'error'); return; }
+  var scoreMap = action === 'submit' ? {} : qcAppealCollectScores();
+  var beforeTotal = Number(r.totalScore);
+  if (isNaN(beforeTotal)) beforeTotal = 0;
+  var submitButton = document.getElementById(action === 'submit' ? 'appealSubmitButton' : (action === 'approve' ? 'appealApproveButton' : 'appealRejectButton'));
+  if (submitButton) submitButton.disabled = true;
   uploadAppealFiles(index, files).then(function(newFiles) {
-    if (action === 'submit') { r.appeal.status = '待审核'; r.appeal.reason = reason; r.appeal.submittedAt = new Date().toISOString(); r.appeal.reviewReason = ''; r.appeal.reviewer = ''; r.appeal.reviewedAt = ''; r.appeal.modules = selectedModules; r.appeal.moduleDecisions = {}; r.appeal.moduleReviewReasons = {}; }
-    else { r.appeal.modules = r.appeal.modules.length ? r.appeal.modules : selectedModules; r.appeal.reviewReason = reason; r.appeal.reviewer = '访问者'; r.appeal.reviewedAt = new Date().toISOString(); for (var si = 0; si < selectedModules.length; si++) { var moduleName = selectedModules[si]; var radios = document.querySelectorAll('input[name="decision-' + moduleName + '"]:checked'); var moduleDecision = radios.length ? radios[0].value : (action === 'approve' ? '通过' : '被拒'); r.appeal.moduleDecisions[moduleName] = moduleDecision; r.appeal.moduleReviewReasons[moduleName] = reason; } updateAppealStatusFromModules(r); if (action === 'approve') { applyAppealApprovedGrade(r); if (document.getElementById('appealAddToKnowledge').checked && (r.appeal.status === '申诉通过' || r.appeal.status === '部分通过')) addAppealReferenceKnowledge(r); } }
+    if (action === 'submit') {
+      r.appeal.status = '待审核'; r.appeal.reason = reason; r.appeal.submittedAt = new Date().toISOString();
+      r.appeal.reviewReason = ''; r.appeal.reviewer = ''; r.appeal.reviewedAt = '';
+      r.appeal.modules = selectedModules; r.appeal.moduleDecisions = {}; r.appeal.moduleReviewReasons = {}; r.appeal.moduleScores = {};
+    } else {
+      var rv = qcGetReviewer();
+      r.appeal.reviewer = rv ? (rv.name + '（' + rv.group + '组长）') : '管理员';
+      r.appeal.reviewedAt = new Date().toISOString();
+      r.appeal.reviewReason = reason;
+      r.appeal.modules = r.appeal.modules.length ? r.appeal.modules : selectedModules;
+      r.appeal.moduleScores = r.appeal.moduleScores || {};
+      for (var si = 0; si < selectedModules.length; si++) {
+        var dim = selectedModules[si];
+        var orig = Number(r.scores && r.scores[dim]);
+        if (isNaN(orig)) orig = 0;
+        var val = Number(scoreMap[dim]);
+        if (isNaN(val)) val = orig;
+        if (action === 'approve') {
+          r.appeal.moduleScores[dim] = Math.round(val);
+          r.appeal.moduleDecisions[dim] = (Math.round(val) !== Math.round(orig)) ? '通过' : '被拒';
+        } else {
+          r.appeal.moduleDecisions[dim] = '被拒';
+        }
+        r.appeal.moduleReviewReasons[dim] = reason;
+      }
+      updateAppealStatusFromModules(r);
+      applyAppealApprovedGrade(r);
+      // 以「重算后总分是否变化」作为申诉通过/被拒的最终依据
+      if (r.appealAdjusted) {
+        if (Number(r.totalScore) > beforeTotal) r.appeal.status = '申诉通过';
+        else r.appeal.status = '申诉被拒';
+      } else {
+        r.appeal.status = '申诉被拒';
+      }
+      if (action === 'approve' && document.getElementById('appealAddToKnowledge') && document.getElementById('appealAddToKnowledge').checked && (r.appeal.status === '申诉通过' || r.appeal.status === '部分通过')) addAppealReferenceKnowledge(r);
+    }
     r.appeal.attachments = (r.appeal.attachments || []).concat(newFiles);
-    if (action === 'approve' && !r.appeal.referenceAdded) r.appeal.referenceAdded = false;
     renderDetailTable();
-    renderDashboard();
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
     closeAppealModal();
     saveDataToUrl();
     return cloudSaveState();
-  }).then(function() { showToast(action === 'submit' ? '申诉已提交，状态为待审核' : '审核结果已保存', 'success'); }).catch(function(err) { showToast((err && err.message) || '申诉保存失败，请重试', 'error'); }).finally(function() { if (submitButton) submitButton.disabled = false; });
+  }).then(function() {
+    if (action === 'submit') { showToast('申诉已提交，状态为待审核', 'success'); return; }
+    if (action === 'reject') { showToast('已按原分驳回申诉，总分保持不变', 'success'); return; }
+    showToast('复核分数已生效：总分 ' + beforeTotal + ' → ' + r.totalScore + '（' + r.grade + '），看板已同步', 'success');
+  }).catch(function(err) {
+    showToast((err && err.message) || '申诉保存失败，请重试', 'error');
+  }).finally(function() { if (submitButton) submitButton.disabled = false; });
 }
 
 // ============================================================
@@ -4200,14 +4518,14 @@ function renderKnowledgeBase() {
   cases = filterKnowledgeList(cases, caseQuery); knowledges = filterKnowledgeList(knowledges, knowledgeQuery);
   function updateHint(id, query, count) { var el = document.getElementById(id); if (!el) return; if (!query) { el.style.display = 'none'; return; } el.style.display = 'block'; el.textContent = '已按标题、维度、关键词和内容模糊搜索，匹配 ' + count + ' 条'; }
   updateHint('caseSearchHint', caseQuery, cases.length); updateHint('knowledgeSearchHint', knowledgeQuery, knowledges.length);
-  function renderRows(list, query) {
+  function renderRows(list, query, editClass) {
     if (!list.length) return '<div style="padding:30px;text-align:center;color:var(--gray-400);">' + (query ? '没有找到匹配知识' : '暂无内容，点击右上角按钮新增') + '</div>';
     var html = '<table class="standard-table"><thead><tr><th style="width:90px;">类型</th><th style="width:170px;">标题</th><th style="width:150px;">适用维度（可多选）</th><th style="width:220px;">判分依据（自动提取的全部要求）</th><th>内容 / 判断依据</th><th style="width:120px;">操作</th></tr></thead><tbody>';
-    for (var j = 0; j < list.length; j++) { var item = list[j]; var tone = item.type === 'case-good' ? 'var(--success)' : (item.type === 'case-bad' || item.kind === 'missed' ? 'var(--danger)' : 'var(--info)'); var srcBadge = item.sourceType === 'file' ? '📄 ' : (item.sourceType === 'url' ? '🔗 ' : ''); var srcActions = item.sourceType === 'file' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开</button><button class="btn-link" onclick="downloadKnowledgeFileById(\'' + item.id + '\')">下载</button>' : (item.sourceType === 'url' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开链接</button>' : ''); html += '<tr id="knowledge-row-' + escHtml(item.id) + '"><td style="color:' + tone + ';font-weight:600;">' + escHtml(knowledgeTypeLabel(item.type)) + '<br><span style="font-size:11px;font-weight:400;">' + escHtml(knowledgeKindLabel(item.kind, item.summaryKind)) + '</span></td><td style="font-weight:600;">' + srcBadge + highlightSearchText(item.title, query) + '</td><td>' + highlightSearchText(getKnowledgeDimensions(item).join('\u3001'), query) + '</td><td style="font-size:12px;">' + '<div style="max-height:150px;overflow:auto;line-height:1.55;">' + ((item.coreKeywords && item.coreKeywords.length) ? '<div><span style="color:#b45309;font-weight:600;">明确要求(' + item.coreKeywords.length + ')：</span>' + highlightSearchText(item.coreKeywords.join('、'), query) + '</div>' : '') + ((item.auxKeywords && item.auxKeywords.length) ? '<div style="margin-top:3px;color:var(--gray-500);"><span style="color:var(--gray-400);">参考词(' + item.auxKeywords.length + ')：</span>' + highlightSearchText(item.auxKeywords.join('、'), query) + '</div>' : '') + '</div><div style="margin-top:4px;color:var(--gray-400);font-size:11px;">共 ' + ((item.coreKeywords || []).length + (item.auxKeywords || []).length) + ' 项要求</div>' + '</td><td style="white-space:pre-wrap;line-height:1.6;">' + highlightSearchText(item.content, query) + '</td><td class="admin-only"><button class="btn-link" onclick="openKnowledgeModal(\'' + item.type + '\',\'' + item.id + '\')">修改</button>' + srcActions + '<button class="btn-link danger" onclick="deleteKnowledgeItem(\'' + item.id + '\')">删除</button></td></tr>'; }
+    for (var j = 0; j < list.length; j++) { var item = list[j]; var tone = item.type === 'case-good' ? 'var(--success)' : (item.type === 'case-bad' || item.kind === 'missed' ? 'var(--danger)' : 'var(--info)'); var srcBadge = item.sourceType === 'file' ? '📄 ' : (item.sourceType === 'url' ? '🔗 ' : ''); var srcActions = item.sourceType === 'file' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开</button><button class="btn-link" onclick="downloadKnowledgeFileById(\'' + item.id + '\')">下载</button>' : (item.sourceType === 'url' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开链接</button>' : ''); html += '<tr id="knowledge-row-' + escHtml(item.id) + '"><td style="color:' + tone + ';font-weight:600;">' + escHtml(knowledgeTypeLabel(item.type)) + '<br><span style="font-size:11px;font-weight:400;">' + escHtml(knowledgeKindLabel(item.kind, item.summaryKind)) + '</span></td><td style="font-weight:600;">' + srcBadge + highlightSearchText(item.title, query) + '</td><td>' + highlightSearchText(getKnowledgeDimensions(item).join('\u3001'), query) + '</td><td style="font-size:12px;">' + '<div style="max-height:150px;overflow:auto;line-height:1.55;">' + ((item.coreKeywords && item.coreKeywords.length) ? '<div><span style="color:#b45309;font-weight:600;">明确要求(' + item.coreKeywords.length + ')：</span>' + highlightSearchText(item.coreKeywords.join('、'), query) + '</div>' : '') + ((item.auxKeywords && item.auxKeywords.length) ? '<div style="margin-top:3px;color:var(--gray-500);"><span style="color:var(--gray-400);">参考词(' + item.auxKeywords.length + ')：</span>' + highlightSearchText(item.auxKeywords.join('、'), query) + '</div>' : '') + '</div><div style="margin-top:4px;color:var(--gray-400);font-size:11px;">共 ' + ((item.coreKeywords || []).length + (item.auxKeywords || []).length) + ' 项要求</div>' + '</td><td style="white-space:pre-wrap;line-height:1.6;">' + highlightSearchText(item.content, query) + '</td><td class="' + editClass + '"><button class="btn-link" onclick="openKnowledgeModal(\'' + item.type + '\',\'' + item.id + '\')">修改</button>' + srcActions + '<button class="btn-link danger" onclick="deleteKnowledgeItem(\'' + item.id + '\')">删除</button></td></tr>'; }
     return html + '</tbody></table>';
   }
-  document.getElementById('caseLibraryWrap').innerHTML = renderRows(cases, caseQuery);
-  document.getElementById('knowledgeLibraryWrap').innerHTML = renderRows(knowledges, knowledgeQuery);
+  document.getElementById('caseLibraryWrap').innerHTML = renderRows(cases, caseQuery, 'case-edit-only');
+  document.getElementById('knowledgeLibraryWrap').innerHTML = renderRows(knowledges, knowledgeQuery, 'admin-only');
   var badge = document.getElementById('knowledgeBadge'); if (badge) badge.textContent = KNOWLEDGE_BASE.length;
 }
 function knowledgeItemMatches(text, item) {
@@ -4230,7 +4548,7 @@ function previewKnowledgeHits() {
   else if (hits === 0) box.innerHTML = dimTxt + reqTxt + '预计命中 <b style="color:var(--danger)">0</b> / ' + rawData.length + ' 条邮件——这些要求在当前邮件中未出现，保存后不会改变质检分数。建议补充英文术语或粘贴实际 SOP 原文（例如 refund / return / follow up）。';
   else box.innerHTML = dimTxt + reqTxt + '预计命中 <b style="color:var(--primary)">' + hits + '</b> / ' + rawData.length + ' 条邮件，保存后这些邮件将按本知识重新判分。';
 }
-function openKnowledgeModal(type, id) { if (!requireAdmin('修改质检知识库')) return;
+function openKnowledgeModal(type, id) { if (!qcRequireKnowledgeEdit(type)) return;
   if (!requireCloudAdmin()) return;
   var item = null;
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) item = KNOWLEDGE_BASE[i];
@@ -4269,7 +4587,7 @@ function findSimilarKnowledge(draft) { var found = []; for (var i = 0; i < KNOWL
 function showKnowledgeDuplicateHint(matches) { var box = document.getElementById('knowledgeDuplicateHint'); if (!box) return; if (!matches.length) { box.style.display = 'none'; box.innerHTML = ''; return; } var html = '<b>发现可能重合的知识：</b><br><span style="font-size:12px;">建议先查看已有内容，避免重复维护。</span>'; for (var i = 0; i < matches.length; i++) html += '<div style="margin-top:7px;padding-top:7px;border-top:1px solid #fed7aa;"><a href="#" onclick="jumpToKnowledge(\'' + matches[i].item.id + '\');return false;" style="color:var(--primary);font-weight:600;">' + escHtml(matches[i].item.title) + '</a>（' + escHtml(knowledgeTypeLabel(matches[i].item.type)) + '）<br><span style="font-size:12px;">' + escHtml(matches[i].similarity.reasons.join('、') || '关键词存在重合') + '</span></div>'; box.innerHTML = html; box.style.display = 'block'; }
 function checkKnowledgeDuplicate() { var dims = getSelectedKnowledgeDimensions(); var req = kbExtractRequirements({ title: document.getElementById('knowledgeTitle').value, content: document.getElementById('knowledgeContent').value }); var draft = { id: document.getElementById('knowledgeEditId').value, type: document.getElementById('knowledgeEditType').value, title: document.getElementById('knowledgeTitle').value, dimension: dims.join('\u3001'), dimensions: dims, content: document.getElementById('knowledgeContent').value, keywords: req.keywords, coreKeywords: req.core, auxKeywords: req.aux }; showKnowledgeDuplicateHint(findSimilarKnowledge(draft)); }
 function jumpToKnowledge(id) { closeKnowledgeModal(); var item = null; for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) item = KNOWLEDGE_BASE[i]; if (!item) return; var searchId = item.type === 'knowledge' ? 'knowledgeSearch' : 'caseSearch'; var search = document.getElementById(searchId); if (search) { search.value = item.title; } renderKnowledgeBase(); var row = document.getElementById('knowledge-row-' + id); if (row) { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); row.classList.add('knowledge-highlight'); setTimeout(function() { row.classList.remove('knowledge-highlight'); }, 2200); } }
-function saveKnowledgeItem() { if (!requireAdmin('保存质检知识')) return;
+function saveKnowledgeItem() { if (!qcRequireKnowledgeEdit(document.getElementById('knowledgeEditType').value)) return;
   if (!requireCloudAdmin()) return;
   var id = document.getElementById('knowledgeEditId').value;
   var type = document.getElementById('knowledgeEditType').value;
@@ -4306,7 +4624,7 @@ function saveKnowledgeItem() { if (!requireAdmin('保存质检知识')) return;
   if (rawData.length) { runQualityCheck(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求，正在重新质检全部数据', 'info'); }
   else { cloudSaveState(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求', 'success'); }
 }
-function deleteKnowledgeItem(id) { if (!requireAdmin('删除质检知识')) return;
+function deleteKnowledgeItem(id) { var _it = null; for (var _k = 0; _k < KNOWLEDGE_BASE.length; _k++) if (KNOWLEDGE_BASE[_k].id === id) _it = KNOWLEDGE_BASE[_k]; if (!_it) return; if (!qcRequireKnowledgeEdit(_it.type)) return;
   if (!requireCloudAdmin()) return;
   var item = null; for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) item = KNOWLEDGE_BASE[i];
   if (!item || !confirm('确认删除“' + item.title + '”？删除后会重新质检全部已有数据。')) return;
@@ -4370,7 +4688,10 @@ function downloadKnowledgeFileById(id) { downloadKnowledgeFile(findKnowledgeById
 // 渲染：质检标准（可编辑）
 // ============================================================
 function renderStandard() {
-  var html = '<table class="standard-table"><thead><tr><th style="width:120px;">一级指标</th><th style="width:130px;">二级指标</th><th style="width:60px;">分值</th><th style="width:70px;">等级</th><th>核查明细</th><th style="width:200px;">举例说明</th></tr></thead><tbody>';
+  var canEdit = qcCan('standard.edit');
+  var html = '';
+  if (!canEdit) html += '<div class="std-ro-banner">👁 当前为<b>只读视图</b>：质检标准只有管理员可以修改，你可以查看全部分值、等级与核查明细。</div>';
+  html += '<table class="standard-table"><thead><tr><th style="width:120px;">一级指标</th><th style="width:130px;">二级指标</th><th style="width:70px;">分值</th><th style="width:70px;">等级</th><th>核查明细</th><th style="width:200px;">举例说明</th></tr></thead><tbody>';
   for (var i = 0; i < STANDARDS.length; i++) {
     var cat = STANDARDS[i];
     var rs = 0;
@@ -4383,11 +4704,15 @@ function renderStandard() {
         if (j2 === 0 && k === 0) html += '<td class="category-cell" rowspan="' + rs + '">' + escHtml(cat.category) + '</td>';
         if (k === 0) html += '<td rowspan="' + item.levels.length + '" style="font-weight:600;">' + escHtml(item.name) + '</td>';
         if (item.isRedline) html += '<td style="text-align:center;color:var(--danger);font-weight:600;">整单0分</td>';
-        else html += '<td style="text-align:center;"><input type="number" value="' + level.score + '" data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="score" style="width:50px;"></td>';
+        else if (canEdit) html += '<td style="text-align:center;"><input type="number" value="' + level.score + '" data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="score" style="width:50px;"></td>';
+        else html += '<td style="text-align:center;"><span class="std-ro-score">' + level.score + '</span></td>';
         var gc = level.grade === '优秀' ? 'grade-excellent' : (level.grade === '达标' ? 'grade-pass' : 'grade-fail');
         html += '<td style="text-align:center;"><span class="' + gc + '">' + level.grade + '</span></td>';
-        html += '<td><textarea data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="detail">' + escHtml(level.detail) + '</textarea></td>';
-        html += '<td><textarea data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="example">' + escHtml(level.example) + '</textarea></td></tr>';
+        if (canEdit) html += '<td><textarea data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="detail">' + escHtml(level.detail) + '</textarea></td>';
+        else html += '<td><span class="std-ro-text">' + escHtml(level.detail) + '</span></td>';
+        if (canEdit) html += '<td><textarea data-cat="' + i + '" data-item="' + j2 + '" data-level="' + k + '" data-field="example">' + escHtml(level.example) + '</textarea></td>';
+        else html += '<td><span class="std-ro-text">' + escHtml(level.example || '—') + '</span></td>';
+        html += '</tr>';
       }
     }
   }
@@ -4398,15 +4723,27 @@ function renderStandard() {
     var rule = GRADE_RULES[g];
     var gc2 = rule.grade === '优秀' ? 'grade-excellent' : (rule.grade === '达标' ? 'grade-pass' : 'grade-fail');
     gh += '<tr><td style="text-align:center;"><span class="' + gc2 + '">' + rule.grade + '</span></td><td style="text-align:center;">';
-    if (rule.grade === '优秀') gh += '<input type="number" value="' + rule.minScore + '" data-grade="' + g + '" data-field="minScore" style="width:50px;"> 分以上';
-    else if (rule.grade === '达标') gh += '<input type="number" value="' + rule.minScore + '" data-grade="' + g + '" data-field="minScore" style="width:50px;"> - <input type="number" value="' + rule.maxScore + '" data-grade="' + g + '" data-field="maxScore" style="width:50px;"> 分';
-    else gh += '<input type="number" value="' + rule.maxScore + '" data-grade="' + g + '" data-field="maxScore" style="width:50px;"> 分以下';
-    gh += '</td><td><input type="text" value="' + escHtml(rule.description) + '" data-grade="' + g + '" data-field="description" style="width:100%;"></td></tr>';
+    if (!canEdit) {
+      if (rule.grade === '优秀') gh += '<b>' + rule.minScore + '</b> 分以上';
+      else if (rule.grade === '达标') gh += '<b>' + rule.minScore + '</b> - <b>' + rule.maxScore + '</b> 分';
+      else gh += '<b>' + rule.maxScore + '</b> 分以下';
+    } else {
+      if (rule.grade === '优秀') gh += '<input type="number" value="' + rule.minScore + '" data-grade="' + g + '" data-field="minScore" style="width:50px;"> 分以上';
+      else if (rule.grade === '达标') gh += '<input type="number" value="' + rule.minScore + '" data-grade="' + g + '" data-field="minScore" style="width:50px;"> - <input type="number" value="' + rule.maxScore + '" data-grade="' + g + '" data-field="maxScore" style="width:50px;"> 分';
+      else gh += '<input type="number" value="' + rule.maxScore + '" data-grade="' + g + '" data-field="maxScore" style="width:50px;"> 分以下';
+    }
+    gh += '</td><td>';
+    if (canEdit) gh += '<input type="text" value="' + escHtml(rule.description) + '" data-grade="' + g + '" data-field="description" style="width:100%;">';
+    else gh += '<span class="std-ro-text">' + escHtml(rule.description) + '</span>';
+    gh += '</td></tr>';
   }
   gh += '<tr><td colspan="3" style="text-align:center;font-weight:600;background:var(--gray-50);">总分：100分</td></tr></tbody></table>';
   document.getElementById('gradeRulesWrap').innerHTML = gh;
+  var notice = document.getElementById('stdNotice');
+  if (notice) notice.innerHTML = canEdit
+    ? '⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。'
+    : '👁 只读：质检标准与等级阈值只有管理员可以修改。';
 }
-
 function saveStandard() { if (!requireAdmin('保存质检标准')) return;
   if (!requireCloudAdmin()) return;
   var inputs = document.querySelectorAll('#standardTableWrap input, #standardTableWrap textarea, #gradeRulesWrap input');
@@ -4443,22 +4780,45 @@ function resetStandard() { if (!requireAdmin('恢复默认标准')) return;
 // 客服组织架构
 // ============================================================
 function renderOrg() {
+  normalizeOrgData();
   var html = '';
   for (var i = 0; i < ORG_DATA.length; i++) {
     var grp = ORG_DATA[i];
-    html += '<div class="org-group-card"><div class="org-group-header"><div><span class="group-name">' + escHtml(grp.group) + '</span><span class="group-count">' + grp.agents.length + '人</span></div><button class="btn-link danger" onclick="deleteGroup(' + i + ')">删除组别</button></div><div class="org-group-body">';
+    var opts = '<option value="">未设置组长</option>';
+    for (var o = 0; o < grp.agents.length; o++) opts += '<option value="' + escHtml(grp.agents[o]) + '"' + (grp.leader === grp.agents[o] ? ' selected' : '') + '>' + escHtml(grp.agents[o]) + '</option>';
+    html += '<div class="org-group-card"><div class="org-group-header"><div><span class="group-name">' + escHtml(grp.group) + '</span><span class="group-count">' + grp.agents.length + '人</span>' + (grp.leader ? '<span class="org-leader-badge">组长 · ' + escHtml(grp.leader) + '</span>' : '<span class="org-leader-badge org-leader-empty">未设组长</span>') + '</div><button class="btn-link danger admin-only" onclick="deleteGroup(' + i + ')">删除组别</button></div><div class="org-group-body">';
+    html += '<div class="org-leader-row admin-only"><span class="org-leader-label">组长（拥有本组申诉复核权限）</span><select class="org-leader-select" onchange="setGroupLeader(' + i + ', this.value)">' + opts + '</select></div>';
     for (var j = 0; j < grp.agents.length; j++) {
-      html += '<div class="org-agent-item"><span class="agent-name" id="agent-name-' + i + '-' + j + '">' + escHtml(grp.agents[j]) + '</span><div class="agent-actions"><button class="btn-link" onclick="editAgent(' + i + ',' + j + ')">修改</button><button class="btn-link danger" onclick="deleteAgent(' + i + ',' + j + ')">删除</button></div></div>';
+      var isLeader = grp.leader === grp.agents[j];
+      html += '<div class="org-agent-item' + (isLeader ? ' is-leader' : '') + '"><span class="agent-name" id="agent-name-' + i + '-' + j + '">' + escHtml(grp.agents[j]) + (isLeader ? ' <span class="org-leader-chip">组长</span>' : '') + '</span><div class="agent-actions admin-only"><button class="btn-link" onclick="editAgent(' + i + ',' + j + ')">修改</button><button class="btn-link danger" onclick="deleteAgent(' + i + ',' + j + ')">删除</button></div></div>';
     }
-    html += '<div class="org-add-agent" onclick="addAgentInline(' + i + ')">+ 添加客服</div></div></div>';
+    html += '<div class="org-add-agent admin-only" onclick="addAgentInline(' + i + ')">+ 添加客服</div></div></div>';
   }
   document.getElementById('orgGrid').innerHTML = html;
+  renderReviewerBar();
+}
+function setGroupLeader(groupIdx, name) { if (AUTH && !requireAdmin('设置组长')) return;
+  var grp = ORG_DATA[groupIdx];
+  if (!grp) return;
+  if (!requireCloudAdmin()) { renderOrg(); return; }
+  var val = String(name == null ? '' : name).trim();
+  if (val && grp.agents.indexOf(val) < 0) val = '';
+  if ((grp.leader || '') === val) return;
+  grp.leader = val;
+  saveOrg(); renderOrg(); cloudSaveState();
+  showToast(val ? ('已设「' + grp.group + '」组长：' + val + '（可复核本组申诉）') : ('已取消「' + grp.group + '」组长'), 'success');
+}
+function toggleGroupLeader(groupIdx, agentIdx) {
+  var grp = ORG_DATA[groupIdx];
+  if (!grp || !grp.agents[agentIdx]) return;
+  var name = grp.agents[agentIdx];
+  setGroupLeader(groupIdx, grp.leader === name ? '' : name);
 }
 
 // ===== sync org structure from AMZ (2026-11-17) =====
 var AMZ_SYNC_URL = 'https://ljpaugwnyoegaumshbnm.supabase.co';
 var AMZ_SYNC_ANON = 'sb_publishable_zuV-Roc02QN2epZYwb0SJQ_qOB9felB';
-function openAmzSyncModal() {
+function openAmzSyncModal() { if (AUTH && !requireAdmin('从 AMZ 同步')) return;
   if (!requireCloudAdmin()) return;
   try {
     var c = JSON.parse(sessionStorage.getItem('qc_amz_cred') || 'null');
@@ -4505,6 +4865,9 @@ function confirmSyncOrgFromAMZ() {
     if (!newOrg.length) throw new Error('AMZ 的「客服 → 分类组」映射为空，未做改动');
     var agentN = newOrg.reduce(function (a, g) { return a + g.agents.length; }, 0);
     if (!confirm('从 AMZ 读取到 ' + newOrg.length + ' 个分类组 / ' + agentN + ' 名客服：\n' + newOrg.map(function (g) { return '  · ' + g.group + '（' + g.agents.length + '人）'; }).join('\n') + '\n\n确认覆盖当前组织架构？')) { msg.textContent = '已取消'; btn.disabled = false; return; }
+    var _oldLeaders = {};
+    for (var _oi = 0; _oi < ORG_DATA.length; _oi++) if (ORG_DATA[_oi] && ORG_DATA[_oi].leader) _oldLeaders[ORG_DATA[_oi].group] = ORG_DATA[_oi].leader;
+    for (var _ni = 0; _ni < newOrg.length; _ni++) { var _ld = _oldLeaders[newOrg[_ni].group]; if (_ld && newOrg[_ni].agents.indexOf(_ld) >= 0) newOrg[_ni].leader = _ld; }
     ORG_DATA = newOrg;
     saveOrg(); renderOrg(); cloudSaveState();
     try { sessionStorage.setItem('qc_amz_cred', JSON.stringify({ u: u, p: pwd })); } catch (e) {}
@@ -4515,14 +4878,14 @@ function confirmSyncOrgFromAMZ() {
   });
 }
 
-function showAddGroupModal() {
+function showAddGroupModal() { if (AUTH && !requireAdmin('添加组别')) return;
   if (!requireCloudAdmin()) return;
   document.getElementById('newGroupName').value = '';
   document.getElementById('addGroupModal').classList.add('show');
   setTimeout(function() { document.getElementById('newGroupName').focus(); }, 100);
 }
 function closeAddGroupModal() { document.getElementById('addGroupModal').classList.remove('show'); }
-function confirmAddGroup() {
+function confirmAddGroup() { if (AUTH && !requireAdmin('添加组别')) return;
   if (!requireCloudAdmin()) return;
   var name = document.getElementById('newGroupName').value.trim();
   if (!name) { showToast('请输入组别名称', 'error'); return; }
@@ -4531,14 +4894,14 @@ function confirmAddGroup() {
   saveOrg(); renderOrg(); cloudSaveState(); closeAddGroupModal();
   showToast('已添加组别：' + name, 'success');
 }
-function deleteGroup(index) {
+function deleteGroup(index) { if (AUTH && !requireAdmin('删除组别')) return;
   if (!requireCloudAdmin()) return;
   var grp = ORG_DATA[index];
   if (!confirm('确认删除组别「' + grp.group + '」？该组下的 ' + grp.agents.length + ' 名客服将被移除。')) return;
   ORG_DATA.splice(index, 1); saveOrg(); renderOrg(); cloudSaveState();
   showToast('已删除组别：' + grp.group, 'success');
 }
-function editAgent(groupIdx, agentIdx) {
+function editAgent(groupIdx, agentIdx) { if (AUTH && !requireAdmin('修改客服')) return;
   if (!requireCloudAdmin()) return;
   var span = document.getElementById('agent-name-' + groupIdx + '-' + agentIdx);
   if (!span) return;
@@ -4555,6 +4918,7 @@ function editAgent(groupIdx, agentIdx) {
       if (i === groupIdx && j === agentIdx) continue;
       if (ORG_DATA[i].agents[j] === newName) { showToast('客服名字已存在：' + newName, 'error'); var s2 = document.createElement('span'); s2.className = 'agent-name'; s2.id = 'agent-name-' + groupIdx + '-' + agentIdx; s2.textContent = oldName; parent.replaceChild(s2, input); return; }
     }
+    if (ORG_DATA[groupIdx].leader === oldName) ORG_DATA[groupIdx].leader = newName;
     ORG_DATA[groupIdx].agents[agentIdx] = newName; saveOrg(); renderOrg(); cloudSaveState();
     showToast('已修改客服名字：' + oldName + ' → ' + newName, 'success');
   };
@@ -4563,14 +4927,15 @@ function editAgent(groupIdx, agentIdx) {
     if (e.key === 'Escape') { var s3 = document.createElement('span'); s3.className = 'agent-name'; s3.id = 'agent-name-' + groupIdx + '-' + agentIdx; s3.textContent = oldName; parent.replaceChild(s3, input); }
   };
 }
-function deleteAgent(groupIdx, agentIdx) {
+function deleteAgent(groupIdx, agentIdx) { if (AUTH && !requireAdmin('删除客服')) return;
   if (!requireCloudAdmin()) return;
   var name = ORG_DATA[groupIdx].agents[agentIdx];
   if (!confirm('确认删除客服「' + name + '」？')) return;
+  if (ORG_DATA[groupIdx].leader === name) ORG_DATA[groupIdx].leader = '';
   ORG_DATA[groupIdx].agents.splice(agentIdx, 1); saveOrg(); renderOrg(); cloudSaveState();
   showToast('已删除客服：' + name, 'success');
 }
-function addAgentInline(groupIdx) {
+function addAgentInline(groupIdx) { if (AUTH && !requireAdmin('添加客服')) return;
   if (!requireCloudAdmin()) return;
   var name = prompt('请输入客服名字：');
   if (!name || !name.trim()) return;
@@ -4597,8 +4962,8 @@ function handleOrgFileSelect(event) {
 function importOrgFromData(data) {
   if (!data || data.length < 2) { showToast('数据为空', 'error'); return; }
   var headers = data[0].map(function(h) { return String(h || '').trim(); });
-  var gc = -1, ac = -1;
-  for (var i = 0; i < headers.length; i++) { if (headers[i] === '组别' || headers[i].toLowerCase() === 'group') gc = i; if (headers[i] === '客服' || headers[i].toLowerCase() === 'agent') ac = i; }
+  var gc = -1, ac = -1, lc = -1;
+  for (var i = 0; i < headers.length; i++) { if (headers[i] === '组别' || headers[i].toLowerCase() === 'group') gc = i; if (headers[i] === '客服' || headers[i].toLowerCase() === 'agent') ac = i; if (headers[i] === '组长' || headers[i].toLowerCase() === 'leader') lc = i; }
   if (gc < 0 || ac < 0) { showToast('未找到"组别"和"客服"列。检测到的列：' + headers.join(', '), 'error'); return; }
   var newOrg = [], cur = '';
   for (var r = 1; r < data.length; r++) {
@@ -4613,12 +4978,13 @@ function importOrgFromData(data) {
     if (!found) newOrg.push({ group: cur, agents: [a] });
   }
   if (newOrg.length === 0) { showToast('未解析到有效数据', 'error'); return; }
+  if (lc >= 0) { var _lm = {}; for (var r2 = 1; r2 < data.length; r2++) { var _g2 = String((data[r2] || [])[gc] || '').trim(), _l2 = String((data[r2] || [])[lc] || '').trim(); if (_g2 && _l2) _lm[_g2] = _l2; } for (var n2 = 0; n2 < newOrg.length; n2++) { var _ld2 = _lm[newOrg[n2].group]; if (_ld2 && newOrg[n2].agents.indexOf(_ld2) >= 0) newOrg[n2].leader = _ld2; } }
   ORG_DATA = newOrg; saveOrg(); renderOrg(); cloudSaveState();
   showToast('已导入 ' + newOrg.length + ' 个组别', 'success');
 }
 function exportOrg() {
-  var rows = [['组别', '客服']];
-  for (var i = 0; i < ORG_DATA.length; i++) for (var j = 0; j < ORG_DATA[i].agents.length; j++) rows.push([j === 0 ? ORG_DATA[i].group : '', ORG_DATA[i].agents[j]]);
+  var rows = [['组别', '客服', '组长（拥有申诉复核权限）']];
+  for (var i = 0; i < ORG_DATA.length; i++) for (var j = 0; j < ORG_DATA[i].agents.length; j++) rows.push([j === 0 ? ORG_DATA[i].group : '', ORG_DATA[i].agents[j], j === 0 ? (ORG_DATA[i].leader || '') : '']);
   exportExcel(rows, '客服组织架构');
 }
 
@@ -4845,7 +5211,8 @@ function importAllData(data) {
   }
   rawData = data.rawData;
   results = data.results.map(function(r, i) { r._index = i; return normalizeResultAppeal(r); });
-  if (data.orgData) { ORG_DATA = data.orgData; saveOrg(); }
+  if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
+  try { if (typeof qcEnsureOrgAccounts === 'function') qcEnsureOrgAccounts(true); } catch (e) {}
   if (data.standards) { STANDARDS = data.standards; }
   if (data.gradeRules) { GRADE_RULES = data.gradeRules; }
   if (data.knowledgeBase && data.knowledgeBase.length) { KNOWLEDGE_BASE = data.knowledgeBase; }
@@ -4945,6 +5312,7 @@ function loadFromUrlHash() {
 // 初始化
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
+  try { qcAuthBoot(); } catch (e) { console.warn('auth boot failed', e); }
   document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
   document.getElementById('recordModal').addEventListener('click', function(e) { if (e.target === this) closeRecordModal(); });
   document.getElementById('uploadModal').addEventListener('click', function(e) { if (e.target === this) closeUploadModal(); });
@@ -5125,3 +5493,936 @@ function renderReplyChatHtml(text, boxId, agentNames) {
 }
 
 function rcToggle(id) { var el = document.getElementById(id); if (!el) return; el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none'; }
+
+// ============================================================
+// 账号登录 · 人员权限（2026-11-18）
+//   账号名 = 客服组织架构里的中文姓名；初始密码 123，首次登录强制改密
+//   角色：管理员 admin / 组长 leader（组织架构里被设为组长的人自动获得）/ 客服 member
+//   说明：本页是纯静态站，登录校验在前端完成，用于「分权展示 + 防误操作」；
+//         密码按需求明文保存，只有管理员能在「人员管理」里查看与重置。
+// ============================================================
+var USERS = [];
+var AUTH = null;
+var USERS_KEY = 'qc_users_v1';
+var SESSION_KEY = 'qc_session_v1';
+var INIT_PWD = '123';
+var SESSION_DAYS = 7;
+var PWD_FORCED = false;
+var QC_PERMS = {
+  admin: ['user.manage', 'standard.edit', 'logic.view', 'knowledge.edit', 'case.edit', 'org.edit', 'data.upload', 'appeal.review'],
+  leader: ['case.edit', 'appeal.review'],
+  member: []
+};
+
+function qcTrim(v) { return String(v == null ? '' : v).trim(); }
+function qcLeaderGroup(name) {
+  var n = qcTrim(name);
+  if (!n) return '';
+  normalizeOrgData();
+  for (var i = 0; i < ORG_DATA.length; i++) {
+    if (ORG_DATA[i] && ORG_DATA[i].leader === n) return ORG_DATA[i].group;
+  }
+  return '';
+}
+function qcAgentGroup(name) {
+  var n = qcTrim(name);
+  var map = getAgentGroupMap();
+  return map[n] || '';
+}
+function qcRoleOfUser(u) {
+  if (!u) return '';
+  if (u.role === 'admin') return 'admin';
+  return qcLeaderGroup(u.name) ? 'leader' : 'member';
+}
+function qcRoleLabel(u) {
+  var r = qcRoleOfUser(u);
+  if (r === 'admin') return '管理员';
+  var g = qcLeaderGroup(u.name);
+  if (g) return '组长（' + g + '）';
+  return '客服';
+}
+function qcCan(perm) {
+  if (!AUTH) return false;
+  var list = QC_PERMS[AUTH.role] || [];
+  return list.indexOf(perm) >= 0;
+}
+// 质检案例库：组长 + 管理员可编辑；质检知识：仅管理员
+function qcRequireCaseEdit(label) {
+  if (qcCan('case.edit')) return true;
+  showToast('「' + (label || '质检案例库') + '」只有组长和管理员可以修改，当前账号只能查看', 'error');
+  return false;
+}
+function qcRequireKnowledgeEdit(type) {
+  if (type === 'knowledge') {
+    if (qcCan('knowledge.edit')) return true;
+    showToast('「质检知识」只有管理员可以修改，当前账号只能查看', 'error');
+    return false;
+  }
+  return qcRequireCaseEdit('质检案例库');
+}
+// 这一单能不能复核（不弹提示，供界面用）
+function qcCanReviewResult(result) {
+  var grp = getAgentGroupMap()[result && result.agent] || '';
+  if (AUTH) {
+    if (AUTH.role === 'admin') return true;
+    if (AUTH.role !== 'leader') return false;
+    var mine = AUTH.group || qcLeaderGroup(AUTH.name) || '';
+    if (!mine) return false;
+    if (!grp) return false;   // 不在组织架构里的客服：只有管理员可复核
+    return mine === grp;
+  }
+  var rv = qcGetReviewer();
+  if (!rv) return false;
+  return !!grp && rv.group === grp;
+}
+
+// ---------- 用户表 ----------
+function qcNormalizeUsers(list) {
+  var out = [], seen = {};
+  list = Array.isArray(list) ? list : [];
+  for (var i = 0; i < list.length; i++) {
+    var u = list[i] || {};
+    var name = qcTrim(u.name);
+    if (!name || seen[name]) continue;
+    seen[name] = 1;
+    out.push({
+      name: name,
+      role: u.role === 'admin' ? 'admin' : 'member',
+      pwd: String(u.pwd == null ? INIT_PWD : u.pwd),
+      mustChangePwd: u.mustChangePwd === undefined ? false : !!u.mustChangePwd,
+      createdAt: u.createdAt || '',
+      updatedAt: u.updatedAt || ''
+    });
+  }
+  return out;
+}
+function qcDefaultUserList() {
+  var list = [{ name: '管理员', role: 'admin', pwd: INIT_PWD, mustChangePwd: true, createdAt: new Date().toISOString() }];
+  var seen = { '管理员': 1 };
+  normalizeOrgData();
+  for (var i = 0; i < ORG_DATA.length; i++) {
+    var agents = ORG_DATA[i].agents || [];
+    for (var j = 0; j < agents.length; j++) {
+      var n = qcTrim(agents[j]);
+      if (!n || seen[n]) continue;
+      seen[n] = 1;
+      list.push({ name: n, role: 'member', pwd: INIT_PWD, mustChangePwd: true, createdAt: new Date().toISOString() });
+    }
+  }
+  return list;
+}
+// 组织架构里出现的姓名（含组长、带编号的姓名）都视为可登录人员
+function qcOrgNameSet() {
+  var set = {};
+  try { normalizeOrgData(); } catch (e) {}
+  for (var i = 0; i < ORG_DATA.length; i++) {
+    var g = ORG_DATA[i]; if (!g) continue;
+    var ld = qcTrim(g.leader); if (ld) set[ld] = 1;
+    var ag = g.agents || [];
+    for (var j = 0; j < ag.length; j++) { var n = qcTrim(ag[j]); if (n) set[n] = 1; }
+  }
+  return set;
+}
+// 只补齐缺失账号（初始密码 123），绝不覆盖已有账号的密码/角色；返回新增姓名
+function qcEnsureOrgAccounts(save) {
+  var set = qcOrgNameSet(), added = [], n;
+  for (n in set) if (Object.prototype.hasOwnProperty.call(set, n) && !qcFindUser(n)) {
+    USERS.push({ name: n, role: 'member', pwd: INIT_PWD, mustChangePwd: true, createdAt: new Date().toISOString() });
+    added.push(n);
+  }
+  if (added.length) {
+    USERS = qcNormalizeUsers(USERS);
+    qcCacheUsers();
+    if (save) qcSaveUsers();
+  }
+  qcUpdateLoginCount();
+  return added;
+}
+function qcUpdateLoginCount() {
+  var el = document.getElementById('loginUserCount');
+  if (el) el.textContent = '共 ' + USERS.length + ' 个账号';
+}
+function qcCacheUsers() { try { localStorage.setItem(USERS_KEY, JSON.stringify(USERS)); } catch (e) {} }
+function qcReadCachedUsers() {
+  try { var s = localStorage.getItem(USERS_KEY); if (s) { var a = JSON.parse(s); if (Array.isArray(a) && a.length) return a; } } catch (e) {}
+  return null;
+}
+function qcFindUser(name) {
+  var n = qcTrim(name);
+  if (!n) return null;
+  for (var i = 0; i < USERS.length; i++) if (USERS[i].name === n) return USERS[i];
+  return null;
+}
+function qcUserIndex(name) {
+  var n = qcTrim(name);
+  for (var i = 0; i < USERS.length; i++) if (USERS[i].name === n) return i;
+  return -1;
+}
+function qcAdminCount() {
+  var c = 0;
+  for (var i = 0; i < USERS.length; i++) if (USERS[i].role === 'admin') c++;
+  return c;
+}
+function qcSaveUsers() {
+  qcCacheUsers();
+  if (!cloudDb) return Promise.resolve(false);
+  var payload = { state_key: 'qc_users', state_json: JSON.stringify({ version: 1, users: USERS, updatedAt: new Date().toISOString() }), updated_by: 'anonymous' };
+  return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function (res) {
+    if (res.error) throw res.error;
+    return true;
+  }).catch(function (err) {
+    showToast('人员数据云端同步失败：' + ((err && (err.message || err.details)) || '请稍后重试'), 'error');
+    return false;
+  });
+}
+function qcCloudLoadUsers() {
+  if (!cloudDb) return Promise.resolve(false);
+  var sel = cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key', 'qc_users').limit(1);
+  return sel.then(function (res) {
+    if (res.error) throw res.error;
+    var row = res.data && res.data.length ? res.data[0] : null;
+    if (row && row.state_json) {
+      var d = null;
+      try { d = JSON.parse(row.state_json); } catch (e) {}
+      if (d && Array.isArray(d.users) && d.users.length) {
+        USERS = qcNormalizeUsers(d.users);
+        qcCacheUsers();
+        qcOnUsersSynced();
+        return true;
+      }
+    }
+    // 云端还没有人员表：把本机默认名单写上去（只在列表非空时）
+    if (USERS.length) qcSaveUsers();
+    qcOnUsersSynced();
+    return false;
+  }).catch(function () { qcOnUsersSynced(); return false; });
+}
+function qcOnUsersSynced() {
+  var added = qcEnsureOrgAccounts(true);
+  var el = document.getElementById('loginSync');
+  if (el) el.textContent = '账号已同步（共 ' + USERS.length + ' 人）' + (added.length ? ' · 按组织架构新增 ' + added.length + ' 人' : '');
+  if (AUTH) { qcApplyAuth(); renderUsersPage(); }
+}
+
+// ---------- 登录态 ----------
+function qcSessionWrite(a) { try { localStorage.setItem(SESSION_KEY, JSON.stringify(a)); } catch (e) {} }
+function qcSessionRead() {
+  var s = null;
+  try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { s = null; }
+  if (!s || !s.name) return null;
+  if (!s.ts || (Date.now() - s.ts) > SESSION_DAYS * 864e5) { try { localStorage.removeItem(SESSION_KEY); } catch (e) {} return null; }
+  var u = qcFindUser(s.name);
+  if (!u) return null;
+  return { name: u.name, role: qcRoleOfUser(u), group: qcLeaderGroup(u.name) || '', ts: s.ts, mustChangePwd: !!u.mustChangePwd };
+}
+function qcAuthBoot() {
+  var cached = qcReadCachedUsers();
+  USERS = qcNormalizeUsers(cached && cached.length ? cached : qcDefaultUserList());
+  qcEnsureOrgAccounts(false);
+  qcCacheUsers();
+  var s = qcSessionRead();
+  if (s) {
+    AUTH = s;
+    qcApplyAuth();
+    qcHideLogin();
+    setTimeout(function () { qcReRenderAuthed(); }, 60);
+  } else {
+    qcShowLogin();
+  }
+  var sync = document.getElementById('loginSync');
+  if (sync && !AUTH) {
+    sync.textContent = '正在同步账号…';
+    setTimeout(function () {
+      var el = document.getElementById('loginSync');
+      if (el && el.textContent === '正在同步账号…') el.textContent = '离线：正在使用本机账号缓存';
+    }, 6000);
+  }
+  // 云端 main（含真实组织架构）加载完成后，按最终名单再补齐一次并写回云端
+  setTimeout(function () {
+    try {
+      var added = qcEnsureOrgAccounts(true);
+      if (added.length && AUTH) { try { renderUsersPage(); } catch (e) {} }
+    } catch (e) {}
+  }, 3200);
+}
+function qcShowLogin() {
+  var el = document.getElementById('loginShell');
+  if (!el) return;
+  el.classList.add('show');
+  document.body.classList.add('qc-locked');
+  setTimeout(function () { var n = document.getElementById('loginName'); if (n) n.focus(); }, 120);
+}
+function qcHideLogin() {
+  var el = document.getElementById('loginShell');
+  if (el) el.classList.remove('show');
+  document.body.classList.remove('qc-locked');
+}
+function qcLoginSubmit() {
+  var nameEl = document.getElementById('loginName');
+  var pwdEl = document.getElementById('loginPwd');
+  var err = document.getElementById('loginError');
+  var name = qcTrim(nameEl && nameEl.value);
+  var pwd = String((pwdEl && pwdEl.value) || '');
+  if (err) err.textContent = '';
+  if (!name) { if (err) err.textContent = '请输入姓名'; if (nameEl) nameEl.focus(); return; }
+  if (!pwd) { if (err) err.textContent = '请输入密码'; if (pwdEl) pwdEl.focus(); return; }
+  var u = qcFindUser(name);
+  if (!u) {
+    // 组织架构里的人（含组长、带编号姓名）即使账号表还没同步，也可用初始密码登录
+    var orgSet = qcOrgNameSet();
+    if (Object.prototype.hasOwnProperty.call(orgSet, name)) {
+      USERS.push({ name: name, role: 'member', pwd: INIT_PWD, mustChangePwd: true, createdAt: new Date().toISOString() });
+      USERS = qcNormalizeUsers(USERS);
+      qcCacheUsers();
+      qcSaveUsers();
+      qcUpdateLoginCount();
+      u = qcFindUser(name);
+    }
+  }
+  if (!u) {
+    if (err) err.textContent = '没有找到账号「' + name + '」：账号名就是你在客服组织架构里的中文姓名，请联系管理员开通';
+    return;
+  }
+  if (String(u.pwd) !== pwd) {
+    if (err) err.textContent = '密码不正确，请重新输入';
+    if (pwdEl) { pwdEl.value = ''; pwdEl.focus(); }
+    return;
+  }
+  qcStartSession(u);
+}
+function qcStartSession(u) {
+  AUTH = { name: u.name, role: qcRoleOfUser(u), group: qcLeaderGroup(u.name) || '', ts: Date.now(), mustChangePwd: !!u.mustChangePwd };
+  qcSessionWrite(AUTH);
+  qcApplyAuth();
+  qcHideLogin();
+  qcReRenderAuthed();
+  showToast('欢迎，' + u.name + '（' + qcRoleLabel(u) + '）', 'success');
+  if (u.mustChangePwd) {
+    setTimeout(function () {
+      var uu = qcFindUser(u.name);
+      if (uu && uu.mustChangePwd) qcOpenPwdModal(true);
+    }, 300);
+  }
+}
+function qcLogout() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+  AUTH = null;
+  location.reload();
+}
+function qcApplyAuth() {
+  var b = document.body;
+  if (!b) return;
+  var role = AUTH ? AUTH.role : '';
+  b.classList.toggle('admin-mode', role === 'admin');
+  b.classList.toggle('leader-mode', role === 'leader');
+  b.classList.toggle('member-mode', role === 'member');
+  b.classList.toggle('qc-authed', !!AUTH);
+  if (role === 'admin') { try { qcLogicUnlock(); } catch (e) {} } else { try { qcLogicLock(); } catch (e) {} }
+  var pwdBtn = document.getElementById('pwdBtn');
+  var outBtn = document.getElementById('logoutBtn');
+  if (pwdBtn) pwdBtn.style.display = AUTH ? '' : 'none';
+  if (outBtn) outBtn.style.display = AUTH ? '' : 'none';
+  qcUpdateUserChip();
+  try { updateAdminBadge(); } catch (e) {}
+}
+function qcUpdateUserChip() {
+  var el = document.getElementById('userChip');
+  if (!el) return;
+  if (!AUTH) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  var u = qcFindUser(AUTH.name) || { name: AUTH.name, role: AUTH.role === 'admin' ? 'admin' : 'member' };
+  var roleTxt = qcRoleLabel(u);
+  if (roleTxt === AUTH.name) roleTxt = '';
+  el.style.display = '';
+  el.innerHTML = '<span class="uc-name">' + escHtml(AUTH.name) + '</span>' + (roleTxt ? '<span class="uc-role">' + escHtml(roleTxt) + '</span>' : '');
+}
+function qcReRenderAuthed() {
+  try { renderStandard(); } catch (e) {}
+  try { renderKnowledgeBase(); } catch (e) {}
+  try { renderOrg(); } catch (e) {}
+  try { renderUsersPage(); } catch (e) {}
+  var usersTab = document.getElementById('tab-users');
+  if (usersTab && usersTab.classList.contains('active') && !qcCan('user.manage')) switchTabByName('detail');
+  var logicTab = document.getElementById('tab-qclogic');
+  if (logicTab && logicTab.classList.contains('active') && !qcCan('logic.view')) switchTabByName('detail');
+}
+// 兼容旧入口：右上角不再提供密钥登录
+function adminLogin() { showToast('请使用本人的姓名 + 密码登录', 'info'); if (!AUTH) qcShowLogin(); }
+function adminLogout() { qcLogout(); }
+function qcDevLogin(name) {
+  var u = qcFindUser(name) || { name: name, role: 'admin', pwd: INIT_PWD, mustChangePwd: false };
+  AUTH = { name: u.name, role: qcRoleOfUser(u), group: qcLeaderGroup(u.name) || '', ts: Date.now(), mustChangePwd: false };
+  qcSessionWrite(AUTH); qcApplyAuth(); qcHideLogin(); qcReRenderAuthed();
+  return AUTH.role;
+}
+
+// ---------- 改密码 ----------
+function qcOpenPwdModal(forced) {
+  PWD_FORCED = !!forced;
+  var t = document.getElementById('pwdModalTitle');
+  var hint = document.getElementById('pwdForceHint');
+  var cancel = document.getElementById('pwdCancelBtn');
+  var closeBtn = document.getElementById('pwdModalClose');
+  if (t) t.textContent = forced ? '首次登录 · 修改初始密码' : '修改密码';
+  if (hint) hint.style.display = forced ? 'block' : 'none';
+  if (cancel) cancel.style.display = forced ? 'none' : '';
+  if (closeBtn) closeBtn.style.display = forced ? 'none' : '';
+  ['pwdOld', 'pwdNew', 'pwdNew2'].forEach(function (id) { var e = document.getElementById(id); if (e) e.value = ''; });
+  var err = document.getElementById('pwdError');
+  if (err) err.textContent = '';
+  document.getElementById('pwdModal').classList.add('show');
+  setTimeout(function () { var o = document.getElementById('pwdOld'); if (o) o.focus(); }, 100);
+}
+function qcClosePwdModal() {
+  if (PWD_FORCED) { showToast('首次登录必须修改初始密码', 'error'); return; }
+  document.getElementById('pwdModal').classList.remove('show');
+}
+function qcSubmitPwd() {
+  if (!AUTH) return;
+  var u = qcFindUser(AUTH.name);
+  if (!u) { showToast('账号不存在，请重新登录', 'error'); return; }
+  var oldPwd = String((document.getElementById('pwdOld') || {}).value || '');
+  var n1 = String((document.getElementById('pwdNew') || {}).value || '');
+  var n2 = String((document.getElementById('pwdNew2') || {}).value || '');
+  var err = document.getElementById('pwdError');
+  function fail(msg) { if (err) err.textContent = msg; }
+  if (String(u.pwd) !== oldPwd) { fail('原密码不正确'); return; }
+  if (n1.length < 4) { fail('新密码至少 4 位'); return; }
+  if (n1.length > 24) { fail('新密码最多 24 位'); return; }
+  if (n1 === String(u.pwd)) { fail('新密码不能和原密码相同'); return; }
+  if (n1 !== n2) { fail('两次输入的新密码不一致'); return; }
+  u.pwd = n1;
+  u.mustChangePwd = false;
+  u.updatedAt = new Date().toISOString();
+  AUTH.mustChangePwd = false;
+  qcSessionWrite(AUTH);
+  qcSaveUsers();
+  PWD_FORCED = false;
+  document.getElementById('pwdModal').classList.remove('show');
+  renderUsersPage();
+  showToast('密码已修改，请牢记新密码', 'success');
+}
+
+// ---------- 人员管理 ----------
+function qcSetUser(name, patch) {
+  var i = qcUserIndex(name);
+  if (i < 0) return false;
+  for (var k in patch) if (patch.hasOwnProperty(k)) USERS[i][k] = patch[k];
+  USERS[i].updatedAt = new Date().toISOString();
+  return true;
+}
+function qcAfterUsersChanged(msg) {
+  qcSaveUsers();
+  renderUsersPage();
+  if (AUTH) {
+    var u = qcFindUser(AUTH.name);
+    AUTH.role = u ? qcRoleOfUser(u) : 'member';
+    AUTH.group = qcLeaderGroup(AUTH.name) || '';
+    qcSessionWrite(AUTH);
+    qcApplyAuth();
+    if (!qcCan('user.manage')) {
+      showToast('你的管理员权限已被移除', 'info');
+      switchTabByName('detail');
+    }
+  }
+  if (msg) showToast(msg, 'success');
+}
+function qcRoleBadge(u) {
+  var role = qcRoleOfUser(u);
+  var cls = role === 'admin' ? 'ur-admin' : (role === 'leader' ? 'ur-leader' : 'ur-member');
+  return '<span class="user-role ' + cls + '">' + escHtml(qcRoleLabel(u)) + '</span>';
+}
+function renderUsersPage() {
+  var wrap = document.getElementById('usersTableWrap');
+  if (!wrap) return;
+  if (!AUTH) { wrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--gray-400);">请先登录</div>'; return; }
+  if (!qcCan('user.manage')) {
+    wrap.innerHTML = '<div style="padding:30px;text-align:center;color:var(--gray-500);font-size:13px;">🔒 人员管理仅管理员可见</div>';
+    return;
+  }
+  var q = qcTrim((document.getElementById('userSearch') || {}).value).toLowerCase();
+  var list = [];
+  for (var i = 0; i < USERS.length; i++) {
+    if (q && USERS[i].name.toLowerCase().indexOf(q) < 0) continue;
+    list.push(USERS[i]);
+  }
+  var html = '<table class="standard-table user-table"><thead><tr>'
+    + '<th style="width:150px;">姓名（登录账号）</th><th style="width:110px;">角色</th><th style="width:80px;">归属组</th>'
+    + '<th style="width:180px;">密码</th><th style="width:110px;">状态</th><th>操作</th></tr></thead><tbody>';
+  if (!list.length) {
+    html += '<tr><td colspan="6" style="text-align:center;padding:26px;color:var(--gray-400);">没有匹配的人员</td></tr>';
+  }
+  for (var j = 0; j < list.length; j++) {
+    var u = list[j];
+    var nm = escHtml(u.name).replace(/'/g, '&#39;');
+    var shown = !!(window.__qcPwdShown && window.__qcPwdShown[u.name]);
+    var grp = qcLeaderGroup(u.name) || qcAgentGroup(u.name) || '—';
+    var inOrg = !!qcAgentGroup(u.name) || !!qcLeaderGroup(u.name);
+    var status = u.mustChangePwd ? '<span class="user-flag">未改初始密码</span>'
+      : ((inOrg || qcRoleOfUser(u) === 'admin') ? '<span class="user-flag ok">正常</span>' : '<span class="user-flag off">不在组织架构</span>');
+    html += '<tr>'
+      + '<td style="font-weight:600;">' + escHtml(u.name) + (AUTH && AUTH.name === u.name ? ' <span style="font-size:11px;color:var(--primary);font-weight:600;">（我）</span>' : '') + '</td>'
+      + '<td>' + qcRoleBadge(u) + '</td>'
+      + '<td style="color:var(--gray-600);">' + escHtml(grp) + '</td>'
+      + '<td><span class="pwd-val">' + (shown ? escHtml(u.pwd) : '••••••') + '</span><button class="btn-link" onclick="qcTogglePwd(\'' + nm + '\')">' + (shown ? '隐藏' : '显示') + '</button><button class="btn-link" onclick="qcResetPwd(\'' + nm + '\')">重置</button></td>'
+      + '<td>' + status + '</td>'
+      + '<td class="ops">'
+      + '<button class="btn-link" onclick="qcEditUser(\'' + nm + '\')">编辑</button>'
+      + '<button class="btn-link" onclick="qcToggleAdmin(\'' + nm + '\')">' + (u.role === 'admin' ? '取消管理员' : '设为管理员') + '</button>'
+      + '<button class="btn-link danger" onclick="qcDeleteUser(\'' + nm + '\')">删除</button>'
+      + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  html += '<div style="margin-top:10px;font-size:12px;color:var(--gray-500);">共 ' + USERS.length + ' 个账号 · 管理员 ' + qcAdminCount() + ' 人 · 组长按组织架构自动识别</div>';
+  wrap.innerHTML = html;
+  renderPermMatrix();
+}
+function renderPermMatrix() {
+  var box = document.getElementById('permMatrixWrap');
+  if (!box) return;
+  var rows = [
+    ['人员管理（账号 / 密码 / 角色）', 'yes', 'no', 'no'],
+    ['质检标准（修改分值、等级）', 'yes', 'ro', 'ro'],
+    ['质检逻辑（判分说明书）', 'yes', 'no', 'no'],
+    ['质检知识（新增 / 修改 / 删除）', 'yes', 'ro', 'ro'],
+    ['质检案例库（好案例 / 不好案例）', 'yes', 'yes', 'no'],
+    ['客服组织架构（组别 / 组长 / 客服）', 'yes', 'no', 'no'],
+    ['上传质检数据', 'yes', 'no', 'no'],
+    ['申诉复核（逐项重新打分）', 'yes', '本组', 'no']
+  ];
+  var html = '<table class="perm-matrix"><thead><tr><th style="width:300px;">功能</th><th style="width:120px;">管理员</th><th style="width:150px;">组长</th><th>客服</th></tr></thead><tbody>';
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    html += '<tr><td>' + escHtml(r[0]) + '</td>'
+      + '<td class="' + (r[1] === 'yes' ? 'yes' : '') + '">' + (r[1] === 'yes' ? '✔ 可编辑' : '—') + '</td>'
+      + '<td class="' + (r[2] === 'yes' ? 'yes' : (r[2] === 'ro' ? 'ro' : 'no')) + '">' + (r[2] === 'yes' ? '✔ 可编辑' : (r[2] === 'ro' ? '👁 只读' : (r[2] === '本组' ? '✔ 仅本组' : '—'))) + '</td>'
+      + '<td class="' + (r[3] === 'yes' ? 'yes' : (r[3] === 'ro' ? 'ro' : 'no')) + '">' + (r[3] === 'yes' ? '✔ 可编辑' : (r[3] === 'ro' ? '👁 只读' : '—')) + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  html += '<div class="perm-tip">组长身份不在这里设置：在「客服组织架构」里把某人设为组长后，该账号登录即获得本组申诉复核权；组长的上级管理员可复核全部组。<br>账号名必须与组织架构中的中文姓名完全一致，才能自动匹配组别与组长权限。</div>';
+  box.innerHTML = html;
+}
+function qcTogglePwd(name) {
+  if (!window.__qcPwdShown) window.__qcPwdShown = {};
+  window.__qcPwdShown[name] = !window.__qcPwdShown[name];
+  renderUsersPage();
+}
+function qcResetPwd(name) {
+  if (!qcCan('user.manage')) return;
+  if (!confirm('把「' + name + '」的密码重置为初始密码 123？该用户下次登录需重新设置密码。')) return;
+  qcSetUser(name, { pwd: INIT_PWD, mustChangePwd: true });
+  qcAfterUsersChanged('已重置「' + name + '」的密码为 123');
+}
+function qcToggleAdmin(name) {
+  if (!qcCan('user.manage')) return;
+  var u = qcFindUser(name);
+  if (!u) return;
+  if (u.role === 'admin') {
+    if (qcAdminCount() <= 1) { showToast('至少要保留 1 个管理员账号', 'error'); return; }
+    if (AUTH && AUTH.name === name && !confirm('取消自己的管理员权限后将立即失去人员管理等权限，确认？')) return;
+    qcSetUser(name, { role: 'member' });
+    qcAfterUsersChanged('已取消「' + name + '」的管理员权限');
+  } else {
+    qcSetUser(name, { role: 'admin' });
+    qcAfterUsersChanged('已把「' + name + '」设为管理员');
+  }
+}
+function qcDeleteUser(name) {
+  if (!qcCan('user.manage')) return;
+  var u = qcFindUser(name);
+  if (!u) return;
+  if (AUTH && AUTH.name === name) { showToast('不能删除当前登录的账号', 'error'); return; }
+  if (u.role === 'admin' && qcAdminCount() <= 1) { showToast('至少要保留 1 个管理员账号', 'error'); return; }
+  if (!confirm('确认删除账号「' + name + '」？删除后该姓名将无法登录（组织架构不受影响）。')) return;
+  USERS = USERS.filter(function (x) { return x.name !== name; });
+  qcAfterUsersChanged('已删除账号：' + name);
+}
+function qcEditUser(name) {
+  if (!qcCan('user.manage')) return;
+  var u = qcFindUser(name);
+  if (!u) return;
+  var newName = prompt('修改姓名（同时是登录账号）：', u.name);
+  if (newName === null) return;
+  newName = qcTrim(newName);
+  if (!newName) { showToast('姓名不能为空', 'error'); return; }
+  if (newName === u.name) return;
+  if (qcFindUser(newName)) { showToast('已存在同名账号：' + newName, 'error'); return; }
+  var wasSelf = AUTH && AUTH.name === u.name;
+  USERS[qcUserIndex(u.name)].name = newName;
+  if (wasSelf) { AUTH.name = newName; qcSessionWrite(AUTH); }
+  qcAfterUsersChanged('已改名为：' + newName);
+}
+function qcSyncUsersFromOrg() {
+  if (!qcCan('user.manage')) return;
+  normalizeOrgData();
+  var added = [];
+  for (var i = 0; i < ORG_DATA.length; i++) {
+    var agents = ORG_DATA[i].agents || [];
+    for (var j = 0; j < agents.length; j++) {
+      var n = qcTrim(agents[j]);
+      if (!n) continue;
+      if (!qcFindUser(n)) {
+        USERS.push({ name: n, role: 'member', pwd: INIT_PWD, mustChangePwd: true, createdAt: new Date().toISOString() });
+        added.push(n);
+      }
+    }
+  }
+  USERS = qcNormalizeUsers(USERS);
+  qcAfterUsersChanged(added.length ? ('已从组织架构新增 ' + added.length + ' 个账号：' + added.join('、')) : '组织架构里的姓名都已经有账号了');
+}
+function qcOpenUserModal() {
+  if (!qcCan('user.manage')) return;
+  document.getElementById('userModalTitle').textContent = '新增人员';
+  document.getElementById('userName').value = '';
+  document.getElementById('userRole').value = 'member';
+  document.getElementById('userPwd').value = INIT_PWD;
+  var err = document.getElementById('userError');
+  if (err) err.textContent = '';
+  document.getElementById('userModal').classList.add('show');
+  setTimeout(function () { var n = document.getElementById('userName'); if (n) n.focus(); }, 100);
+}
+function qcCloseUserModal() { document.getElementById('userModal').classList.remove('show'); }
+function qcSubmitUser() {
+  if (!qcCan('user.manage')) return;
+  var name = qcTrim(document.getElementById('userName').value);
+  var role = document.getElementById('userRole').value === 'admin' ? 'admin' : 'member';
+  var pwd = String(document.getElementById('userPwd').value || INIT_PWD);
+  var err = document.getElementById('userError');
+  if (!name) { if (err) err.textContent = '请填写姓名'; return; }
+  if (qcFindUser(name)) { if (err) err.textContent = '已存在同名账号：' + name; return; }
+  if (pwd.length < 4) { if (err) err.textContent = '初始密码至少 4 位'; return; }
+  USERS.push({ name: name, role: role, pwd: pwd, mustChangePwd: true, createdAt: new Date().toISOString() });
+  USERS = qcNormalizeUsers(USERS);
+  qcCloseUserModal();
+  qcAfterUsersChanged('已新增账号：' + name + '（初始密码 ' + pwd + '）');
+}
+
+// ============================================================
+// 申诉状态三色角标 + 申诉消息中心（2026-11-18）
+//   待审核 = 红 / 申诉通过（含部分通过）= 绿 / 申诉被拒 = 黄
+//   统计范围按登录账号 + 客服组织架构：
+//     管理员 = 全部；组长 = 本组组员；客服 = 本人（result.agent）
+//   红 = 实时待处理数（状态驱动，审核后自动减少）
+//   绿/黄 = 结果通知未读数，点开对应分类即视为查看 → 标记已读 → 数字消失
+//   已读按「用户」存云端 qc_appeal_reads 单独一行（绝不写 main）+ localStorage 即时缓存
+// ============================================================
+var APPEAL_READS = {};                       // { 用户名: { readKey: 1 } }
+var APPEAL_READS_LOCAL = 'qc_appeal_reads_v1';
+var APPEAL_READS_ROW = 'qc_appeal_reads';
+var APPEAL_BADGE_TAB = 'pending';
+var APPEAL_SYNC_AT = 0;
+var APPEAL_SYNC_BUSY = false;
+var APPEAL_READS_CLOUD_LOADED = false;
+var APPEAL_BUCKETS = [
+  { key: 'pending',  label: '待审核',   emoji: '🔴', cls: 't-pending' },
+  { key: 'passed',   label: '申诉通过', emoji: '🟢', cls: 't-passed' },
+  { key: 'rejected', label: '申诉被拒', emoji: '🟡', cls: 't-rejected' }
+];
+
+function qcAppealMine() { return (typeof AUTH !== 'undefined' && AUTH) ? AUTH.name : ''; }
+function qcAppealStableKey(r) {
+  try { return getStableRecordKey(r); }
+  catch (e) { return [r.account || '', r.agent || '', r.order || ''].join('||'); }
+}
+function qcAppealBucket(status) {
+  if (status === '待审核') return 'pending';
+  if (status === '申诉通过' || status === '部分通过') return 'passed';
+  if (status === '申诉被拒') return 'rejected';
+  return '';
+}
+function qcAppealReadKey(r, bucket) {
+  var stamp = (r.appeal && (r.appeal.reviewedAt || r.appeal.submittedAt)) || '';
+  return qcAppealStableKey(r) + '||' + bucket + '||' + stamp;
+}
+function qcAppealStatus(r) {
+  try { return getAppealStatus(r); }
+  catch (e) { return (r.appeal && r.appeal.status) || '无申诉'; }
+}
+// 这条记录是否落在当前登录人的可见范围
+function qcAppealInScope(r) {
+  if (typeof AUTH === 'undefined' || !AUTH || !r) return false;
+  var me = AUTH.name;
+  if (AUTH.role === 'admin') return true;
+  if (AUTH.role === 'leader') {
+    var mine = AUTH.group || (typeof qcLeaderGroup === 'function' ? qcLeaderGroup(me) : '') || '';
+    var grp = '';
+    try { grp = getAgentGroupMap()[r.agent] || ''; } catch (e) {}
+    return !!mine && grp === mine;
+  }
+  return String(r.agent || '').trim() === String(me || '').trim();
+}
+function qcAppealIsRead(r, bucket) {
+  var me = qcAppealMine();
+  if (!me) return true;
+  var m = APPEAL_READS[me] || {};
+  return !!m[qcAppealReadKey(r, bucket)];
+}
+// 三个角标的数字
+function qcAppealCounts() {
+  var c = { pending: 0, passed: 0, rejected: 0 };
+  if (typeof AUTH === 'undefined' || !AUTH || typeof results === 'undefined' || !results) return c;
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (!r || !qcAppealInScope(r)) continue;
+    var b = qcAppealBucket(qcAppealStatus(r));
+    if (!b) continue;
+    if (b === 'pending') { c.pending++; continue; }   // 实时待办，不受已读影响
+    if (!qcAppealIsRead(r, b)) c[b]++;                 // 结果类：只数未读
+  }
+  return c;
+}
+function qcAppealScopeLabel() {
+  if (typeof AUTH === 'undefined' || !AUTH) return '';
+  if (AUTH.role === 'admin') return '全部申诉';
+  if (AUTH.role === 'leader') return '本组（' + (AUTH.group || '') + '）';
+  return '我的申诉';
+}
+// 刷新顶栏三色角标
+function qcRefreshAppealBadges() {
+  var bar = document.getElementById('appealBadgeBar');
+  if (!bar) return;
+  if (typeof AUTH === 'undefined' || !AUTH) { bar.style.display = 'none'; return; }
+  bar.style.display = 'inline-flex';
+  var c = qcAppealCounts();
+  var defs = [
+    ['pending', 'abNumPending', 'abPending'],
+    ['passed', 'abNumPassed', 'abPassed'],
+    ['rejected', 'abNumRejected', 'abRejected']
+  ];
+  for (var i = 0; i < defs.length; i++) {
+    var b = defs[i][0];
+    var num = document.getElementById(defs[i][1]);
+    var chip = document.getElementById(defs[i][2]);
+    if (num) num.textContent = c[b];
+    if (chip) { if (c[b] > 0) chip.classList.add('has-count'); else chip.classList.remove('has-count'); }
+  }
+  var scope = document.getElementById('appealBadgeScope');
+  if (scope) scope.textContent = qcAppealScopeLabel();
+  var scope2 = document.getElementById('appealInboxScope');
+  if (scope2) scope2.textContent = '统计范围：' + qcAppealScopeLabel();
+}
+
+// ---------- 已读持久化 ----------
+function qcAppealMergeReads(o) {
+  if (!o || typeof o !== 'object') return;
+  for (var u in o) if (Object.prototype.hasOwnProperty.call(o, u)) {
+    if (!APPEAL_READS[u]) APPEAL_READS[u] = {};
+    var m = o[u] || {}, k;
+    for (k in m) if (Object.prototype.hasOwnProperty.call(m, k)) APPEAL_READS[u][k] = 1;
+  }
+}
+function qcAppealLoadLocal() {
+  try { var s = localStorage.getItem(APPEAL_READS_LOCAL); if (s) qcAppealMergeReads(JSON.parse(s)); } catch (e) {}
+}
+function qcAppealCacheLocal() {
+  try { localStorage.setItem(APPEAL_READS_LOCAL, JSON.stringify(APPEAL_READS)); } catch (e) {}
+}
+function qcCloudLoadAppealReads() {
+  qcAppealLoadLocal();
+  if (typeof cloudDb === 'undefined' || !cloudDb) { try { qcRefreshAppealBadges(); } catch (e) {} return Promise.resolve(false); }
+  return cloudDb.from('qc_dashboard_state').select('state_key,state_json').eq('state_key', APPEAL_READS_ROW).limit(1)
+    .then(function (res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (row && row.state_json) {
+        try { var d = JSON.parse(row.state_json); if (d && d.reads) qcAppealMergeReads(d.reads); } catch (e) {}
+      }
+      qcAppealCacheLocal();
+      APPEAL_READS_CLOUD_LOADED = true;
+      try { qcRefreshAppealBadges(); } catch (e) {}
+      return true;
+    }).catch(function () { try { qcRefreshAppealBadges(); } catch (e) {} return false; });
+}
+function qcSaveAppealReads() {
+  qcAppealCacheLocal();
+  if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false);
+  var payload = {
+    state_key: APPEAL_READS_ROW,
+    state_json: JSON.stringify({ version: 1, reads: APPEAL_READS, updatedAt: new Date().toISOString() }),
+    updated_by: 'anonymous'
+  };
+  return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' })
+    .then(function (res) { if (res && res.error) throw res.error; return true; })
+    .catch(function () { return false; });
+}
+function qcAppealMarkRead(list, bucket) {
+  var me = qcAppealMine();
+  if (!me) return false;
+  if (!APPEAL_READS[me]) APPEAL_READS[me] = {};
+  var m = APPEAL_READS[me], changed = false;
+  for (var i = 0; i < list.length; i++) {
+    var k = qcAppealReadKey(list[i], bucket);
+    if (!m[k]) { m[k] = 1; changed = true; }
+  }
+  if (changed) qcAppealFlushReads();
+  return changed;
+}
+// 写回前先读云端、把别人的已读记录并进来，避免多人同时标记时互相覆盖（只增不减）
+function qcAppealFlushReads() {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return qcSaveAppealReads();
+  return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', APPEAL_READS_ROW).limit(1)
+    .then(function (res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (row && row.state_json) {
+        try { var d = JSON.parse(row.state_json); if (d && d.reads) qcAppealMergeReads(d.reads); } catch (e) {}
+      }
+      APPEAL_READS_CLOUD_LOADED = true;
+      return qcSaveAppealReads();
+    }).catch(function () { return qcSaveAppealReads(); });
+}
+
+// ---------- 申诉消息中心 ----------
+function qcAppealList(bucket) {
+  var out = [];
+  if (typeof results === 'undefined' || !results) return out;
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (!r || !qcAppealInScope(r)) continue;
+    if (qcAppealBucket(qcAppealStatus(r)) === bucket) out.push(r);
+  }
+  return out;
+}
+function qcOpenAppealInbox(bucket) {
+  if (typeof AUTH === 'undefined' || !AUTH) { try { showToast('请先登录查看申诉消息', 'error'); } catch (e) {} return; }
+  APPEAL_BADGE_TAB = bucket || 'pending';
+  var box = document.getElementById('appealInboxModal');
+  if (box) box.classList.add('show');
+  // 打开结果类分类 = 已查看：标记已读，彩色数字清除
+  if (bucket === 'passed' || bucket === 'rejected') qcAppealMarkRead(qcAppealList(bucket), bucket);
+  qcRenderAppealInbox();
+  qcRefreshAppealBadges();
+  qcSyncAppealsFromCloud();   // 跨设备：拉一次云端最新申诉状态（节流 + 静默）
+}
+function qcCloseAppealInbox() {
+  var box = document.getElementById('appealInboxModal');
+  if (box) box.classList.remove('show');
+}
+function qcSwitchAppealTab(bucket) {
+  APPEAL_BADGE_TAB = bucket;
+  if (bucket === 'passed' || bucket === 'rejected') qcAppealMarkRead(qcAppealList(bucket), bucket);
+  qcRenderAppealInbox();
+  qcRefreshAppealBadges();
+}
+function qcRenderAppealInbox() {
+  var tabsBox = document.getElementById('appealInboxTabs');
+  var listBox = document.getElementById('appealInboxList');
+  if (!tabsBox || !listBox) return;
+  var c = qcAppealCounts(), th = '';
+  for (var t = 0; t < APPEAL_BUCKETS.length; t++) {
+    var d = APPEAL_BUCKETS[t];
+    var n = d.key === 'pending' ? qcAppealList('pending').length : c[d.key];
+    th += '<div class="ai-tab ' + d.cls + (APPEAL_BADGE_TAB === d.key ? ' active' : '') + '" onclick="qcSwitchAppealTab(\'' + d.key + '\')">'
+        + d.emoji + ' ' + d.label + ' <span class="ai-tab-num">' + n + '</span></div>';
+  }
+  tabsBox.innerHTML = th;
+  var scope2 = document.getElementById('appealInboxScope');
+  if (scope2) scope2.textContent = '统计范围：' + qcAppealScopeLabel();
+
+  var list = qcAppealList(APPEAL_BADGE_TAB);
+  var curLabel = '';
+  for (var q = 0; q < APPEAL_BUCKETS.length; q++) if (APPEAL_BUCKETS[q].key === APPEAL_BADGE_TAB) curLabel = APPEAL_BUCKETS[q].label;
+  if (!list.length) {
+    listBox.innerHTML = '<div class="ai-empty"><span class="ai-empty-icon">📭</span>暂无「' + curLabel + '」的申诉记录</div>';
+    return;
+  }
+  var h = '';
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i], a = r.appeal || {};
+    var idx = (r._index !== undefined && r._index !== null) ? r._index : results.indexOf(r);
+    var grp = '';
+    try { grp = getGroupByAgent(r.agent); } catch (e) {}
+    var unread = (APPEAL_BADGE_TAB !== 'pending' && !qcAppealIsRead(r, APPEAL_BADGE_TAB));
+    h += '<div class="ai-item">'
+      + '<div class="ai-main">'
+      +   '<div class="ai-line1"><span class="ai-name">' + escHtml(r.agent || '-') + '</span>'
+      +     '<span class="ai-meta">' + escHtml(grp || '未分组') + '</span>'
+      +     appealStatusBadge(qcAppealStatus(r))
+      +     (unread ? '<span class="ai-unread-dot" title="未读"></span>' : '')
+      +   '</div>'
+      +   '<div class="ai-line1"><span class="ai-order">平台单号 ' + escHtml(r.order || '-') + '</span>'
+      +     '<span class="ai-meta">账号 ' + escHtml(r.account || '-') + '</span>'
+      +     '<span class="ai-meta">总分 ' + (r.totalScore === undefined || r.totalScore === null ? '-' : r.totalScore) + '</span></div>'
+      +   (a.reason ? '<div class="ai-reason"><b>申诉理由：</b>' + escHtml(a.reason) + '</div>' : '')
+      +   (a.reviewReason ? '<div class="ai-reason"><b>复核说明：</b>' + escHtml(a.reviewReason) + '</div>' : '')
+      +   (a.reviewer ? '<div class="ai-reason"><b>复核人：</b>' + escHtml(a.reviewer) + (a.reviewedAt ? ' · ' + escHtml(String(a.reviewedAt).replace('T', ' ').slice(0, 19)) : '') + '</div>' : '')
+      + '</div>'
+      + '<div class="ai-ops"><button class="btn btn-outline btn-sm" onclick="qcInboxGoDetail(' + idx + ')">查看详情</button></div>'
+      + '</div>';
+  }
+  listBox.innerHTML = h;
+}
+function qcInboxGoDetail(idx) {
+  qcCloseAppealInbox();
+  try { switchTabByName('detail'); } catch (e) {}
+  setTimeout(function () {
+    try { openAppealModal(idx); }
+    catch (e) { try { showDetail(idx); } catch (e2) {} }
+  }, 60);
+}
+
+// ---------- 跨设备：打开消息中心时拉一次云端最新申诉状态 ----------
+// 只把 appeal 字段合并进本地 results（不重跑质检、不写回 main、不重绘表格），带节流与静默失败
+function qcSyncAppealsFromCloud() {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return;
+  var now = Date.now();
+  if (APPEAL_SYNC_BUSY || now - APPEAL_SYNC_AT < 9000) return;
+  APPEAL_SYNC_AT = now;
+  APPEAL_SYNC_BUSY = true;
+  cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', 'main').limit(1)
+    .then(function (res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (!row || !row.state_json) return;
+      var d;
+      try { d = JSON.parse(row.state_json); } catch (e) { return; }
+      if (!d || !d.results || typeof results === 'undefined' || !results) return;
+      var map = {}, i;
+      for (i = 0; i < d.results.length; i++) map[qcAppealStableKey(d.results[i])] = d.results[i];
+      var changed = false;
+      for (i = 0; i < results.length; i++) {
+        var r = results[i], cr = map[qcAppealStableKey(r)];
+        if (!cr) continue;
+        var os = qcAppealStatus(r), ns = (cr.appeal && cr.appeal.status) || '无申诉';
+        if (os !== ns) { r.appeal = cr.appeal; changed = true; }
+      }
+      if (changed) qcRefreshAppealBadges();
+      var box = document.getElementById('appealInboxModal');
+      if (box && box.classList.contains('show')) qcRenderAppealInbox();
+      APPEAL_SYNC_BUSY = false;
+    }).catch(function () { APPEAL_SYNC_BUSY = false; });
+}
+
+// ---------- 登录 / 会话恢复 / 权限切换后立即按新身份重算角标 ----------
+(function () {
+  function wrap(name) {
+    try {
+      var orig = window[name];
+      if (typeof orig !== 'function') return;
+      window[name] = function () {
+        var ret = orig.apply(this, arguments);
+        try { qcRefreshAppealBadges(); } catch (e) {}
+        return ret;
+      };
+    } catch (e) {}
+  }
+  wrap('qcApplyAuth');      // 登录态应用 / 会话恢复 / 权限变化
+  wrap('qcStartSession');   // 登录成功
+  wrap('qcAfterUsersChanged'); // 人员/角色变更
+})();
+
+// ---------- 启动兜底：本地已读 + 云端已读 + 定时重算/跨设备同步 ----------
+(function () {
+  function boot() {
+    qcAppealLoadLocal();
+    try { qcRefreshAppealBadges(); } catch (e) {}
+    setTimeout(function () { try { qcCloudLoadAppealReads(); } catch (e) {} }, 1600);
+    // 登录后拉一次云端最新申诉状态（组员刚提交 / 组长刚审核，另一台设备较快看到）
+    setTimeout(function () {
+      try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
+    }, 3200);
+    // 低频兜底：登录态下每 15s 重算一次，并拉一次云端最新申诉状态（内部有节流/并发保护）
+    setInterval(function () {
+      try { qcRefreshAppealBadges(); } catch (e) {}
+      try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
+    }, 15000);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();
