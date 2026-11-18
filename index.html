@@ -407,6 +407,32 @@ table.data-table th.cell-center { text-align:center; }
 table.data-table th { font-size:11.5px; padding:9px 6px; }
 </style>
 
+<style id="odr-detail-css">
+/* ===== 明细表：ODR 改名 + 移除订单金额列后的列宽/间距重排 ===== */
+#detailTable th, #detailTable td { padding:7px 6px; vertical-align:middle; }
+#detailTable th { font-size:11px; font-weight:600; color:var(--gray-600); }
+#detailTable th:nth-child(1), #detailTable td:nth-child(1) { width:40px; text-align:center; padding-left:6px; padding-right:3px; }
+#detailTable th:nth-child(2), #detailTable td:nth-child(2) { white-space:nowrap; }
+#detailTable th:nth-child(3), #detailTable td:nth-child(3) { white-space:nowrap; }
+#detailTable th:nth-child(4), #detailTable td:nth-child(4) { white-space:nowrap; }
+#detailTable th:nth-child(5), #detailTable td:nth-child(5) { width:50px; text-align:center; }
+#detailTable th:nth-child(6), #detailTable td:nth-child(6) { white-space:nowrap; }
+#detailTable th:nth-child(7), #detailTable td:nth-child(7) { white-space:nowrap; }
+#detailTable th:nth-child(n+8):nth-child(-n+13) { text-align:center; }
+#detailTable td:nth-child(n+8):nth-child(-n+13) { text-align:center; min-width:46px; }
+#detailTable th:nth-last-child(-n+7), #detailTable td:nth-last-child(-n+7) { text-align:center; padding-left:5px; padding-right:5px; white-space:nowrap; }
+#detailTable th:nth-child(7), #detailTable td:nth-child(7) { border-right:1px solid var(--gray-200); }
+#detailTable th:nth-last-child(7), #detailTable td:nth-last-child(7) { border-left:1px solid var(--gray-200); }
+#detailTable td:nth-last-child(4) .clickable + .clickable { margin-left:8px; }
+
+/* ===== 回邮数据（方案B）：横排 + 项间细竖线 + 金额主色 ===== */
+.rc-base-row { gap:0 !important; }
+.rc-base-row .rc-base { padding:0 14px; }
+.rc-base-row .rc-base:first-child { padding-left:0; }
+.rc-base-row .rc-base:last-child { padding-right:0; }
+.rc-base-row .rc-base + .rc-base { border-left:1px solid var(--gray-200); }
+.rc-base-row .rc-base-v.rc-amt-v { color:#2563eb !important; font-size:13.5px !important; font-weight:800 !important; }
+</style>
 <style id="ov-layout-final-css">
 /* 概览区定稿：四宫格数字放大 + 平均去信数纯数字居中 + 重点关注底部虚线 */
 /* 1) 四宫格黑色数字放大到 32px（满高满块、无虚线、内容居中保持原样） */
@@ -435,6 +461,11 @@ table.data-table th { font-size:11.5px; padding:9px 6px; }
 .rc-cust .rc-bubble{background:#eef4ff;border:1px solid #dbe6ff;color:#1e293b;}
 .rc-agent .rc-bubble{background:#edfaf0;border:1px solid #d3ebd9;color:#1e293b;}
 .rc-line.rc-cn{color:#475569;margin-top:2px;}
+.rc-line:not(.rc-cn)+.rc-line.rc-cn{margin-top:6px;padding-top:5px;border-top:1px dashed rgba(148,163,184,.45);}
+.rc-line+.rc-line{margin-top:3px;}
+.rc-line.rc-cn+.rc-line.rc-cn{margin-top:3px;}
+.rc-msg.rc-bot .rc-name{color:#0f766e;}
+.rc-all .rc-msg:last-child{margin-bottom:0;}
 .rc-expand{text-align:center;padding:7px 0 3px;border-top:1px dashed #e2e8f0;font-size:12px;color:#2563eb;font-weight:600;cursor:pointer;}
 .rc-expand:hover{text-decoration:underline;}
 .rc-pop{position:absolute;left:-1px;right:-1px;top:-1px;z-index:30;height:auto;background:#fff;border:1px solid #e2e8f0;border-radius:8px;box-shadow:0 14px 32px rgba(15,23,42,.22);padding:10px 12px;overflow:visible;}

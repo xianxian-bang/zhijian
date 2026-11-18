@@ -272,7 +272,7 @@ function switchTab(tabName, el) {
   for (var j = 0; j < contents.length; j++) contents[j].classList.remove('active');
   el.classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
-  if (tabName === 'dashboard' && results.length > 0) setTimeout(renderDashboard, 50);
+  if (tabName === 'dashboard') setTimeout(qcSyncDashboard, 50);
   if (tabName === 'standard') setTimeout(renderStandard, 50);
   if (tabName === 'qclogic') setTimeout(renderQcLogic, 50);
   if (tabName === 'knowledge') setTimeout(renderKnowledgeBase, 50);
@@ -2762,7 +2762,7 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center">FBM订单缺陷率</th><th>客服</th><th>平台单号</th><th class="cell-center">订单金额</th>';
+  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率">ODR</th><th>客服</th><th>平台单号</th>';
   for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
   html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
        + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
@@ -2770,11 +2770,11 @@ function renderDetailTable() {
        + '<th title="占比 ≥ 50% 参与考核，只有「是」的单计入数据看板">是否考核</th></tr></thead><tbody>';
   var sendStat = buildSendStat(); // 只用于单元格 tooltip（该客服跨单累计）
   if (filtered.length === 0) {
-    html += '<tr><td colspan="' + (8 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
+    html += '<tr><td colspan="' + (7 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
-      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(r.agent) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td><td class="cell-center">' + qcMoney(r.account, r.orderAmount) + '</td>';
+      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(r.agent) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
         if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
@@ -2803,8 +2803,63 @@ function renderDetailTable() {
   var badge = document.getElementById('detailBadge');
   if (badge) badge.textContent = filtered.length;
   renderDetailOverview(filtered);
+  qcDashSyncCheck();
 }
 
+// ============================================================
+// 质检明细 → 数据看板 联动（2026-11-18）
+// 明细数据一有变化（上传 / 申诉审核 / 云端同步 / 重跑质检），看板自动同步：
+//   · 看板当前可见 → 立即重算 KPI / 组别统计 / 图表 / 汇总报表，并重建筛选选项
+//   · 看板不可见 → 只标记待刷新，切到看板时再算（避免在隐藏容器里初始化图表）
+// 用「数据指纹」判断真假变化：仅切换筛选不改数据，不会多余重算。
+// ============================================================
+var __qcDashFp = '';
+var __qcDashDirty = false;
+function qcDataFingerprint() {
+  var n = results.length, h = 5381;
+  for (var i = 0; i < n; i++) {
+    var r = results[i] || {};
+    var s = (r.account || '') + '|' + (r.agent || '') + '|' + (r.date || '') + '|'
+      + (r.grade || '') + '|' + (r.totalScore === undefined || r.totalScore === null ? '' : r.totalScore) + '|'
+      + (r.appeal && r.appeal.status ? r.appeal.status : '') + '|' + (isAssessedResult(r) ? 1 : 0);
+    for (var k = 0; k < s.length; k++) h = ((h * 33) ^ s.charCodeAt(k)) >>> 0;
+  }
+  return n + '-' + h;
+}
+function qcRebuildDashFilters() {
+  var groups = {}, accounts = {}, agents = {};
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (r.account) accounts[r.account] = true;
+    if (r.agent) { agents[r.agent] = true; groups[dashboardGroup(r)] = true; }
+  }
+  function fill(id, obj, label) {
+    var el = document.getElementById(id); if (!el) return;
+    var prev = el.value;
+    var html = '<option value="">' + label + '</option>';
+    Object.keys(obj).sort().forEach(function(x) { html += '<option value="' + escHtml(x) + '">' + escHtml(x) + '</option>'; });
+    el.innerHTML = html;
+    el.value = (prev && obj[prev]) ? prev : '';
+  }
+  fill('dashFilterGroup', groups, '全部组别');
+  fill('dashFilterAccount', accounts, '全部账号');
+  fill('dashFilterAgent', agents, '全部客服');
+}
+function qcSyncDashboard() {
+  if (!document.getElementById('dashboardContent')) return;
+  try { qcRebuildDashFilters(); } catch (e) {}
+  try { renderDashboard(); } catch (e) {}
+  __qcDashFp = qcDataFingerprint();
+  __qcDashDirty = false;
+}
+function qcDashSyncCheck() {
+  var fp = qcDataFingerprint();
+  if (fp === __qcDashFp) return;
+  __qcDashFp = fp;
+  __qcDashDirty = true;
+  var t = document.getElementById('tab-dashboard');
+  if (t && t.classList.contains('active')) qcSyncDashboard();
+}
 function jsStr(s) {
   // 生成单引号 JS 字符串，内部转义单引号、反斜杠、换行
   return "'" + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n').replace(/\r/g, '\\r') + "'";
@@ -2897,7 +2952,7 @@ function showDetail(index) {
   var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
   html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">FBM订单缺陷率</td><td>' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(r.agent) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (r.orderAmount !== undefined && r.orderAmount !== '' ? escHtml(r.orderAmount) : '-') + '</td></tr>';
@@ -2941,6 +2996,7 @@ function showDetail(index) {
   html += '<div class="rc-base-row">'
         + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
+        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, r.orderAmount) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(r.agent) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
@@ -2958,6 +3014,7 @@ function showDetail(index) {
   var dr = r.reply || '';
   var _qcAgentNames = [];
   for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
+  if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
   html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, 'replyChat_' + index, _qcAgentNames) + '</div>';
   // 四个登记字段已上移到“回邮数据”标题行横向并列
   html += '</div>';
@@ -4589,7 +4646,7 @@ function clearAllData() { if (!requireAdmin('清空数据')) return;
 // ============================================================
 function exportDetail(type) {
   if (results.length === 0) { showToast('无数据可导出', 'error'); return; }
-  var headers = ['序号', '组别', '账号', 'FBM订单缺陷率', '客服', '平台单号', '订单金额', '日期'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
+  var headers = ['序号', '组别', '账号', 'ODR', '客服', '平台单号', '订单金额', '日期'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
@@ -4902,75 +4959,143 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 
-// ===== 回邮数据气泡排版（落地 20261117-2221） =====
+// ===== 回邮数据气泡排版 v3（20261118）：按发送者名界限分段、完整保留正文 =====
 function qcFmtTime(s) { return String(s || '').replace(/^(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}:\d{2})$/, '$1 $2'); }
-function qcCleanNoise(s) {
-  return String(s || '')
-    .replace(/(收起|复制|标签归类设置跟进标签|跟进标签请选择标签归类|客诉标签请选择模板|上传附件发送发票草稿|标签归类|跟进标签|客诉标签|请选择模板|发送发票|上传附件|草稿)/g, ' ')
-    .replace(/\s+/g, ' ').trim();
+var QC_RC_SENDER_EXTRA = ['robot', '机器人', '自动回复'];
+// 只清理界面工具条噪声，正文一律保留（含换行）
+function qcRcStripNoise(s) {
+  var t = String(s == null ? '' : s).replace(/\r\n?/g, '\n');
+  t = t.replace(/(?:中英|英中|中文|英文|中|英)?(?:复制|收起)/g, ' ');
+  t = t.replace(/(?:标签归类设置跟进标签|跟进标签请选择标签归类|客诉标签请选择模板|上传附件发送发票草稿)/g, ' ');
+  t = t.replace(/(?:标签归类|跟进标签|客诉标签|请选择模板|请选择|发送发票|上传附件|草稿|设置)/g, ' ');
+  t = t.replace(/[ \t\u00a0]+/g, ' ');
+  t = t.replace(/\n{3,}/g, '\n\n');
+  var prev;
+  do {
+    prev = t;
+    t = t.replace(/\s*(?:[中英]|复制|收起|设置|请选择(?:模板)?|草稿)\s*$/, function (m0) {
+      if (/^[中英]$/.test(m0)) return m0;
+      return '';
+    });
+  } while (t !== prev);
+  // 工具条去掉后残留的分隔符（如“共配。 /”）
+  t = t.replace(/(?<=[\u3400-\u9fff。！？，、；：.!?])[\s\u00a0]*[\/|]+[\s\u00a0]*$/, '');
+  return t.replace(/^[\s\u00a0]+/, '').replace(/[ \t\u00a0]+$/, '');
 }
-function qcSplitBody(body) {
-  body = qcCleanNoise(body);
-  if (!body) return [];
-  var m = body.match(/[\u3400-\u9fff]/);
-  if (!m || m.index === 0) return [body];
-  var foreign = body.slice(0, m.index).trim();
-  var cn = body.slice(m.index).trim();
-  return [foreign, cn].filter(Boolean);
+function qcRcLooksLikeName(s) {
+  if (!s) return false;
+  if (/[。！？，、；：.!?,;:()（）【】\[\]"'“”‘’]/.test(s)) return false;
+  if (/[\u3400-\u9fff]/.test(s)) return s.length <= 8;
+  return s.length <= 30;
 }
-function parseReplyChat(text, agentNames) {
+// 从“时间戳之前的一段文本”里截出发送者名（名字一定是这段的后缀）
+function qcRcNameOf(src, from, to, names) {
+  var end = to;
+  while (end > from && /[\s\u00a0]/.test(src.charAt(end - 1))) end--;
+  var seg = src.slice(from, end);
+  if (!seg) return { name: '', start: end };
+  var cut = 0, re = /(?:收起|复制|中英|英中|设置|请选择模板|请选择|标签归类|跟进标签|客诉标签|草稿)/g, m;
+  while ((m = re.exec(seg)) !== null) cut = m.index + m[0].length;
+  var lastP = -1;
+  for (var i = cut; i < seg.length; i++) {
+    if (/[。！？，、；：.!?,;:]/.test(seg.charAt(i))) lastP = i;
+  }
+  var cand = seg.slice(Math.max(cut, lastP + 1)).replace(/^[\s\u00a0:：\-—/]+/, '');
+  if (!cand) return { name: '', start: end };
+  // 名字后面常挂一个未读数字（如“刘琳1”“陈静2”），匹配名字时忽略它
+  var candNoDigit = cand.replace(/\d+$/, '');
+  var digitLen = cand.length - candNoDigit.length;
+  // 已知发送者名（客服/robot/客户）作为界限，取最长后缀匹配
+  var best = '';
+  for (var k = 0; k < names.length; k++) {
+    var nm = String(names[k] == null ? '' : names[k]).trim();
+    if (!nm || nm.length > 30 || candNoDigit.length < nm.length) continue;
+    if (candNoDigit.slice(candNoDigit.length - nm.length).toLowerCase() === nm.toLowerCase() && nm.length > best.length) best = nm;
+  }
+  if (best) return { name: best, start: end - best.length - digitLen };
+  // 尾部拉丁词串（Laura Montagner / JavierMuñiz / robot）；容忍前面粘着一个工具条残留汉字
+  var lm = candNoDigit.match(/[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*(?:\s+[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*){0,3}$/u);
+  if (lm && lm[0]) {
+    var latin = lm[0].replace(/^[\u3400-\u9fff]+/, '').trim();
+    if (latin && latin.length <= 30 && !/[\u3400-\u9fff]/.test(latin)) return { name: latin, start: end - latin.length - digitLen };
+  }
+  // 纯中文名（≤8 字，允许尾部未读数字）
+  var cm = candNoDigit.match(/[\u3400-\u9fff]{2,8}$/);
+  if (cm) return { name: cm[0], start: end - cm[0].length - digitLen };
+  // 兜底：认不出名字就不猜，整段留给正文（正文一个字都不丢）
+  return { name: '', start: end };
+}
+function parseReplyChat(text, names) {
   var src = String(text == null ? '' : text).replace(/\r/g, '');
-  agentNames = agentNames || [];
+  names = (names || []).filter(Boolean);
   if (!src || src === '无联客记录') return [];
-  var re = /(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})\s*(\([^)]*拉取时间[^)]*\)|\[(?:发送成功|发送失败|已撤回)\])/g;
+  var re = /(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}:\d{2})\s*([(（][^)）]*拉取时间[^)）]*[)）]|\[(?:发送成功|发送失败|已撤回)\])/g;
   var marks = [], mm;
   while ((mm = re.exec(src)) !== null) {
-    var tail = mm[2];
-    var isCust = tail.indexOf('拉取时间') >= 0;
-    var status = '';
+    var tail = mm[3], isCust = tail.indexOf('拉取时间') >= 0;
     var sm = tail.match(/(未回复|已回复|发送成功|发送失败|已撤回)/);
-    if (sm) status = sm[1];
-    var pm = tail.match(/拉取时间[:：]\s*(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2}:\d{2})/);
-    marks.push({ timeStart: mm.index, markEnd: mm.index + mm[0].length, role: isCust ? 'customer' : 'agent', status: status, pullTime: pm ? qcFmtTime(pm[1]) : '', time: qcFmtTime(mm[1]) });
+    var pm = tail.match(/拉取时间[:：]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}:\d{2})/);
+    marks.push({
+      timeStart: mm.index, markEnd: mm.index + mm[0].length,
+      role: isCust ? 'customer' : 'agent',
+      status: sm ? sm[1] : '',
+      pullTime: pm ? pm[1] + ' ' + pm[2] : '',
+      time: mm[1] + ' ' + mm[2]
+    });
   }
   if (!marks.length) return [];
-  function nameStartOf(mk) {
-    var i = mk.timeStart - 1;
-    while (i >= 0 && /[\u4e00-\u9fa5A-Za-z\s]/.test(src.charAt(i))) i--;
-    var start = i + 1;
-    // 客服消息：以已知客服名为界限，名字只截到客服名本身；
-    // 客服名前面的正文（如“全额退款”）退回上一段顾客回邮，不再并入客服名。
-    if (mk.role === 'agent' && agentNames.length) {
-      var seg = src.slice(start, mk.timeStart);
-      var best = 0;
-      for (var a = 0; a < agentNames.length; a++) {
-        var nm = String(agentNames[a] || '').trim();
-        if (!nm) continue;
-        if (seg.length >= nm.length && seg.slice(seg.length - nm.length) === nm && nm.length > best) best = nm.length;
-      }
-      if (best > 0) return mk.timeStart - best;
-    }
-    return start;
-  }
   var out = [];
   for (var i = 0; i < marks.length; i++) {
     var mk = marks[i];
-    var ns = nameStartOf(mk);
-    var nameRaw = src.slice(ns, mk.timeStart);
-    var np = nameRaw.split(/(?:收起|复制)/);
-    var name = np[np.length - 1].replace(/^[中，,\s]+/, '').replace(/\s+/g, ' ').trim();
-    if (name.length > 24) name = name.slice(-24);
-    var nextNs = (i + 1 < marks.length) ? nameStartOf(marks[i + 1]) : src.length;
-    var body = qcCleanNoise(src.slice(mk.markEnd, nextNs));
+    var from = i > 0 ? marks[i - 1].markEnd : 0;
+    var ni = qcRcNameOf(src, from, mk.timeStart, names);
+    var nextStart = (i + 1 < marks.length) ? qcRcNameOf(src, mk.markEnd, marks[i + 1].timeStart, names).start : src.length;
+    if (nextStart < mk.markEnd) nextStart = mk.markEnd;
+    var body = qcRcStripNoise(src.slice(mk.markEnd, nextStart));
+    var name = String(ni.name || '').trim();
     if (!name && !body) continue;
-    out.push({ role: mk.role, name: name, sendTime: mk.time, pullTime: mk.pullTime, status: mk.status, lines: qcSplitBody(body) });
+    out.push({ role: mk.role, name: name, sendTime: mk.time, pullTime: mk.pullTime, status: mk.status, body: body });
   }
-  return out;
+  var ded = [];
+  for (var j = 0; j < out.length; j++) {
+    var p = ded[ded.length - 1];
+    if (p && p.role === out[j].role && p.sendTime === out[j].sendTime && p.body === out[j].body && p.status === out[j].status) continue;
+    ded.push(out[j]);
+  }
+  return ded;
+}
+// 两遍解析：第一遍收集客户名，第二遍用完整名库做界限
+function parseReplyChatFull(text, agentNames) {
+  var names = (agentNames || []).concat(QC_RC_SENDER_EXTRA);
+  var arr = parseReplyChat(text, names);
+  var extra = [];
+  for (var i = 0; i < arr.length; i++) {
+    var n = arr[i].name;
+    if (n && n.length <= 30 && qcRcLooksLikeName(n) && names.indexOf(n) < 0 && extra.indexOf(n) < 0) extra.push(n);
+  }
+  if (extra.length) arr = parseReplyChat(text, names.concat(extra));
+  return arr;
 }
 function qcEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+// 一条消息正文：外文段与中文段分行，保留原有换行
+function qcRcBodyHtml(body) {
+  var lines = String(body || '').replace(/\r/g, '').split('\n');
+  var html = '';
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i].replace(/^[ \t\u00a0]+|[ \t\u00a0]+$/g, '');
+    if (!ln) continue;
+    var m = ln.match(/[\u3400-\u9fff]/);
+    if (!m || m.index === 0) { html += '<div class="rc-line rc-cn">' + qcEsc(ln) + '</div>'; continue; }
+    var fo = ln.slice(0, m.index).trim(), cn = ln.slice(m.index).trim();
+    if (fo) html += '<div class="rc-line">' + qcEsc(fo) + '</div>';
+    if (cn) html += '<div class="rc-line rc-cn">' + qcEsc(cn) + '</div>';
+  }
+  return html;
+}
 function rcBubbleHtml(x) {
   var isCust = x.role === 'customer';
   var name = x.name || (isCust ? '客户' : '客服');
+  var isBot = /^(robot|机器人|自动回复)$/i.test(name);
   var statusHtml = '';
   if (x.status === '未回复') statusHtml = '<span class="rc-status rc-unreplied">未回复</span>';
   else if (x.status === '已回复') statusHtml = '<span class="rc-status rc-replied">已回复</span>';
@@ -4978,29 +5103,15 @@ function rcBubbleHtml(x) {
   var metaTail = x.pullTime
     ? '（拉取时间：' + qcEsc(x.pullTime) + (statusHtml ? '，' + statusHtml : '') + '）'
     : (statusHtml ? ' ' + statusHtml : '');
-  var linesHtml = x.lines.map(function (ln, j) {
-    var isCn = (x.lines.length > 1 && j === x.lines.length - 1);
-    return '<div class="rc-line' + (isCn ? ' rc-cn' : '') + '">' + qcEsc(ln) + '</div>';
-  }).join('');
-  return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + '">'
+  return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + (isBot ? ' rc-bot' : '') + '">'
     + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span> <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
-    + '<div class="rc-bubble">' + linesHtml + '</div></div>';
+    + '<div class="rc-bubble">' + qcRcBodyHtml(x.body) + '</div></div>';
 }
 function renderReplyChatHtml(text, boxId, agentNames) {
   boxId = boxId || 'replyChat';
-  var arr = parseReplyChat(text, agentNames);
+  var arr = parseReplyChatFull(text, agentNames);
   if (!arr.length) return '<div class="detail-msg-box">' + qcEsc(text || '') + '</div>';
-  var N = arr.length, KEEP = 2;
-  var keepHtml = arr.slice(0, KEEP).map(rcBubbleHtml).join('');
-  var allHtml = arr.map(rcBubbleHtml).join('');
-  var popId = boxId + 'Pop';
-  var h = '<div class="rc-wrap" id="' + boxId + '">'
-    + '<div class="rc-keep">' + keepHtml + '</div>'
-    + (N > KEEP ? '<div class="rc-expand" onclick="rcToggle(\'' + popId + '\')">▼ 展开全部 ' + N + ' 封会话</div>' : '')
-    + '<div class="rc-pop" id="' + popId + '" style="display:none">'
-    + '<div class="rc-pop-body">' + allHtml + '</div>'
-    + '<div class="rc-pop-foot"><span class="rc-pop-close" onclick="rcToggle(\'' + popId + '\')">▲ 收起</span></div>'
-    + '</div></div>';
-  return h;
+  return '<div class="rc-wrap" id="' + boxId + '"><div class="rc-all">' + arr.map(rcBubbleHtml).join('') + '</div></div>';
 }
+
 function rcToggle(id) { var el = document.getElementById(id); if (!el) return; el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none'; }
