@@ -399,14 +399,117 @@ function normalizeResultAppeal(result) { if (!result) return result; result.reco
 function getAppealStatus(result) { return normalizeAppeal(result && result.appeal).status; }
 function appealStatusClass(status) { return status === '待审核' ? 'appeal-pending' : (status === '部分通过' || status === '申诉通过' ? 'appeal-approved' : (status === '申诉被拒' ? 'appeal-rejected' : 'appeal-none')); }
 function appealStatusBadge(status) { return '<span class="appeal-badge ' + appealStatusClass(status) + '">' + escHtml(status || '无申诉') + '</span>'; }
-function cloudStatePayload() { return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: results, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
+function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
 function qcLoadSnapshotFallback() { try { if (rawData && rawData.length > 0) return; } catch(e) {} fetch('qc-snapshot-20261016.json', { cache: 'no-store' }).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function(data) { if (!data || !data.rawData || !data.results || (rawData && rawData.length > 0)) return; importAllData(data); setCloudStatus('云端数据库隔离中，已加载本地快照（只读）', 'var(--warning)'); showToast('云端数据库暂不可用，已加载本地快照数据；云端恢复并刷新页面后将自动同步', 'info'); }).catch(function(e) { setCloudStatus('云端读取失败', 'var(--danger)'); }); }
-function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = JSON.parse(row.state_json); if (data && data.results && data.rawData) { importAllData(data); } } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
-function cloudSaveState() { if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化')); var payload = { state_key: 'main', state_json: JSON.stringify(cloudStatePayload()), updated_by: 'anonymous' }; return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); return res; }).catch(function(err){ showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error'); throw err; }); }
+function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = JSON.parse(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
+function cloudSaveState() { if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化')); var payloadObj = cloudStatePayload(); var payload = { state_key: 'main', state_json: JSON.stringify(payloadObj), updated_by: 'anonymous' }; try { qcSaveCacheFromPayload(payloadObj); } catch (e) {} return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); return res; }).catch(function(err){ showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error'); throw err; }); }
 function cloudClearState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').delete().eq('state_key','main').then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); }).catch(function(err){ showToast('云端清空失败：' + (err.message || ''), 'error'); throw err; }); }
 function initCloudBase() { if (!window.CloudBaseSDK) { setCloudStatus('云端SDK加载失败', 'var(--danger)'); return; } try { cloudApp = window.CloudBaseSDK.init({ env: CLOUDBASE_ENV_ID, region: CLOUDBASE_REGION, accessKey: CLOUDBASE_ACCESS_KEY, auth: { detectSessionInUrl: true } }); cloudDb = cloudApp.rdb(); cloudReady = true; var auth = cloudApp.auth; if (auth && typeof auth.signInAnonymously === 'function') { auth.signInAnonymously().then(function(res) { if (res && res.error) throw res.error; cloudLoadState(); }).catch(function(err) { setCloudStatus('匿名认证失败', 'var(--danger)'); showToast('云端匿名认证失败，尝试加载本地快照…', 'info'); qcLoadSnapshotFallback(); }); } else { cloudLoadState(); } } catch(e) { setCloudStatus('云端初始化失败', 'var(--danger)'); showToast('云端初始化失败：' + (e.message || ''), 'error'); } }
 window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 
+// ============================================================
+// 性能优化：本地缓存秒开 + 云端数据瘦身（2026-11-18）
+// 云端 state_json 曾达 8.42MB，其中 results.reply 与 rawData.reply 完全重复（占37%）。
+// 策略：① 写回剥离 reply，加载时内存补回；② LZString 压缩缓存到 localStorage，
+//       页面启动先秒开缓存，后台拉云端按内容 hash 判断是否更新，相同则不动 UI。
+// ============================================================
+// ---- 打开即最新：主动拉取 + 回邮同步刷新（2026-11-18 h） ----
+var QC_FRESH_SYNC_AT = 0, QC_FRESH_SYNC_BUSY = false;
+// 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
+function qcFetchLatestAndRefresh(force) {
+  try { if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false); } catch (e) { return Promise.resolve(false); }
+  var now = Date.now();
+  if (!force && (QC_FRESH_SYNC_BUSY || now - QC_FRESH_SYNC_AT < 5000)) return Promise.resolve(false);
+  QC_FRESH_SYNC_AT = now; QC_FRESH_SYNC_BUSY = true;
+  try {
+    return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1).then(function(res){
+      QC_FRESH_SYNC_BUSY = false;
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (!row || !row.state_json) return false;
+      var d; try { d = JSON.parse(row.state_json); } catch (e) { return false; }
+      if (!d || !d.results || !d.rawData) return false;
+      var cloudHash = qcStateHash(qcSlimPayloadString(d));
+      var cachedHash = null; try { cachedHash = localStorage.getItem(QC_CACHE_HASH_KEY); } catch (e) {}
+      if (cachedHash === cloudHash) {
+        // 内容一致：不动 UI，避免打断；但确保回邮/缓存与云端一致（幂等）
+        try { setCloudStatus('云端已连接 · 数据为最新', 'var(--success)'); } catch (e) {}
+        return false;
+      }
+      // 有更新：整体替换（importAllData 内已按 rawData 覆盖回邮），并刷新缓存
+      importAllData(d);
+      qcSaveCacheFromPayload(d);
+      try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
+      return true;
+    }).catch(function(){ QC_FRESH_SYNC_BUSY = false; return false; });
+  } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
+}
+// 页面首次加载 / 标签页重新可见时，立即拉取最新（节流 5s）
+(function(){
+  function onVisible(){
+    try { if (document.visibilityState === 'visible') qcFetchLatestAndRefresh(false); } catch (e) {}
+  }
+  try {
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+  } catch (e) {}
+})();
+var QC_CACHE_KEY = 'qc_dashboard_cache_v1';
+var QC_CACHE_HASH_KEY = 'qc_dashboard_cache_hash_v1';
+function qcStateHash(s) { var h = 5381; for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; } return (h >>> 0).toString(36) + '-' + s.length; }
+function qcSlimPayloadString(data) {
+  try {
+    var slim = {}; for (var k in data) slim[k] = data[k];
+    if (data.results) slim.results = data.results.map(function(r){ var c={}; for(var kk in r){ if(kk!=='reply') c[kk]=r[kk]; } return c; });
+    return JSON.stringify(slim);
+  } catch (e) { return ''; }
+}
+function qcSaveCacheFromPayload(dataObj) {
+  try {
+    if (typeof LZString === 'undefined' || !dataObj || !dataObj.results || !dataObj.rawData) return;
+    var json = qcSlimPayloadString(dataObj);
+    if (!json) return;
+    var enc = LZString.compressToUTF16(json);
+    localStorage.setItem(QC_CACHE_KEY, enc);
+    localStorage.setItem(QC_CACHE_HASH_KEY, qcStateHash(json));
+  } catch (e) { /* localStorage 满或不可用，静默跳过，不影响主流程 */ }
+}
+function qcLoadCacheFast() {
+  try {
+    var enc = localStorage.getItem(QC_CACHE_KEY);
+    if (!enc || typeof LZString === 'undefined') return false;
+    var json = LZString.decompressFromUTF16(enc);
+    if (!json) return false;
+    var data = JSON.parse(json);
+    if (!data || !data.results || !data.rawData || !data.results.length) return false;
+    importAllData(data);
+    setCloudStatus('本地缓存已加载，正在同步云端…', 'var(--warning)');
+    if (typeof qcRefreshAppealBadges === 'function') { try { qcRefreshAppealBadges(); } catch (e) {} }
+    return true;
+  } catch (e) { return false; }
+}
+function qcCacheSyncFromCloud(data, rawStateJson) {
+  // rawStateJson 是云端原始字符串（可能含旧格式的冗余 reply），用它判断云端 vs 缓存是否一致
+  try {
+    var cloudJson = qcSlimPayloadString(data);
+    var cloudHash = qcStateHash(cloudJson);
+    var cachedHash = null;
+    try { cachedHash = localStorage.getItem(QC_CACHE_HASH_KEY); } catch (e) {}
+    // 检测旧格式：云端 results 仍带 reply（冗余），后台静默写回一次瘦身版，下次下载更快
+    var isFat = !!(data.results && data.results.length && typeof data.results[0].reply === 'string');
+    if (isFat && typeof cloudSaveState === 'function') {
+      setTimeout(function() { try { cloudSaveState().catch(function(){}); } catch (e) {} }, 2000);
+    }
+    if (cachedHash === cloudHash) {
+      // 缓存数据与云端一致：缓存秒开已正确，不重复渲染打断用户
+      try { localStorage.setItem(QC_CACHE_KEY, LZString.compressToUTF16(cloudJson)); localStorage.setItem(QC_CACHE_HASH_KEY, cloudHash); } catch (e) {}
+      setCloudStatus('云端已连接', 'var(--success)');
+      return;
+    }
+    // 云端有更新：重新渲染并刷新缓存
+    importAllData(data);
+    qcSaveCacheFromPayload(data);
+  } catch (e) { importAllData(data); }
+}
 // ============================================================
 // Tab 切换
 // ============================================================
@@ -5210,7 +5313,7 @@ function importAllData(data) {
     return;
   }
   rawData = data.rawData;
-  results = data.results.map(function(r, i) { r._index = i; return normalizeResultAppeal(r); });
+  results = data.results.map(function(r, i) { r._index = i; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
   if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
   try { if (typeof qcEnsureOrgAccounts === 'function') qcEnsureOrgAccounts(true); } catch (e) {}
   if (data.standards) { STANDARDS = data.standards; }
@@ -5312,6 +5415,8 @@ function loadFromUrlHash() {
 // 初始化
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
+  try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) { console.warn('cache load failed', e); }
+  try { setTimeout(function(){ qcFetchLatestAndRefresh(false); }, 300); } catch (e) {}
   try { qcAuthBoot(); } catch (e) { console.warn('auth boot failed', e); }
   document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
   document.getElementById('recordModal').addEventListener('click', function(e) { if (e.target === this) closeRecordModal(); });
