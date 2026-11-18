@@ -4988,6 +4988,13 @@ function qcRcLooksLikeName(s) {
   if (/[\u3400-\u9fff]/.test(s)) return s.length <= 8;
   return s.length <= 30;
 }
+// 去掉名字前的邮件落款/客套词（Best regards / Mit freundlichen Grüßen / 此致 等）
+function qcRcTrimSignoff(s) {
+  var t = String(s || '').replace(/^[\s,.:;!\-—]+/, '');
+  var re = /^(?:best|kind|warm|many|very|thanks|thank\s+you|regards|sincerely|cheers|greetings|mit\s+freundlichen\s+gr(?:\u00fc|u)(?:\u00df|ss)en|freundliche\s+gr(?:\u00fc|u)(?:\u00df|ss)e|viele\s+gr(?:\u00fc|u)(?:\u00df|ss)e|beste\s+gr(?:\u00fc|u)(?:\u00df|ss)e|liebe\s+gr(?:\u00fc|u)(?:\u00df|ss)e|cordialement|bien\s+[\u00e0a]\s+vous|saludos|atentamente|un\s+saludo|groeten|met\s+vriendelijke\s+groet|med\s+venlig\s+hilsen|pozdrawiam|saluti|obrigado|atenciosamente|\u6b64\u81f4|\u656c\u793c|\u795d\u597d|\u8c22\u8c22|\u611f\u8c22)[\s,.:;!\-—]*/i;
+  for (var i = 0; i < 4 && re.test(t); i++) t = t.replace(re, '');
+  return t.replace(/^[\s,.:;!\-—]+/, '').trim();
+}
 // 从“时间戳之前的一段文本”里截出发送者名（名字一定是这段的后缀）
 function qcRcNameOf(src, from, to, names) {
   var end = to;
@@ -5014,14 +5021,17 @@ function qcRcNameOf(src, from, to, names) {
   }
   if (best) return { name: best, start: end - best.length - digitLen };
   // 尾部拉丁词串（Laura Montagner / JavierMuñiz / robot）；容忍前面粘着一个工具条残留汉字
-  var lm = candNoDigit.match(/[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*(?:\s+[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*){0,3}$/u);
+  var lm = candNoDigit.match(/[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*(?:\s+[\p{L}\p{M}][\p{L}\p{M}.'\u00b7\-]*){0,4}$/u);
   if (lm && lm[0]) {
-    var latin = lm[0].replace(/^[\u3400-\u9fff]+/, '').trim();
+    var latin = qcRcTrimSignoff(lm[0].replace(/^[\u3400-\u9fff]+/, '').trim());
     if (latin && latin.length <= 30 && !/[\u3400-\u9fff]/.test(latin)) return { name: latin, start: end - latin.length - digitLen };
   }
-  // 纯中文名（≤8 字，允许尾部未读数字）
+  // 纯中文名（≤8 字，允许尾部未读数字；去掉"谢谢/此致"等落款前缀）
   var cm = candNoDigit.match(/[\u3400-\u9fff]{2,8}$/);
-  if (cm) return { name: cm[0], start: end - cm[0].length - digitLen };
+  if (cm) {
+    var cn = qcRcTrimSignoff(cm[0]);
+    if (cn.length >= 2) return { name: cn, start: end - cn.length - digitLen };
+  }
   // 兜底：认不出名字就不猜，整段留给正文（正文一个字都不丢）
   return { name: '', start: end };
 }
