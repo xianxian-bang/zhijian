@@ -13,8 +13,8 @@ var DEFAULT_STANDARDS = [
       { grade: "不达标", score: 15, detail: "1、违背协商方案总原则，如没有走排错流程直接提供方案；\n2、没有基于实际情况提供更合理方案，导致客户不满，或者造成公司更大损失；\n3、在明确知道协同方的方案不合理的情况下依旧提供给客户；\n4、在不了解某个知识点或某个产品的情况下直接提供方案，导致客户不满，或造成直接or间接损失；", example: "例1：客户反馈未收到货，仍在货期，持续沟通2次请客户继续等待，客户表示不愿意，并2次要求退款，第三次沟通仍继续让客户等待，无进一步方案提供，并且未结合客户实际诉求，可能导致客户给差评" }
     ]},
     { name: "流程&操作完整性", maxScore: 25, levels: [
-      { grade: "达标", score: 25, detail: "1、遵循业务SOP，流程操作无缺失或错误（具体表现在：\n①在回邮数据中，出现客服答应顾客退款并办理了退款/答应顾客尽快退款/答应顾客已退款，但在是否有退款登记中，显示“是”。\n②在回邮数据中，客服承认“描述不符”/“页面误导”/“listing问题”；或者顾客反馈“产品存在质量问题”/“收到产品不同相关内容”/“描述不符并已确认是我们描述不符，而不是顾客自己买错”在是否有问题反馈中，显示“是”；\n\n2、针对待主动跟进事项，做到及时跟进处理（具体表现为：让顾客等待后，再次发送了一封邮件，确认退款除外），无遗漏缺失。", example: "" },
-      { grade: "不达标", score: 10, detail: "1、未遵守业务SOP流程，遗漏跟进（具体表现为：让顾客等待后，未再次发送了一封邮件。确认退款除外）或错误操作；\n2、在与客户达成一致方案后，在回邮数据中，出现客服答应顾客退款并办理了退款/陈述句：答应顾客尽快退款（疑问句或者询问顾客尽快办理退款不算）/答应顾客已退款，在是否有退款登记中，显示空白；但相同情况下，邮件中包含“AZ”字样时，是否有退款登记中，可以显示“是”或者空白\n在回邮数据中，客服承认“描述不符”/“页面误导”/“listing问题”；或者顾客反馈“产品存在质量问题”/“收到产品不同相关内容”/“描述不符并已确认是我们描述不符，而不是顾客自己买错”在是否有问题反馈中，显示空白；\n", example: "例1：承诺买家会3天内更新回复，未主动去信；承诺3天内退款，未申请/未检查是否退款成功\n例2：回邮中已告知买家“已为您办理退款”，但“是否有退款登记”为空白，属于SOP流程操作缺失" }
+      { grade: "达标", score: 25, detail: "1、遵循业务SOP，流程操作无缺失或错误（具体表现在：\n①在回邮数据中，出现客服答应顾客退款并办理了退款/答应顾客尽快退款/答应顾客已退款，但在是否有退款登记中，显示“有申请退款”。\n②在回邮数据中，客服承认“描述不符”/“页面误导”/“listing问题”；或者顾客反馈“产品存在质量问题”/“收到产品不同相关内容”/“描述不符并已确认是我们描述不符，而不是顾客自己买错”在是否有问题反馈中，显示“有问题反馈”；\n\n2、针对待主动跟进事项，做到及时跟进处理（具体表现为：让顾客等待后，再次发送了一封邮件，确认退款除外），无遗漏缺失。", example: "" },
+      { grade: "不达标", score: 10, detail: "1、未遵守业务SOP流程，遗漏跟进（具体表现为：让顾客等待后，未再次发送了一封邮件。确认退款除外）或错误操作；\n2、在与客户达成一致方案后，在回邮数据中，出现客服答应顾客退款并办理了退款/陈述句：答应顾客尽快退款（疑问句或者询问顾客尽快办理退款不算）/答应顾客已退款，在是否有退款登记中，显示空白；但相同情况下，邮件中包含“AZ”字样时，是否有退款登记中，可以显示“有申请退款”或者空白\n在回邮数据中，客服承认“描述不符”/“页面误导”/“listing问题”；或者顾客反馈“产品存在质量问题”/“收到产品不同相关内容”/“描述不符并已确认是我们描述不符，而不是顾客自己买错”在是否有问题反馈中，显示空白；\n", example: "例1：承诺买家会3天内更新回复，未主动去信；承诺3天内退款，未申请/未检查是否退款成功\n例2：回邮中已告知买家“已为您办理退款”，但“是否有退款登记”为空白，属于SOP流程操作缺失" }
     ]}
   ]},
   { category: "软技能（30分）", items: [
@@ -45,7 +45,7 @@ var DEFAULT_GRADE_RULES = [
 var STANDARDS = JSON.parse(JSON.stringify(DEFAULT_STANDARDS));
 var GRADE_RULES = JSON.parse(JSON.stringify(DEFAULT_GRADE_RULES));
 // 质检引擎版本号：引擎判分逻辑升级时更新此值，页面加载后会自动重跑全部已上传数据（申诉记录保留）
-var QC_LOGIC_VERSION = '20261117-sensitive-words';
+var QC_LOGIC_VERSION = '20261119-proc-reg-vocab';
 var DEFAULT_KNOWLEDGE_BASE = [
   { id: 'kb-good-1', type: 'case-good', kind: 'can-do', title: '主动说明退款到账时间并承诺跟进', dimension: '流程&操作完整性', keywords: ['refund', '退款', '到账', 'follow up'], content: '退款场景应说明处理步骤和预计到账时间，并主动跟进结果，这是可推广的正确做法。' },
   { id: 'kb-bad-1', type: 'case-bad', kind: 'missed', title: '只让客户继续等待，没有进一步方案', dimension: '方案合理性', keywords: ['please wait', 'just wait', '继续等待'], content: '客户已明确表达不愿等待或要求退款时，不能重复让客户等待，应结合实际诉求提供替代方案并升级处理。' },
@@ -1582,8 +1582,22 @@ function regValueOf(ctx, key) {
   var v = ctx[key];
   return String(v == null ? '' : v).trim();
 }
-function isRegYes(v) { return /^(?:是|有|yes|y|true|1)$/i.test(String(v == null ? '' : v).trim()); }
-function isRegNo(v) { return /^(?:否|无|没有|no|n|false|0)$/i.test(String(v == null ? '' : v).trim()); }
+function isRegYes(v) {
+  // 2026-11-19：登记列实际取值如「有申请退款 / 有问题反馈」也算肯定；「无退款记录 / 无问题反馈记录」算否定
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return false;
+  if (/^(?:是|有|yes|y|true|1)$/i.test(s)) return true;
+  if (/^(?:无|没|不|非|未)/.test(s)) return false;
+  if (/^有/.test(s)) return true;
+  if (s.indexOf('申请退款') >= 0 || s.indexOf('问题反馈') >= 0 || s.indexOf('补件') >= 0 || s.indexOf('补发') >= 0) return true;
+  return /^是/.test(s);
+}
+function isRegNo(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return false;
+  if (/^(?:否|无|没有|no|n|false|0)$/i.test(s)) return true;
+  return /^(?:无|没|不|非|未)/.test(s);
+}
 
 /* ==================== 流程&操作完整性：核查明细「标准驱动」====================
    质检标准「流程&操作完整性」板块里的「核查明细」文本就是判分规则的唯一来源：
@@ -3761,6 +3775,60 @@ function dashboardValidTotal(item) { return item.totalScore >= 0 ? 1 : 0; }
 function dashboardScoreSum(item) { return item.totalScore >= 0 ? Number(item.totalScore) || 0 : 0; }
 function dashboardPassCount(item) { return (item.grade === '优秀' || item.grade === '达标' || item.grade === '参考案例') ? 1 : 0; } // 「无法质检」不再计为达标
 function dashboardFailCount(item) { return item.grade === '不达标' ? 1 : 0; }
+// ============ 总质检量 · 周度统计（按明细日期归周一~周日）2026-11-19 ============
+function qcWeekRangeOf(dateStr) {
+  var s = String(dateStr || '').trim();
+  var d = new Date(s.replace(/-/g, '/'));
+  if (isNaN(d.getTime())) {
+    var m = /^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})/.exec(s);
+    if (m) d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (!m || isNaN(d.getTime())) return null;
+  }
+  var day = d.getDay();
+  var diff = (day === 0) ? 6 : day - 1;
+  var mon = new Date(d.getFullYear(), d.getMonth(), d.getDate() - diff);
+  var sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
+  function f(x) { return x.getFullYear() + '-' + ('0' + (x.getMonth() + 1)).slice(-2) + '-' + ('0' + x.getDate()).slice(-2); }
+  return { key: f(mon), start: f(mon), end: f(sun) };
+}
+function renderWeeklyKpi(data) {
+  var card = document.getElementById('weeklyKpiCard'), wrap = document.getElementById('weeklyKpiWrap');
+  if (!card || !wrap) return;
+  if (!data || !data.length) { card.style.display = 'none'; return; }
+  var weeks = {}, order = [], total = 0;
+  for (var i = 0; i < data.length; i++) {
+    var t = dashboardTotal(data[i]); if (!t) continue;
+    total += t;
+    var wk = qcWeekRangeOf(data[i].date) || { key: '0000-00-00', start: '日期待补', end: '' };
+    if (!weeks[wk.key]) { weeks[wk.key] = { start: wk.start, end: wk.end, n: 0, pass: 0, fail: 0 }; order.push(wk.key); }
+    weeks[wk.key].n += t;
+    weeks[wk.key].pass += dashboardPassCount(data[i]);
+    weeks[wk.key].fail += dashboardFailCount(data[i]);
+  }
+  if (!total) { card.style.display = 'none'; return; }
+  order.sort();
+  var now = new Date();
+  var day = now.getDay();
+  var diff = (day === 0) ? 6 : day - 1;
+  var monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
+  var todayKey = monday.getFullYear() + '-' + ('0' + (monday.getMonth() + 1)).slice(-2) + '-' + ('0' + monday.getDate()).slice(-2);
+  var title = '截至 ' + now.getFullYear() + '年' + (now.getMonth() + 1) + '月' + now.getDate() + '日';
+  var rows = '';
+  for (var w = order.length - 1; w >= 0; w--) {
+    var g = weeks[order[w]];
+    var isCur = order[w] === todayKey;
+    var pct = Math.round(g.n / total * 1000) / 10;
+    rows += '<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #eef2f7;flex-wrap:wrap;">'
+      + '<span style="font-weight:700;min-width:190px;color:#1e293b;">' + g.start.replace(/-/g, '/') + ' - ' + g.end.replace(/-/g, '/') + (isCur ? '<span style="color:#1d4ed8;font-size:12px;">（本周）</span>' : '') + '</span>'
+      + '<span style="color:#334155;">质检量 <b style="font-size:15px;">' + g.n + '</b> 条（' + pct + '%）</span>'
+      + '<span style="color:#16a34a;">达标 ' + g.pass + '</span>'
+      + '<span style="color:#dc2626;">不达标 ' + g.fail + '</span>'
+      + '</div>';
+  }
+  wrap.innerHTML = '<div class="card-header"><h3>总质检量 · 周度统计（' + title + '）</h3><span style="font-size:12px;color:#6b7280;">按明细日期归周（周一至周日），合计 ' + total + ' 条</span></div><div class="card-body" style="padding-top:6px;">' + rows + '</div>';
+  card.style.display = 'block';
+}
+
 function renderDashboard() {
   if (results.length === 0) { document.getElementById('dashboardEmpty').style.display = 'block'; document.getElementById('dashboardContent').style.display = 'none'; return; }
   document.getElementById('dashboardEmpty').style.display = 'none';
@@ -3783,6 +3851,7 @@ function renderDashboard() {
   // 环比上下文用全部 results（含未参与考核的单）建立，避免筛选变化时基准周漂移
   wowBuildContext(results);
   renderKPI(dashboardData, skippedUnassessed);
+  try { if (typeof renderWeeklyKpi === 'function') renderWeeklyKpi(dashboardData); } catch (e) {}
   wowDecorateKPI(dashboardData);
   var _dim = (document.getElementById('summaryDimension') || {}).value || 'agent';
   renderGroupStats(dashboardData);
@@ -4847,6 +4916,15 @@ function renderStandard() {
     ? '⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。'
     : '👁 只读：质检标准与等级阈值只有管理员可以修改。';
 }
+// 「刷新数据」：管理员按当前质检标准重新质检全部明细（历史+新数据一并应用）—— 2026-11-19
+function qcRefreshData() {
+  if (!requireAdmin('刷新数据')) return;
+  if (rawData.length === 0) { showToast('暂无质检数据，无需刷新', 'info'); return; }
+  if (!confirm('确认按当前质检标准重新质检全部明细吗？\n历史数据与新上传数据都会应用最新标准（申诉记录保留）。\n共 ' + rawData.length + ' 条，约需几十秒。')) return;
+  showToast('正在按当前标准重新质检全部明细...', 'info');
+  setTimeout(runQualityCheck, 300);
+}
+
 function saveStandard() { if (!requireAdmin('保存质检标准')) return;
   if (!requireCloudAdmin()) return;
   var inputs = document.querySelectorAll('#standardTableWrap input, #standardTableWrap textarea, #gradeRulesWrap input');
