@@ -497,6 +497,113 @@ function qcMergeCloudNewRecords(cloudD) {
   if (merged > 0) showToast('已同步 ' + merged + ' 条他人在云端更新的申诉/审核结果', 'info');
   return added + merged;
 }
+
+// ============================================================
+// 申诉审计日志（20261119）：任何一台设备的每一次申诉提交 / 通过 / 被拒
+// 都独立、追加式地写入云端 state_key=qc_appeal_audit，永不覆盖、永不删除。
+// 即使主数据 main 被旧设备整份回退，也能从审计日志逐条恢复，杜绝「别人申诉/审核的数据查不到」。
+// ============================================================
+var APPEAL_AUDIT_ROW = 'qc_appeal_audit';
+var QC_AUDIT_BUSY = false;
+var QC_AUDIT_LAST_SYNC = 0;
+// 轻量稳定 hash（与构建脚本的 sha1 不必一致，只需事件 id 在同一日志内唯一且稳定）
+function qcAuditHash(s) {
+  s = String(s); var h = 5381, i;
+  for (i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return 'e' + (h >>> 0).toString(36);
+}
+// 由一条结果记录构造审计事件（快照：申诉对象 + 评分/等级/明细 + 操作人/时间）
+function qcAuditEventFrom(r, action) {
+  if (!r) return null;
+  var a = r.appeal || {};
+  var stamp = a.reviewedAt || a.submittedAt || '';
+  var op = '';
+  try {
+    if (action === 'submit') { op = (typeof qcAppealMine === 'function' ? qcAppealMine() : '') || ''; }
+    else { op = a.reviewer || (typeof qcAppealMine === 'function' ? qcAppealMine() : '') || ''; }
+  } catch (e) {}
+  var key = getStableRecordKey(r);
+  return {
+    id: qcAuditHash(key + '||' + (a.status || '') + '||' + stamp),
+    recordKey: key,
+    order: r.order || '', agent: r.agent || '', account: r.account || '', date: r.date || '',
+    action: action || '', status: a.status || '无申诉',
+    appeal: JSON.parse(JSON.stringify(a)),
+    totalScore: r.totalScore, grade: r.grade || '',
+    scores: JSON.parse(JSON.stringify(r.scores || {})),
+    details: JSON.parse(JSON.stringify(r.details || {})),
+    originalTotalScore: r.originalTotalScore, originalGrade: r.originalGrade,
+    operator: op, opTime: stamp,
+    source: 'client', createdAt: new Date().toISOString()
+  };
+}
+// 追加一条审计事件：读当前日志→按 id 去重合并→写回（并发安全：写前重读，只增不减）
+function qcAuditAppend(r, action) {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false);
+  var ev = qcAuditEventFrom(r, action);
+  if (!ev) return Promise.resolve(false);
+  function attempt(tries) {
+    return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', APPEAL_AUDIT_ROW).limit(1)
+      .then(function (res) {
+        var row = res && res.data && res.data.length ? res.data[0] : null;
+        var log = null;
+        if (row && row.state_json) { try { log = JSON.parse(row.state_json); } catch (e) {} }
+        var events = (log && log.events) || [];
+        var map = {}, i;
+        for (i = 0; i < events.length; i++) if (events[i] && events[i].id) map[events[i].id] = events[i];
+        map[ev.id] = ev; // 同一事件覆盖（内容一致），历史事件全部保留
+        var merged = [];
+        for (var k in map) merged.push(map[k]);
+        var payload = { version: 1, events: merged, updatedAt: new Date().toISOString() };
+        return cloudDb.from('qc_dashboard_state').upsert({ state_key: APPEAL_AUDIT_ROW, state_json: JSON.stringify(payload), updated_by: 'appeal-audit' }, { onConflict: 'state_key' })
+          .then(function (r2) { if (r2 && r2.error) throw r2.error; return true; });
+      })
+      .catch(function (err) { if (tries > 0) return attempt(tries - 1); return false; });
+  }
+  return attempt(2);
+}
+// 从审计日志恢复：把比本地 main 更新的申诉事件应用回 results，并把修正后的 main 写回云端。
+// 任何设备打开页面 / 定时同步时都会调用，保证「别的电脑申诉/审核的数据」不丢失。
+function qcAuditRestoreFromCloud() {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(0);
+  var now = Date.now();
+  if (QC_AUDIT_BUSY || now - QC_AUDIT_LAST_SYNC < 8000) return Promise.resolve(0);
+  QC_AUDIT_BUSY = true; QC_AUDIT_LAST_SYNC = now;
+  return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', APPEAL_AUDIT_ROW).limit(1)
+    .then(function (res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (!row || !row.state_json) { QC_AUDIT_BUSY = false; return 0; }
+      var log = null; try { log = JSON.parse(row.state_json); } catch (e) {}
+      if (!log || !log.events || !log.events.length) { QC_AUDIT_BUSY = false; return 0; }
+      // 每个订单只取时间最新的一条事件
+      var latest = {}, i;
+      for (i = 0; i < log.events.length; i++) {
+        var e = log.events[i];
+        if (!e || !e.recordKey) continue;
+        var prev = latest[e.recordKey];
+        if (!prev || String(e.opTime || '') > String(prev.opTime || '')) latest[e.recordKey] = e;
+      }
+      // 先把事件按「伪云端记录」合并进本地结果（复用统一的时间戳/进度比较）
+      var changed = 0;
+      for (i = 0; i < results.length; i++) {
+        var r = results[i], ev = latest[getStableRecordKey(r)];
+        if (!ev || !ev.appeal) continue;
+        var pseudo = { appeal: ev.appeal, totalScore: ev.totalScore, grade: ev.grade, scores: ev.scores, details: ev.details };
+        try { if (qcMergeAppealInto(r, pseudo)) changed++; } catch (e) {}
+      }
+      if (changed) {
+        try { renderDetailTable(); } catch (e) {}
+        try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+        try { qcRefreshAppealBadges(); } catch (e) {}
+        try { showToast('已从云端申诉审计日志恢复 ' + changed + ' 条申诉/审核结果', 'info'); } catch (e) {}
+        // 把恢复后的 main 写回，让所有设备看到一致状态
+        try { cloudSaveState(); } catch (e) {}
+      }
+      QC_AUDIT_BUSY = false;
+      return changed;
+    })
+    .catch(function () { QC_AUDIT_BUSY = false; return 0; });
+}
 function cloudSaveState() {
   if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化'));
   var pre = cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1)
@@ -3756,6 +3863,8 @@ function saveAppeal(index, action) {
     try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
     closeAppealModal();
     saveDataToUrl();
+    // 追加式审计日志：这次申诉/审核动作独立写入云端，永不覆盖，供任何设备事后恢复
+    try { qcAuditAppend(r, action); } catch (e) {}
     return cloudSaveState();
   }).then(function() {
     if (action === 'submit') { showToast('申诉已提交，状态为待审核', 'success'); return; }
@@ -6971,10 +7080,15 @@ function qcSyncAppealsFromCloud() {
     setTimeout(function () {
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
     }, 3200);
+    // 从云端申诉审计日志恢复：即使主数据 main 曾被旧设备回退，也能找回别人申诉/审核的结果
+    setTimeout(function () {
+      try { if (typeof cloudDb !== 'undefined' && cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
+    }, 2600);
     // 低频兜底：登录态下每 15s 重算一次，并拉一次云端最新申诉状态（内部有节流/并发保护）
     setInterval(function () {
       try { qcRefreshAppealBadges(); } catch (e) {}
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
+      try { if (typeof cloudDb !== 'undefined' && cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
     }, 15000);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
