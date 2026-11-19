@@ -2688,12 +2688,16 @@ function agentNameBeforeMark(block, markIdx) {
   raw = raw.replace(/^(复制|收起|中)+/, '').replace(/(复制|收起)+$/, '');
   return raw;
 }
-// 署名比对：允许署名比客服名多出前缀（如「中林文玉」= 界面上残留的「中」+ 林文玉）
+// 署名比对：允许署名比客服名多出前缀（如「中林文玉」= 界面上残留的「中」+ 林文玉）；
+// 也允许账号名比署名多出数字后缀（如登录账号「尹玉婷1」/「李肖1」，邮件署名是本名「尹玉婷」/「李肖」）
 function agentNameMatches(candidate, target) {
   var c = normalizeAgentName(candidate), t = normalizeAgentName(target);
   if (!c || !t) return false;
   if (c === t) return true;
-  return c.length > t.length && c.slice(-t.length) === t;
+  if (c.length > t.length && c.slice(-t.length) === t) return true;
+  var tBase = t.replace(/\d+$/, '');
+  if (tBase && tBase !== t) return c === tBase || (c.length > tBase.length && c.slice(-tBase.length) === tBase);
+  return false;
 }
 // 本单去信账单：mine = 该客服封数，total = 本单客服去信合计，pct = 占比，assessed = 是否考核
 function sessionParticipation(r) {
@@ -3271,6 +3275,48 @@ function jumpToDetailByOrder(order) {
   document.getElementById('detailModal').classList.add('minimized');
 }
 
+// 「回邮数据」块公共构建（明细详情与申诉弹窗共用，按订单号对应同一份内容）
+// boxId 用于回邮气泡渲染的容器标识（两处弹窗各自独立，避免 ID 冲突）
+function buildReplyDataBlockHtml(r, boxId) {
+  var html = '<div class="detail-section">';
+  // 回邮数据区顶部：账号 / 平台订单号 / 订单金额 / 客服 / 总分（数据与基本信息一致）
+  var _sb = '<span class="score-badge ';
+  if (r.totalScore === -1) _sb += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
+  else if (isReferenceCaseResult(r)) _sb += 'score-na">参考案例（不参与统计）';
+  else if (r.grade === '优秀') _sb += 'score-excellent">' + r.totalScore + ' 分（优秀）';
+  else if (r.grade === '达标') _sb += 'score-pass">' + r.totalScore + ' 分（达标）';
+  else _sb += 'score-fail">' + r.totalScore + ' 分（不达标）';
+  _sb += '</span>';
+  html += '<div class="rc-card">';
+  html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
+  html += '<div class="rc-card-body">';
+  html += '<div class="rc-base-row">'
+        + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
+        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, r.orderAmount) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(r.agent) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
+        + '</div>';
+  var _reg = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
+  html += '<div class="rc-reg-row">';
+  for (var _ri = 0; _ri < _reg.length; _ri++) {
+    html += '<div class="rc-reg"><span class="rc-reg-l">' + _reg[_ri][0] + '</span><span class="rc-reg-v">' + escHtml(_reg[_ri][1] || '') + '</span></div>';
+  }
+  html += '</div>';
+  html += '</div></div>';
+  if (r.noAgentReply) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">本单' + (r.amazonOnlySession ? '回邮段落全部为亚马逊系统来信、' : '') + '没有客服回邮，已标记为「无法质检」并 <b>不纳入任何统计</b>（不计入质检量 / 达标率 / 不达标率 / 等级分布）。</div>';
+  else if (r.amazonExcluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:4px;color:#9a6700;font-size:12px;">已识别并排除 ' + r.amazonExcluded + ' 段亚马逊系统来信（如销售伙伴支持团队），这些内容不参与客诉质检。</div>';
+  else if (r.amazonIncluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#eaf3ff;border:1px solid #b6d4fe;border-radius:4px;color:#1a5fb4;font-size:12px;">本单含亚马逊系统来信，因存在客服回邮，已按正常质检流程纳入判分。</div>';
+  // 回邮数据：完整展示上传的全部内容（位置保持不变，超长时框内滚动，不再截断）
+  var dr = r.reply || '';
+  var _qcAgentNames = [];
+  for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
+  if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
+  html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, boxId, _qcAgentNames) + '</div>';
+  // 四个登记字段已上移到“回邮数据”标题行横向并列
+  html += '</div>';
+  return html;
+}
 function showDetail(index) {
   var r = results[index];
   if (!r) return;
@@ -3307,43 +3353,7 @@ function showDetail(index) {
   }
   html += '</tbody></table></div>';
   if (r.knowledgeEvidence && r.knowledgeEvidence.length) { html += '<div class="detail-section"><h4>知识库命中记录</h4><div class="detail-msg-box">'; for (var ke = 0; ke < r.knowledgeEvidence.length; ke++) { var kev = r.knowledgeEvidence[ke]; html += '<div style="margin-bottom:8px;"><b>' + escHtml(kev.title) + '</b>（' + escHtml(knowledgeTypeLabel(kev.type)) + '）<br>' + escHtml(kev.content); var kevb = findKnowledgeById(kev.id); if (kevb && kevb.sourceType === 'url') html += ' <a href="' + escHtml(kevb.url) + '" target="_blank" style="color:var(--primary);text-decoration:underline;">🔗 打开文档</a>'; else if (kevb && kevb.sourceType === 'file') html += ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(kevb.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 打开附件</a>'; html += '</div>'; } html += '</div></div>'; }
-  html += '<div class="detail-section">';
-  // 回邮数据区顶部：账号 / 平台订单号 / 客服 / 总分（数据与基本信息一致）
-  var _sb = '<span class="score-badge ';
-  if (r.totalScore === -1) _sb += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
-  else if (isReferenceCaseResult(r)) _sb += 'score-na">参考案例（不参与统计）';
-  else if (r.grade === '优秀') _sb += 'score-excellent">' + r.totalScore + ' 分（优秀）';
-  else if (r.grade === '达标') _sb += 'score-pass">' + r.totalScore + ' 分（达标）';
-  else _sb += 'score-fail">' + r.totalScore + ' 分（不达标）';
-  _sb += '</span>';
-  html += '<div class="rc-card">';
-  html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
-  html += '<div class="rc-card-body">';
-  html += '<div class="rc-base-row">'
-        + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
-        + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
-        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, r.orderAmount) + '</span></div>'
-        + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(r.agent) + '</span></div>'
-        + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
-        + '</div>';
-  var _reg = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
-  html += '<div class="rc-reg-row">';
-  for (var _ri = 0; _ri < _reg.length; _ri++) {
-    html += '<div class="rc-reg"><span class="rc-reg-l">' + _reg[_ri][0] + '</span><span class="rc-reg-v">' + escHtml(_reg[_ri][1] || '') + '</span></div>';
-  }
-  html += '</div>';
-  html += '</div></div>';
-  if (r.noAgentReply) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">本单' + (r.amazonOnlySession ? '回邮段落全部为亚马逊系统来信、' : '') + '没有客服回邮，已标记为「无法质检」并 <b>不纳入任何统计</b>（不计入质检量 / 达标率 / 不达标率 / 等级分布）。</div>';
-  else if (r.amazonExcluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:4px;color:#9a6700;font-size:12px;">已识别并排除 ' + r.amazonExcluded + ' 段亚马逊系统来信（如销售伙伴支持团队），这些内容不参与客诉质检。</div>';
-  else if (r.amazonIncluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#eaf3ff;border:1px solid #b6d4fe;border-radius:4px;color:#1a5fb4;font-size:12px;">本单含亚马逊系统来信，因存在客服回邮，已按正常质检流程纳入判分。</div>';
-  // 回邮数据：完整展示上传的全部内容（位置保持不变，超长时框内滚动，不再截断）
-  var dr = r.reply || '';
-  var _qcAgentNames = [];
-  for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
-  if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
-  html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, 'replyChat_' + index, _qcAgentNames) + '</div>';
-  // 四个登记字段已上移到“回邮数据”标题行横向并列
-  html += '</div>';
+  html += buildReplyDataBlockHtml(r, 'replyChat_' + index);
   html += '<div class="detail-section"><h4>申诉状态</h4>' + appealStatusBadge(getAppealStatus(r)) + ' <button class="btn btn-outline btn-sm" onclick="closeRecordModal();openAppealModal(' + index + ')">查看/处理申诉</button></div>';
   document.getElementById('recordModalBody').innerHTML = html;
   document.getElementById('recordModal').classList.add('show');
@@ -3490,6 +3500,9 @@ function openAppealModal(index) {
   document.getElementById('appealCurrentStatus').innerHTML = appealStatusBadge(r.appeal.status);
   document.getElementById('appealHistory').innerHTML = (r.appeal.submittedAt || r.appeal.reviewedAt) ? '<div class="appeal-review-box"><b>申诉理由：</b>' + escHtml(r.appeal.reason || '-') + '<br><b>提交时间：</b>' + escHtml(r.appeal.submittedAt || '-') + (r.appeal.reviewedAt ? '<br><b>审核理由：</b>' + escHtml(r.appeal.reviewReason || '-') + '<br><b>复核人：</b>' + escHtml(r.appeal.reviewer || '-') + '<br><b>审核时间：</b>' + escHtml(r.appeal.reviewedAt || '-') : '') + '</div>' : '';
   document.getElementById('appealExistingFiles').innerHTML = appealAttachmentList(r.appeal);
+  // 复核申诉面板上方展示回邮数据块（与明细详情完全一致，按订单号对应）
+  var _rb = document.getElementById('appealReplyBlock');
+  if (_rb) _rb.innerHTML = buildReplyDataBlockHtml(r, 'appealReplyChat_' + index);
   document.getElementById('appealSubmitPanel').style.display = r.appeal.status === '无申诉' ? 'block' : 'none';
   var _rvShow = (r.appeal.status === '待审核' && reviewModules.length);
   var _canRv = (typeof qcCanReviewResult === 'function') ? qcCanReviewResult(r) : true;
@@ -5829,6 +5842,7 @@ function qcNormalizeUsers(list) {
       role: u.role === 'admin' ? 'admin' : 'member',
       pwd: String(u.pwd == null ? INIT_PWD : u.pwd),
       mustChangePwd: u.mustChangePwd === undefined ? false : !!u.mustChangePwd,
+      pwdTs: Number(u.pwdTs) || 0,   // 密码最后变更时间戳：改密/重置时写入，用于跨设备合并取最新
       createdAt: u.createdAt || '',
       updatedAt: u.updatedAt || ''
     });
@@ -5902,13 +5916,65 @@ function qcAdminCount() {
   for (var i = 0; i < USERS.length; i++) if (USERS[i].role === 'admin') c++;
   return c;
 }
+// 人员表合并（2026-11-19 改密闭环加固）：
+// 账号集合以 base 为准；对同名账号，密码状态(pwd / mustChangePwd / pwdTs / updatedAt)取 pwdTs 较新的一方。
+// 目的：任何一台设备的"旧快照"都不能把别人已经改好的密码回退成初始密码 123 + 未改密状态。
+// load 方向：base=云端名单、other=本地（本地刚改的密码 pwdTs 更新 → 保留）；
+// save 方向：base=本地名单、other=云端（云端已有更新的密码 → 不被本地旧快照覆盖）。
+function qcMergeUsersPwd(base, other) {
+  base = qcNormalizeUsers(base || []);
+  other = qcNormalizeUsers(other || []);
+  var map = {}, i, k;
+  for (i = 0; i < other.length; i++) map[other[i].name] = other[i];
+  var out = [];
+  for (i = 0; i < base.length; i++) {
+    var u = base[i], o = map[u.name];
+    var takeOther = false;
+    if (o) {
+      var oTs = Number(o.pwdTs) || 0, uTs = Number(u.pwdTs) || 0;
+      if (oTs > uTs) takeOther = true;
+      else if (oTs === uTs) {
+        // 兼容旧版改密记录（无 pwdTs 字段=0）：已改密方优先于初始态方，
+        // 避免本地旧快照把云端已改好的密码覆盖回 123 + 未改密
+        var oChanged = !o.mustChangePwd && String(o.pwd) !== INIT_PWD;
+        var uChanged = !u.mustChangePwd && String(u.pwd) !== INIT_PWD;
+        if (oChanged && !uChanged) takeOther = true;
+      }
+    }
+    if (takeOther) {
+      var m = {}; for (k in u) if (u.hasOwnProperty(k)) m[k] = u[k];
+      m.pwd = o.pwd; m.mustChangePwd = o.mustChangePwd; m.pwdTs = o.pwdTs;
+      if (o.updatedAt) m.updatedAt = o.updatedAt;
+      out.push(m);
+    } else out.push(u);
+  }
+  return out;
+}
+// 只读云端 qc_users 名单（不触发任何保存 / 同步，避免与 qcCloudLoadUsers 递归）
+function qcPullCloudUsersRaw() {
+  if (!cloudDb) return Promise.resolve(null);
+  try {
+    return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', 'qc_users').limit(1)
+      .then(function (res) {
+        if (res && res.error) return null;
+        var row = res && res.data && res.data.length ? res.data[0] : null;
+        if (!row || !row.state_json) return null;
+        var d = null; try { d = JSON.parse(row.state_json); } catch (e) {}
+        return (d && Array.isArray(d.users)) ? d.users : null;
+      }).catch(function () { return null; });
+  } catch (e) { return Promise.resolve(null); }
+}
 function qcSaveUsers() {
   qcCacheUsers();
   if (!cloudDb) return Promise.resolve(false);
-  var payload = { state_key: 'qc_users', state_json: JSON.stringify({ version: 1, users: USERS, updatedAt: new Date().toISOString() }), updated_by: 'anonymous' };
-  return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function (res) {
-    if (res.error) throw res.error;
-    return true;
+  // 写云端前先拉最新名单合并：本地旧快照不能覆盖云端已被改过的密码
+  return qcPullCloudUsersRaw().then(function (cloudUsers) {
+    if (cloudUsers && cloudUsers.length) { USERS = qcMergeUsersPwd(USERS, cloudUsers); qcCacheUsers(); }
+    var payload = { state_key: 'qc_users', state_json: JSON.stringify({ version: 1, users: USERS, updatedAt: new Date().toISOString() }), updated_by: 'anonymous' };
+    return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function (res) {
+      if (res.error) throw res.error;
+      return true;
+    });
   }).catch(function (err) {
     showToast('人员数据云端同步失败：' + ((err && (err.message || err.details)) || '请稍后重试'), 'error');
     return false;
@@ -5924,9 +5990,23 @@ function qcCloudLoadUsers() {
       var d = null;
       try { d = JSON.parse(row.state_json); } catch (e) {}
       if (d && Array.isArray(d.users) && d.users.length) {
-        USERS = qcNormalizeUsers(d.users);
+        // 合并而非覆盖：本地若刚改过密码(pwdTs 更新)，保留本地新密码，防止云端旧快照回退
+        var cloudNorm = qcNormalizeUsers(d.users), beforeMerge = qcNormalizeUsers(USERS);
+        USERS = qcMergeUsersPwd(cloudNorm, beforeMerge);
         qcCacheUsers();
         qcOnUsersSynced();
+        // 自愈回写：若本地存在比云端更新的密码（改密时云端写入失败），把它补写回云端
+        var cm = {}, k;
+        for (k = 0; k < cloudNorm.length; k++) cm[cloudNorm[k].name] = cloudNorm[k];
+        var needPush = false;
+        for (k = 0; k < USERS.length; k++) {
+          var lu = USERS[k], cu = cm[lu.name];
+          if (cu && ((Number(lu.pwdTs) || 0) > (Number(cu.pwdTs) || 0))) { needPush = true; break; }
+          if (cu && (Number(lu.pwdTs) || 0) === (Number(cu.pwdTs) || 0)
+              && !lu.mustChangePwd && String(lu.pwd) !== INIT_PWD
+              && (cu.mustChangePwd || String(cu.pwd) === INIT_PWD)) { needPush = true; break; }
+        }
+        if (needPush) qcSaveUsers();
         return true;
       }
     }
@@ -6169,6 +6249,7 @@ function qcSubmitPwd() {
   if (n1 !== n2) { fail('两次输入的新密码不一致'); return; }
   u.pwd = n1;
   u.mustChangePwd = false;
+  u.pwdTs = Date.now();
   u.updatedAt = new Date().toISOString();
   AUTH.mustChangePwd = false;
   qcSessionWrite(AUTH);
@@ -6185,6 +6266,8 @@ function qcSetUser(name, patch) {
   if (i < 0) return false;
   for (var k in patch) if (patch.hasOwnProperty(k)) USERS[i][k] = patch[k];
   USERS[i].updatedAt = new Date().toISOString();
+  // 涉及密码/改密状态的变更（如管理员重置密码）打时间戳，保证跨设备合并时取最新
+  if (patch.hasOwnProperty('pwd') || patch.hasOwnProperty('mustChangePwd')) USERS[i].pwdTs = Date.now();
   return true;
 }
 function qcAfterUsersChanged(msg) {
