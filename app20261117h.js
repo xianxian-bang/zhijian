@@ -45,7 +45,7 @@ var DEFAULT_GRADE_RULES = [
 var STANDARDS = JSON.parse(JSON.stringify(DEFAULT_STANDARDS));
 var GRADE_RULES = JSON.parse(JSON.stringify(DEFAULT_GRADE_RULES));
 // 质检引擎版本号：引擎判分逻辑升级时更新此值，页面加载后会自动重跑全部已上传数据（申诉记录保留）
-var QC_LOGIC_VERSION = '20261119-proc-reg-vocab';
+var QC_LOGIC_VERSION = '20261119-passcap-vocab';
 var DEFAULT_KNOWLEDGE_BASE = [
   { id: 'kb-good-1', type: 'case-good', kind: 'can-do', title: '主动说明退款到账时间并承诺跟进', dimension: '流程&操作完整性', keywords: ['refund', '退款', '到账', 'follow up'], content: '退款场景应说明处理步骤和预计到账时间，并主动跟进结果，这是可推广的正确做法。' },
   { id: 'kb-bad-1', type: 'case-bad', kind: 'missed', title: '只让客户继续等待，没有进一步方案', dimension: '方案合理性', keywords: ['please wait', 'just wait', '继续等待'], content: '客户已明确表达不愿等待或要求退款时，不能重复让客户等待，应结合实际诉求提供替代方案并升级处理。' },
@@ -730,6 +730,8 @@ function afterParse(data, mode) {
   }
   var newRawData = [];
   var skippedUninspectable = 0;
+  // 本批次归属周：上传动作发生时固定为「当时的上一周」，写入每条新明细，历史批次不受影响
+  var batchWeek = qcUploadWeekRange();
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
     if (!row || row.length === 0) continue;
@@ -740,6 +742,7 @@ function afterParse(data, mode) {
     if (!account && !agent && !order && !reply) continue;
     if (wouldBeUninspectable(reply)) { skippedUninspectable++; continue; }
     newRawData.push({ account: account, agent: agent, order: order, reply: reply,
+      qcWeek: batchWeek.key,
       date: colMap.date !== undefined ? String(row[colMap.date] || '').trim() : '',
       customer: colMap.customer !== undefined ? String(row[colMap.customer] || '').trim() : '',
       processCheck: colMap.processCheck !== undefined ? String(row[colMap.processCheck] || '').trim() : '',
@@ -788,6 +791,8 @@ function runQualityCheck() {
     for (var i = batch; i < end; i++) {
       var result = inspectOne(rawData[i]);
       result._index = i;
+      // 透传批次归属周（上传时固定写入，历史批次不改动）
+      result.qcWeek = rawData[i].qcWeek || '';
       // 透传上传表里的登记类字段（与平台单号一一对应；未上传则为空）
       result.processCheck = rawData[i].processCheck || '';
       result.refundReg = rawData[i].refundReg || '';
@@ -886,6 +891,8 @@ function applyKnowledgeToResult(result, agentText, customerText) {
   for (var d = 0; d < DIM_NAMES.length; d++) if (result.scores[DIM_NAMES[d]] >= 0 && DIM_NAMES[d] !== '平台禁忌') total += result.scores[DIM_NAMES[d]];
   if (!result.referenceCase && result.totalScore >= 0 && !result.redlineViolation) { result.totalScore = total; result.grade = determineGrade(total); }
   if (!result.referenceCase && !result.redlineViolation && typeof applyExcellentGate === 'function') applyExcellentGate(result);
+  // 达标单维度分夹到达标档（86+优秀保留优秀分；达标单各维度不超达标档、总分落80-85）2026-11-19
+  if (!result.referenceCase && !result.redlineViolation) qcClampPassDimensions(result);
   if (!result.referenceCase) { result.knowledgeEvidence = kbEvidence; }
   else { result.knowledgeEvidence = (result.knowledgeEvidence || []).concat(referenceHits.map(function(k) { return { id: k.id, title: k.title, type: k.type, kind: k.kind, dimension: k.dimension, content: k.content, referenceCase: true }; })); }
   result.appeal = normalizeAppeal(result.appeal);
@@ -2208,6 +2215,37 @@ function applyExcellentGate(result) {
 function determineGrade(total) {
   for (var i = 0; i < GRADE_RULES.length; i++) if (total >= GRADE_RULES[i].minScore) return GRADE_RULES[i].grade;
   return '不达标';
+}
+// 达标单维度分夹到「达标档」：2026-11-19
+// 等级为「达标」时，任一维度分若超过质检标准中该维度「达标」档的分数，则压到达标档分；
+// 低于达标档的维度保持不变。之后重算总分并重新定级（五项全达标档合计 82 分，落在 80-85）。
+// 达标档分数实时取自「质检标准」，管理员改标准后自动跟随。
+function qcClampPassDimensions(result) {
+  if (!result || result.grade !== '达标' || result.referenceCase || result.redlineViolation) return result;
+  if (!result.details || !result.scores) return result;
+  var changed = false;
+  for (var i = 0; i < DIM_NAMES.length; i++) {
+    var dim = DIM_NAMES[i];
+    if (dim === '平台禁忌') continue;
+    var item = getStandardItemByName(dim), cap = null;
+    if (item && item.levels) for (var j = 0; j < item.levels.length; j++) if (item.levels[j].grade === '达标') { cap = item.levels[j].score; break; }
+    if (cap === null) continue;
+    if (typeof result.scores[dim] === 'number' && result.scores[dim] > cap) {
+      result.scores[dim] = cap;
+      if (result.details[dim]) { result.details[dim].score = cap; result.details[dim].grade = '达标'; }
+      changed = true;
+    }
+  }
+  if (changed) {
+    var total = 0;
+    for (var k = 0; k < DIM_NAMES.length; k++) {
+      var dn = DIM_NAMES[k]; if (dn === '平台禁忌') continue;
+      var sc = result.scores[dn]; if (typeof sc === 'number' && sc >= 0) total += sc;
+    }
+    result.totalScore = total;
+    result.grade = determineGrade(total);
+  }
+  return result;
 }
 
 // ============================================================
@@ -3792,41 +3830,53 @@ function qcWeekRangeOf(dateStr) {
   function f(x) { return x.getFullYear() + '-' + ('0' + (x.getMonth() + 1)).slice(-2) + '-' + ('0' + x.getDate()).slice(-2); }
   return { key: f(mon), start: f(mon), end: f(sun) };
 }
+// 上传批次归属周：上传动作发生时，固定记录「上传当时的上一周」（本周一往前推 7 天）的周一~周日
+// 每条新上传明细都会写入 qcWeek=上周一日期；历史批次的 qcWeek 一旦写入不再改动
+function qcUploadWeekRange(now) {
+  now = now || new Date();
+  var day = now.getDay();
+  var diff = (day === 0) ? 6 : day - 1;
+  var thisMonday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
+  var lastMonday = new Date(thisMonday.getFullYear(), thisMonday.getMonth(), thisMonday.getDate() - 7);
+  var lastSunday = new Date(lastMonday.getFullYear(), lastMonday.getMonth(), lastMonday.getDate() + 6);
+  function f(x) { return x.getFullYear() + '-' + ('0' + (x.getMonth() + 1)).slice(-2) + '-' + ('0' + x.getDate()).slice(-2); }
+  return { key: f(lastMonday), start: f(lastMonday), end: f(lastSunday) };
+}
 function renderWeeklyKpi(data) {
   var card = document.getElementById('weeklyKpiCard'), wrap = document.getElementById('weeklyKpiWrap');
   if (!card || !wrap) return;
   if (!data || !data.length) { card.style.display = 'none'; return; }
-  var weeks = {}, order = [], total = 0;
+  // 按每条明细的批次归属周 qcWeek 分组累积；老数据没有 qcWeek 时兜底按明细日期归周
+  var weeks = {}, order = [], grandTotal = 0;
   for (var i = 0; i < data.length; i++) {
-    var t = dashboardTotal(data[i]); if (!t) continue;
-    total += t;
-    var wk = qcWeekRangeOf(data[i].date) || { key: '0000-00-00', start: '日期待补', end: '' };
-    if (!weeks[wk.key]) { weeks[wk.key] = { start: wk.start, end: wk.end, n: 0, pass: 0, fail: 0 }; order.push(wk.key); }
-    weeks[wk.key].n += t;
-    weeks[wk.key].pass += dashboardPassCount(data[i]);
-    weeks[wk.key].fail += dashboardFailCount(data[i]);
+    var it = data[i];
+    var t = dashboardTotal(it); if (!t) continue;
+    var key = it.qcWeek || (qcWeekRangeOf(it.date) || {}).key || '';
+    if (!key) key = '0000-00-00';
+    if (!weeks[key]) { weeks[key] = { key: key, n: 0, pass: 0, fail: 0 }; order.push(key); }
+    weeks[key].n += t;
+    weeks[key].pass += dashboardPassCount(it);
+    weeks[key].fail += dashboardFailCount(it);
+    grandTotal += t;
   }
-  if (!total) { card.style.display = 'none'; return; }
+  if (!grandTotal) { card.style.display = 'none'; return; }
   order.sort();
-  var now = new Date();
-  var day = now.getDay();
-  var diff = (day === 0) ? 6 : day - 1;
-  var monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
-  var todayKey = monday.getFullYear() + '-' + ('0' + (monday.getMonth() + 1)).slice(-2) + '-' + ('0' + monday.getDate()).slice(-2);
-  var title = '截至 ' + now.getFullYear() + '年' + (now.getMonth() + 1) + '月' + now.getDate() + '日';
   var rows = '';
   for (var w = order.length - 1; w >= 0; w--) {
     var g = weeks[order[w]];
-    var isCur = order[w] === todayKey;
-    var pct = Math.round(g.n / total * 1000) / 10;
+    var rng = qcWeekRangeOf(g.key) || { start: g.key, end: '' };
+    var pct = Math.round(g.n / grandTotal * 1000) / 10;
     rows += '<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #eef2f7;flex-wrap:wrap;">'
-      + '<span style="font-weight:700;min-width:190px;color:#1e293b;">' + g.start.replace(/-/g, '/') + ' - ' + g.end.replace(/-/g, '/') + (isCur ? '<span style="color:#1d4ed8;font-size:12px;">（本周）</span>' : '') + '</span>'
+      + '<span style="font-weight:700;min-width:190px;color:#1e293b;">' + rng.start.replace(/-/g, '/') + ' - ' + rng.end.replace(/-/g, '/') + '</span>'
       + '<span style="color:#334155;">质检量 <b style="font-size:15px;">' + g.n + '</b> 条（' + pct + '%）</span>'
       + '<span style="color:#16a34a;">达标 ' + g.pass + '</span>'
       + '<span style="color:#dc2626;">不达标 ' + g.fail + '</span>'
       + '</div>';
   }
-  wrap.innerHTML = '<div class="card-header"><h3>总质检量 · 周度统计（' + title + '）</h3><span style="font-size:12px;color:#6b7280;">按明细日期归周（周一至周日），合计 ' + total + ' 条</span></div><div class="card-body" style="padding-top:6px;">' + rows + '</div>';
+  var lastRng = qcWeekRangeOf(order[order.length - 1]) || { end: '' };
+  var ep = String(lastRng.end).split('-');
+  var title = '截至 ' + Number(ep[0]) + '年' + Number(ep[1]) + '月' + Number(ep[2]) + '日';
+  wrap.innerHTML = '<div class="card-header"><h3>总质检量 · 周度统计（' + title + '）</h3><span style="font-size:12px;color:#6b7280;">按上传批次归属周累积（周一至周日），历史批次不改动，合计 ' + grandTotal + ' 条</span></div><div class="card-body" style="padding-top:6px;">' + rows + '</div>';
   card.style.display = 'block';
 }
 
@@ -4011,12 +4061,15 @@ function renderSummaryTable(data, dimension) {
     var dimensionValue = dimension === 'account' ? (r.account || '未填写账号') : (r.agent || '未填写客服');
     var key = dimensionValue + '||' + groupName;
     if (!groups[key]) {
-      groups[key] = { label: dimensionValue, agent: dimension === 'agent' ? dimensionValue : '', account: dimension === 'account' ? dimensionValue : '', group: groupName, date: getCurrentDate(), total: 0, validTotal: 0, scoreSum: 0, failCount: {} };
+      groups[key] = { label: dimensionValue, agent: dimension === 'agent' ? dimensionValue : '', account: dimension === 'account' ? dimensionValue : '', group: groupName, date: getCurrentDate(), total: 0, validTotal: 0, scoreSum: 0, passTotal: 0, failTotal: 0, failCount: {} };
       for (var d = 0; d < DIM_NAMES.length; d++) groups[key].failCount[DIM_NAMES[d]] = 0;
     }
     groups[key].total += dashboardTotal(r);
     groups[key].validTotal += dashboardValidTotal(r);
     groups[key].scoreSum += dashboardScoreSum(r);
+    // 汇总栏达标数/不达标数：按质检明细每条的等级统计（随明细实时联动）
+    groups[key].passTotal += dashboardPassCount(r);
+    groups[key].failTotal += dashboardFailCount(r);
     for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
       var dn = DIM_NAMES[d2];
       if (r.scores[dn] >= 0 && r.details[dn] && r.details[dn].grade === '不达标') groups[key].failCount[dn]++;
@@ -4032,26 +4085,26 @@ function renderSummaryTable(data, dimension) {
   });
   var dimensionLabel = dimension === 'account' ? '账号' : '客服';
   var html = '<table class="summary-table" style="table-layout:fixed;"><colgroup>' +
-    '<col style="width:70px"><col style="width:96px"><col style="width:92px"><col style="width:64px"><col style="width:68px">' +
+    '<col style="width:70px"><col style="width:96px"><col style="width:92px"><col style="width:64px"><col style="width:68px"><col style="width:56px"><col style="width:56px">' +
     '<col span="' + DIM_NAMES.length + '" style="width:52px"><col span="' + DIM_NAMES.length + '" style="width:52px">' +
     '<col style="width:110px"></colgroup><thead><tr>';
-  html += '<th rowspan="2" class="group-header">组别</th><th rowspan="2" class="group-header">' + dimensionLabel + '</th><th rowspan="2" class="group-header">更新日期</th><th colspan="2" class="group-header">汇总</th><th colspan="' + DIM_NAMES.length + '">各维度不达标率</th><th colspan="' + DIM_NAMES.length + '">各维度不达标量</th><th rowspan="2" class="group-header">建议</th></tr><tr>';
-  html += '<th class="sub-header">被质检量</th><th class="sub-header">质检平均分</th>';
+  html += '<th rowspan="2" class="group-header">组别</th><th rowspan="2" class="group-header">' + dimensionLabel + '</th><th rowspan="2" class="group-header">更新日期</th><th colspan="4" class="group-header">汇总</th><th colspan="' + DIM_NAMES.length + '">各维度不达标率</th><th colspan="' + DIM_NAMES.length + '">各维度不达标量</th><th rowspan="2" class="group-header">建议</th></tr><tr>';
+  html += '<th class="sub-header">被质检量</th><th class="sub-header">质检平均分</th><th class="sub-header">达标数</th><th class="sub-header">不达标数</th>';
   for (var j = 0; j < DIM_NAMES.length; j++) html += '<th class="dim-sub-header">' + DIM_NAMES[j] + '</th>';
   for (var j2 = 0; j2 < DIM_NAMES.length; j2++) html += '<th class="dim-sub-header">' + DIM_NAMES[j2] + '</th>';
   html += '</tr></thead><tbody>';
-  if (gl.length === 0) { html += '<tr><td colspan="16" style="padding:30px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>'; }
+  if (gl.length === 0) { html += '<tr><td colspan="18" style="padding:30px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>'; }
   else {
-    var gt = 0, gv = 0, gs = 0, gf = {};
+    var gt = 0, gv = 0, gs = 0, gpt = 0, gft = 0, gf = {};
     for (var m = 0; m < DIM_NAMES.length; m++) gf[DIM_NAMES[m]] = 0;
     for (var g = 0; g < gl.length; g++) {
       var grp = gl[g];
-      gt += grp.total; gv += grp.validTotal; gs += grp.scoreSum;
+      gt += grp.total; gv += grp.validTotal; gs += grp.scoreSum; gpt += grp.passTotal; gft += grp.failTotal;
       for (var n = 0; n < DIM_NAMES.length; n++) gf[DIM_NAMES[n]] += grp.failCount[DIM_NAMES[n]];
     }
     var ga = gv > 0 ? (gs / gv).toFixed(1) : '-';
     // 总计行置顶
-    html += '<tr class="total-row"><td colspan="2" style="text-align:center;font-weight:600;">汇总</td><td>' + getCurrentDate() + '</td><td>' + gt + '</td><td>' + ga + '</td>';
+    html += '<tr class="total-row"><td colspan="2" style="text-align:center;font-weight:600;">汇总</td><td>' + getCurrentDate() + '</td><td>' + gt + '</td><td>' + ga + '</td><td>' + gpt + '</td><td>' + gft + '</td>';
     for (var s = 0; s < DIM_NAMES.length; s++) { var fc0 = gf[DIM_NAMES[s]]; var cls0 = fc0 === 0 ? 'rate-good' : (gt > 0 && fc0 / gt <= 0.2 ? 'rate-warn' : 'rate-bad'); var rate0 = gt > 0 ? ((fc0 / gt) * 100).toFixed(1) + '%' : '-'; html += '<td class="' + cls0 + '">' + rate0 + '</td>'; }
     for (var s2 = 0; s2 < DIM_NAMES.length; s2++) { var fc1 = gf[DIM_NAMES[s2]]; var cls1 = fc1 === 0 ? 'rate-good' : (gt > 0 && fc1 / gt <= 0.2 ? 'rate-warn' : 'rate-bad'); var grpArgT = htmlAttrJsStr(''), dnArgT = htmlAttrJsStr(DIM_NAMES[s2]); if (fc1 > 0) html += '<td class="' + cls1 + '"><span class="cell-clickable" title="点击查看该维度不达标明细" onclick="jumpToDetailByDim(' + grpArgT + ',' + dnArgT + ')">' + fc1 + '</span></td>'; else html += '<td class="' + cls1 + '">' + fc1 + '</td>'; }
     // 汇总建议：按小组分组（数据统计保持聚合不变，仅建议按小组组织）
@@ -4192,7 +4245,7 @@ function renderSummaryTable(data, dimension) {
       var sectionAcc = { group: grp2.label + '（' + grp2.group + '）', good: accGood, improve: accImprove };
       var sugHtml = '暂无突出问题';
       if (accImprove.length > 0) sugHtml = '<span class="cell-clickable" title="点击展开查看该' + dimensionLabel + '的改进建议与重点关注" onclick="showGroupedAdviceModal(' + htmlAttrJsStr(grp2.label + ' - 改进建议') + ',[' + sectionToJson(sectionAcc) + '],' + htmlAttrJsStr(focusLabel) + ',' + htmlAttrJsStr(bestLabel) + ')">查看建议（' + accImprove.length + '项）</span>';
-      html += '<tr><td>' + escHtml(grp2.group) + '</td><td>' + escHtml(grp2.label) + '</td><td>' + escHtml(grp2.date) + '</td><td>' + grp2.total + '</td><td>' + avg + '</td>';
+      html += '<tr><td>' + escHtml(grp2.group) + '</td><td>' + escHtml(grp2.label) + '</td><td>' + escHtml(grp2.date) + '</td><td>' + grp2.total + '</td><td>' + avg + '</td><td class="rate-good">' + grp2.passTotal + '</td><td class="rate-bad">' + grp2.failTotal + '</td>';
       for (var p = 0; p < DIM_NAMES.length; p++) { var fc = grp2.failCount[DIM_NAMES[p]]; var cls = fc === 0 ? 'rate-good' : (grp2.total > 0 && fc / grp2.total <= 0.2 ? 'rate-warn' : 'rate-bad'); var rate = grp2.total > 0 ? ((fc / grp2.total) * 100).toFixed(1) + '%' : '-'; html += '<td class="' + cls + '">' + rate + '</td>'; }
       for (var q = 0; q < DIM_NAMES.length; q++) { var fc2 = grp2.failCount[DIM_NAMES[q]]; var cls2 = fc2 === 0 ? 'rate-good' : (grp2.total > 0 && fc2 / grp2.total <= 0.2 ? 'rate-warn' : 'rate-bad'); var grpArg = htmlAttrJsStr(grp2.group), dnArg = htmlAttrJsStr(DIM_NAMES[q]); var agentArg = htmlAttrJsStr(dimension === 'agent' ? grp2.label : ''); var accountArg = htmlAttrJsStr(dimension === 'account' ? grp2.label : ''); if (fc2 > 0) html += '<td class="' + cls2 + '"><span class="cell-clickable" title="点击查看该维度不达标明细" onclick="jumpToDetailByDim(' + grpArg + ',' + dnArg + ',' + agentArg + ',' + accountArg + ')">' + fc2 + '</span></td>'; else html += '<td class="' + cls2 + '">' + fc2 + '</td>'; }
       html += '<td>' + sugHtml + '</td></tr>';
@@ -5218,8 +5271,8 @@ function exportDashboard(type) {
   var filtered = [];
   for (var i = 0; i < results.length; i++) { var r = results[i]; if (fG && getGroupByAgent(r.agent) !== fG) continue; if (fA && r.account !== fA) continue; if (fAg && r.agent !== fAg) continue; if (!isAssessedResult(r)) continue; filtered.push(r); }
   var exportDimension = (document.getElementById('summaryDimension') || {}).value || 'agent';
-  var h1 = ['组别', exportDimension === 'account' ? '账号' : '客服', '更新日期', '汇总', '', '不达标量', '', '', '', '', '', '不达标率', '', '', '', '', '', '建议'];
-  var h2 = ['', '', '', '被质检量', '质检平均分'].concat(DIM_NAMES).concat(DIM_NAMES).concat(['']);
+  var h1 = ['组别', exportDimension === 'account' ? '账号' : '客服', '更新日期', '汇总', '', '', '', '不达标量', '', '', '', '', '', '不达标率', '', '', '', '', '', '', '建议'];
+  var h2 = ['', '', '', '被质检量', '质检平均分', '达标数', '不达标数'].concat(DIM_NAMES).concat(DIM_NAMES).concat(['']);
   var rows = [h1, h2];
   var groups = {};
   for (var i2 = 0; i2 < filtered.length; i2++) {
@@ -5227,9 +5280,11 @@ function exportDashboard(type) {
     var exportGroup = getGroupByAgent(r2.agent);
     var exportLabel = exportDimension === 'account' ? (r2.account || '未填写账号') : (r2.agent || '未填写客服');
     var key = exportLabel + '||' + exportGroup;
-    if (!groups[key]) { groups[key] = { label: exportLabel, agent: r2.agent, account: r2.account, group: exportGroup, total: 0, validTotal: 0, scoreSum: 0, failCount: {} }; for (var d = 0; d < DIM_NAMES.length; d++) groups[key].failCount[DIM_NAMES[d]] = 0; }
+    if (!groups[key]) { groups[key] = { label: exportLabel, agent: r2.agent, account: r2.account, group: exportGroup, total: 0, validTotal: 0, scoreSum: 0, passTotal: 0, failTotal: 0, failCount: {} }; for (var d = 0; d < DIM_NAMES.length; d++) groups[key].failCount[DIM_NAMES[d]] = 0; }
     groups[key].total++;
     if (r2.totalScore >= 0) { groups[key].validTotal++; groups[key].scoreSum += r2.totalScore; }
+    groups[key].passTotal += dashboardPassCount(r2);
+    groups[key].failTotal += dashboardFailCount(r2);
     for (var d2 = 0; d2 < DIM_NAMES.length; d2++) { var dn = DIM_NAMES[d2]; if (r2.details[dn] && r2.details[dn].grade === '不达标') groups[key].failCount[dn]++; }
   }
   var gl = [];
@@ -5243,7 +5298,7 @@ function exportDashboard(type) {
   for (var g = 0; g < gl.length; g++) {
     var grp = gl[g];
     var avg = grp.validTotal > 0 ? (grp.scoreSum / grp.validTotal).toFixed(1) : '-';
-    var row = [grp.group, grp.label, getCurrentDate(), grp.total, avg];
+    var row = [grp.group, grp.label, getCurrentDate(), grp.total, avg, grp.passTotal, grp.failTotal];
     for (var i3 = 0; i3 < DIM_NAMES.length; i3++) row.push(grp.failCount[DIM_NAMES[i3]]);
     for (var j = 0; j < DIM_NAMES.length; j++) row.push(grp.total > 0 ? ((grp.failCount[DIM_NAMES[j]] / grp.total) * 100).toFixed(0) + '%' : '-');
     var sf = [];
