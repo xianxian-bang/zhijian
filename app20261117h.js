@@ -265,7 +265,9 @@ function getAgentGroupMap() {
 }
 function getGroupByAgent(name) {
   var m = getAgentGroupMap();
-  return m[name] || '未分组';
+  if (m[name]) return m[name];
+  // 别名兜底：尹玉婷1 在组别表里没有时，用归一后的本名（尹玉婷）再查一次
+  return m[canonicalAgentName(name)] || '未分组';
 }
 
 // ============================================================
@@ -2586,7 +2588,10 @@ function bulkMatches(r) {
 }
 function multiMatches(value, key) {
   var vals = getMultiValues(key);
-  return !vals.length || vals.indexOf(value) >= 0;
+  if (!vals.length) return true;
+  // 客服维度同人归一：选中「尹玉婷」也要命中「尹玉婷1」的单（反之亦然）
+  if (key === 'agent') value = canonicalAgentName(value);
+  return vals.indexOf(value) >= 0;
 }
 
 function populateFilters() {
@@ -2594,7 +2599,7 @@ function populateFilters() {
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
     if (r.account) accounts[r.account] = true;
-    if (r.agent) { agents[r.agent] = true; groups[dashboardGroup(r)] = true; }
+    if (r.agent) { agents[canonicalAgentName(r.agent)] = true; groups[dashboardGroup(r)] = true; }
   }
   function buildOpts(obj, allLabel) {
     var html = '<option value="">' + allLabel + '</option>';
@@ -2619,7 +2624,7 @@ function populateFilters() {
 function onDetailFilterChange() {
   var group = document.getElementById('detailFilterGroup').value;
   var agents = {};
-  for (var i = 0; i < results.length; i++) if (!group || getGroupByAgent(results[i].agent) === group) agents[results[i].agent] = true;
+  for (var i = 0; i < results.length; i++) if (!group || getGroupByAgent(results[i].agent) === group) agents[canonicalAgentName(results[i].agent)] = true;
   var html = '<option value="">全部</option>';
   Object.keys(agents).sort().forEach(function(a) { html += '<option value="' + escHtml(a) + '">' + escHtml(a) + '</option>'; });
   document.getElementById('detailFilterAgent').innerHTML = html;
@@ -2632,7 +2637,7 @@ function onDashFilterChange() {
   var agents = {}, accounts = {};
   for (var i = 0; i < results.length; i++) {
     if (!group || dashboardGroup(results[i]) === group) {
-      agents[results[i].agent] = true;
+      agents[canonicalAgentName(results[i].agent)] = true;
       accounts[results[i].account] = true;
     }
   }
@@ -2672,6 +2677,13 @@ function countAgentLetters(reply) {
 function normalizeAgentName(s) {
   return String(s == null ? '' : s).replace(/[\s·・.。]/g, '').toLowerCase();
 }
+// 同人别名（2026-11-19 用户确认）：登录账号带数字后缀与本人名是同一个客服，
+// 考核统计必须合并为一个人（否则看板/汇总把尹玉婷1、尹玉婷拆成两个人，数据各少一半）
+var AGENT_ALIAS = { '尹玉婷1': '尹玉婷', '李肖1': '李肖' };
+function canonicalAgentName(name) {
+  var s = String(name == null ? '' : name).trim();
+  return AGENT_ALIAS[s] || s;
+}
 // 取一封客服回邮的署名：发送状态标记前面那一段的尾部名字
 // 注意：导出文本里常混入界面按钮文字（「复制」/「收起」/「收起中」等），
 // 按「收起」切块后会把「中」粘到下一块的署名前面（→「中林文玉」），必须剥掉
@@ -2691,6 +2703,9 @@ function agentNameBeforeMark(block, markIdx) {
 // 署名比对：允许署名比客服名多出前缀（如「中林文玉」= 界面上残留的「中」+ 林文玉）；
 // 也允许账号名比署名多出数字后缀（如登录账号「尹玉婷1」/「李肖1」，邮件署名是本名「尹玉婷」/「李肖」）
 function agentNameMatches(candidate, target) {
+  // 先做同人别名归一（尹玉婷1=尹玉婷、李肖1=李肖），再走通用前后缀比对
+  candidate = canonicalAgentName(candidate);
+  target = canonicalAgentName(target);
   var c = normalizeAgentName(candidate), t = normalizeAgentName(target);
   if (!c || !t) return false;
   if (c === t) return true;
@@ -2706,7 +2721,7 @@ function sessionParticipation(r) {
   var res = { mine: 0, total: 0, pct: 0, assessed: false };
   if (reply && reply !== '无联客记录') {
     var blocks = reply.indexOf('收起') >= 0 ? reply.split('收起') : [reply];
-    var named = 0, target = normalizeAgentName(r && r.agent);
+    var named = 0, target = normalizeAgentName(canonicalAgentName(r && r.agent));
     for (var i = 0; i < blocks.length; i++) {
       var b = blocks[i];
       if (!b || !b.trim()) continue;
@@ -2738,7 +2753,7 @@ function buildSendStat() {
   for (var i = 0; i < results.length; i++) {
     var n = recordSendCount(results[i]);
     if (!n) continue;
-    var a = results[i].agent || '（未填写客服）';
+    var a = canonicalAgentName(results[i].agent) || '（未填写客服）';
     byAgent[a] = (byAgent[a] || 0) + n;
     total += n;
   }
@@ -2898,7 +2913,7 @@ function renderDetailOverview(filtered) {
   function topN(key, n) {
     var m = {};
     for (var i = 0; i < filtered.length; i++) {
-      var k = String(filtered[i][key] || (key === 'agent' ? '未填写客服' : '未填写账号'));
+      var k = canonicalAgentName(filtered[i][key]) || (key === 'agent' ? '未填写客服' : '未填写账号');
       m[k] = (m[k] || 0) + 1;
     }
     var arr = [];
@@ -2911,7 +2926,7 @@ function renderDetailOverview(filtered) {
     var assessed = 0, unassessed = 0, letters = 0;
     for (var i = 0; i < filtered.length; i++) {
       var r = filtered[i];
-      if (String(r[key] || (key === 'agent' ? '未填写客服' : '未填写账号')) !== value) continue;
+      if ((canonicalAgentName(r[key]) || (key === 'agent' ? '未填写客服' : '未填写账号')) !== value) continue;
       if (!isAssessedResult(r)) { unassessed++; continue; }
       assessed++;
       var p = sessionParticipation(r);
@@ -3103,7 +3118,7 @@ function renderDetailTable() {
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
-      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(r.agent) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
+      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
         if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
@@ -3122,7 +3137,7 @@ function renderDetailTable() {
       html += '<td>' + appealStatusBadge(appealStatus) + '</td><td><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span> <span class="clickable" onclick="openAppealModal(' + r._index + ')">申诉</span></td>';
       var _os = orderSendStat(r);
       var _part = sessionParticipation(r);
-      var _agentTotal = sendStat.byAgent[r.agent || '（未填写客服）'] || 0;
+      var _agentTotal = sendStat.byAgent[canonicalAgentName(r.agent) || '（未填写客服）'] || 0;
       html += '<td title="本单：该客服 ' + _os.count + ' 封 / 客服合计 ' + _part.total + ' 封；该客服名下全部质检单累计 ' + _agentTotal + ' 封">' + _os.count + '</td><td>' + _os.pct + '</td>'
             + '<td><span class="score-badge ' + (_part.assessed ? 'score-pass' : 'score-na') + '">' + (_part.assessed ? '是' : '否') + '</span></td></tr>';
     }
@@ -3161,7 +3176,7 @@ function qcRebuildDashFilters() {
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
     if (r.account) accounts[r.account] = true;
-    if (r.agent) { agents[r.agent] = true; groups[dashboardGroup(r)] = true; }
+    if (r.agent) { agents[canonicalAgentName(r.agent)] = true; groups[dashboardGroup(r)] = true; }
   }
   function fill(id, obj, label) {
     var el = document.getElementById(id); if (!el) return;
@@ -3294,7 +3309,7 @@ function buildReplyDataBlockHtml(r, boxId) {
         + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
         + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, r.orderAmount) + '</span></div>'
-        + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(r.agent) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
   var _reg = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
@@ -3311,6 +3326,8 @@ function buildReplyDataBlockHtml(r, boxId) {
   var dr = r.reply || '';
   var _qcAgentNames = [];
   for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
+  // 同人归一：把别名（尹玉婷1→尹玉婷）也加进名单，保证署名气泡能按人匹配高亮
+  for (var _qb = 0; _qb < _qcAgentNames.length; _qb++) { var _qc = canonicalAgentName(_qcAgentNames[_qb]); if (_qc && _qcAgentNames.indexOf(_qc) < 0) _qcAgentNames.push(_qc); }
   if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
   html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, boxId, _qcAgentNames) + '</div>';
   // 四个登记字段已上移到“回邮数据”标题行横向并列
@@ -3325,7 +3342,7 @@ function showDetail(index) {
   html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">ODR</td><td>' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(r.agent) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (r.orderAmount !== undefined && r.orderAmount !== '' ? escHtml(r.orderAmount) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
@@ -3806,7 +3823,7 @@ function wowDecorateSummary(data, dimension) {
     var group = isTotal ? '' : (cells[0].textContent || '').trim();
     var label = isTotal ? '' : (cells[1].textContent || '').trim();
     var subset = isTotal ? data : data.filter(function(r) {
-      return dashboardGroup(r) === group && (dimension === 'account' ? (r.account || '未填写账号') === label : (r.agent || '未填写客服') === label);
+      return dashboardGroup(r) === group && (dimension === 'account' ? (r.account || '未填写账号') === label : (canonicalAgentName(r.agent) || '未填写客服') === label);
     });
     wowApplyTitle(cells[3 + off], wowTip(subset, 'total'));
     wowApplyTitle(cells[4 + off], wowTip(subset, 'avg'));
@@ -3906,7 +3923,7 @@ function renderDashboard() {
     var r = results[i];
     if (fG && dashboardGroup(r) !== fG) continue;
     if (fA && r.account !== fA) continue;
-    if (fAg && r.agent !== fAg) continue;
+    if (fAg && canonicalAgentName(r.agent) !== fAg) continue;
     // 只有「是否考核 = 是」（客服会话参与占比 ≥ 50%）的单才计入看板统计
     if (!isAssessedResult(r)) { skippedUnassessed++; continue; }
     filtered.push(r);
@@ -4071,7 +4088,7 @@ function renderSummaryTable(data, dimension) {
   for (var i = 0; i < data.length; i++) {
     var r = data[i];
     var groupName = dashboardGroup(r);
-    var dimensionValue = dimension === 'account' ? (r.account || '未填写账号') : (r.agent || '未填写客服');
+    var dimensionValue = dimension === 'account' ? (r.account || '未填写账号') : (canonicalAgentName(r.agent) || '未填写客服');
     var key = dimensionValue + '||' + groupName;
     if (!groups[key]) {
       groups[key] = { label: dimensionValue, agent: dimension === 'agent' ? dimensionValue : '', account: dimension === 'account' ? dimensionValue : '', group: groupName, date: getCurrentDate(), total: 0, validTotal: 0, scoreSum: 0, passTotal: 0, failTotal: 0, failCount: {} };
@@ -4295,7 +4312,7 @@ function renderCharts(data, dimension) {
     var g = {};
     for (var i = 0; i < items.length; i++) {
       var r = items[i];
-      var key = dimension === 'account' ? (r.account || '未填写账号') : (r.agent || '未填写客服');
+      var key = dimension === 'account' ? (r.account || '未填写账号') : (canonicalAgentName(r.agent) || '未填写客服');
       if (!g[key]) g[key] = { label: key, total: 0, sum: 0 };
       g[key].total += 1;
       g[key].sum += Number(r.totalScore) || 0;
@@ -4365,7 +4382,7 @@ function renderCharts(data, dimension) {
         datalabels: { display: true, anchor: 'end', align: 'right', color: '#374151', font: { size: 11, weight: '600' }, formatter: function(v) { return v; } },
         tooltip: { callbacks: { afterLabel: function(ctx) {
           var nm = ctx.label;
-          var sub = data.filter(function(r) { return (dimension === 'account' ? (r.account || '未填写账号') : (r.agent || '未填写客服')) === nm; });
+          var sub = data.filter(function(r) { return (dimension === 'account' ? (r.account || '未填写账号') : (canonicalAgentName(r.agent) || '未填写客服')) === nm; });
           return wowChartLine(sub, 'avg');
         } } }
       },
@@ -5282,7 +5299,7 @@ function exportDashboard(type) {
   var fA = document.getElementById('dashFilterAccount').value;
   var fAg = document.getElementById('dashFilterAgent').value;
   var filtered = [];
-  for (var i = 0; i < results.length; i++) { var r = results[i]; if (fG && getGroupByAgent(r.agent) !== fG) continue; if (fA && r.account !== fA) continue; if (fAg && r.agent !== fAg) continue; if (!isAssessedResult(r)) continue; filtered.push(r); }
+  for (var i = 0; i < results.length; i++) { var r = results[i]; if (fG && getGroupByAgent(r.agent) !== fG) continue; if (fA && r.account !== fA) continue; if (fAg && canonicalAgentName(r.agent) !== fAg) continue; if (!isAssessedResult(r)) continue; filtered.push(r); }
   var exportDimension = (document.getElementById('summaryDimension') || {}).value || 'agent';
   var h1 = ['组别', exportDimension === 'account' ? '账号' : '客服', '更新日期', '汇总', '', '', '', '不达标量', '', '', '', '', '', '不达标率', '', '', '', '', '', '', '建议'];
   var h2 = ['', '', '', '被质检量', '质检平均分', '达标数', '不达标数'].concat(DIM_NAMES).concat(DIM_NAMES).concat(['']);
@@ -5291,7 +5308,7 @@ function exportDashboard(type) {
   for (var i2 = 0; i2 < filtered.length; i2++) {
     var r2 = filtered[i2];
     var exportGroup = getGroupByAgent(r2.agent);
-    var exportLabel = exportDimension === 'account' ? (r2.account || '未填写账号') : (r2.agent || '未填写客服');
+    var exportLabel = exportDimension === 'account' ? (r2.account || '未填写账号') : (canonicalAgentName(r2.agent) || '未填写客服');
     var key = exportLabel + '||' + exportGroup;
     if (!groups[key]) { groups[key] = { label: exportLabel, agent: r2.agent, account: r2.account, group: exportGroup, total: 0, validTotal: 0, scoreSum: 0, passTotal: 0, failTotal: 0, failCount: {} }; for (var d = 0; d < DIM_NAMES.length; d++) groups[key].failCount[DIM_NAMES[d]] = 0; }
     groups[key].total++;
@@ -6505,10 +6522,11 @@ function qcAppealInScope(r) {
   if (AUTH.role === 'leader') {
     var mine = AUTH.group || (typeof qcLeaderGroup === 'function' ? qcLeaderGroup(me) : '') || '';
     var grp = '';
-    try { grp = getAgentGroupMap()[r.agent] || ''; } catch (e) {}
+    try { grp = getGroupByAgent(r.agent) || ''; } catch (e) {}
     return !!mine && grp === mine;
   }
-  return String(r.agent || '').trim() === String(me || '').trim();
+  // 同人归一：登录名「尹玉婷1」也要看到署名/明细写「尹玉婷」的单（反之亦然）
+  return canonicalAgentName(String(r.agent || '').trim()) === canonicalAgentName(String(me || '').trim());
 }
 function qcAppealIsRead(r, bucket) {
   var me = qcAppealMine();
