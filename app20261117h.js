@@ -419,7 +419,13 @@ function qcDecodeStateJson(raw) {
 }
 function qcEncodeStateJson(obj) {
   var json = JSON.stringify(obj);
-  if (typeof LZString !== 'undefined' && LZString.compressToBase64) return QC_STATE_LZ_PREFIX + LZString.compressToBase64(json);
+  // 兼容性优先：明文格式新旧版代码都能读取。压缩格式(LZ1:)只有支持解压的新版能读，
+  // 一旦线上仍有旧版设备在线，就会报「云端读取失败」。因此只有明文体积大到可能触发
+  // Supabase 写入超时（>9MB）时才压缩；日常数据量（当前约5.7MB）一律明文保存，保证多版本混用稳定。
+  var bigEnoughToCompress = json.length > 9 * 1024 * 1024;
+  if (bigEnoughToCompress && typeof LZString !== 'undefined' && LZString.compressToBase64) {
+    return QC_STATE_LZ_PREFIX + LZString.compressToBase64(json);
+  }
   return json;
 }
 function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
@@ -430,22 +436,66 @@ function qcLoadSnapshotFallback() {
 }
 function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = qcDecodeStateJson(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } else { try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
 // 写云端前先读一次：把后台工具/其他设备刚上传、本地还没有的记录并进来，避免整份覆盖导致新数据丢失
+// 申诉变更时间戳：用于多人协作时判断同一订单上谁的申诉/审核结果更新
+function qcAppealStamp(r) {
+  var a = (r && r.appeal) || {};
+  var t = a.reviewedAt || a.submittedAt || '';
+  return t ? String(t) : '';
+}
+// 申诉"进度等级"：无申诉(0) < 待审核(1) < 被拒/部分通过(2) < 申诉通过(3)
+// 时间戳相同/缺失时，用进度等级做次级判断，避免审核结果被旧的"无申诉/待审核"覆盖
+function qcAppealRank(r) {
+  var s = ((r && r.appeal && r.appeal.status) || '无申诉');
+  if (s === '申诉通过') return 3;
+  if (s === '部分通过' || s === '申诉被拒') return 2;
+  if (s === '待审核') return 1;
+  return 0;
+}
+// 判断 which 是否比 base 的申诉状态更新（用于合并他人申诉/审核结果）
+function qcAppealNewer(which, base) {
+  var sw = qcAppealStamp(which), sb = qcAppealStamp(base);
+  if (sw && sb && sw !== sb) return sw > sb;
+  if (sw && !sb) return true;
+  if (!sw && sb) return false;
+  return qcAppealRank(which) > qcAppealRank(base);
+}
+// 把 cloudR 上更新的申诉结果合并到本地 localR（评分、等级、明细、申诉一起带过来，保证达标判定一致）
+function qcMergeAppealInto(localR, cloudR) {
+  if (!qcAppealNewer(cloudR, localR)) return false;
+  var a = (cloudR.appeal && JSON.parse(JSON.stringify(cloudR.appeal))) || createEmptyAppeal();
+  localR.appeal = normalizeAppeal(a);
+  localR.totalScore = cloudR.totalScore;
+  localR.grade = cloudR.grade;
+  if (cloudR.scores) localR.scores = JSON.parse(JSON.stringify(cloudR.scores));
+  if (cloudR.details) localR.details = JSON.parse(JSON.stringify(cloudR.details));
+  for (var k in cloudR) {
+    if (k === 'appeal' || k === 'totalScore' || k === 'grade' || k === 'scores' || k === 'details' || k === '_index' || k === '_part') continue;
+    localR[k] = cloudR[k];
+  }
+  delete localR._part;
+  return true;
+}
 function qcMergeCloudNewRecords(cloudD) {
   if (!cloudD || !cloudD.results || !cloudD.rawData) return 0;
-  var keys = {}, i;
-  for (i = 0; i < results.length; i++) keys[getStableRecordKey(results[i])] = true;
-  var added = 0;
+  var index = {}, i;
+  for (i = 0; i < results.length; i++) index[getStableRecordKey(results[i])] = i;
+  var added = 0, merged = 0;
   for (i = 0; i < cloudD.results.length; i++) {
     var k = getStableRecordKey(cloudD.results[i]);
-    if (keys[k]) continue;
+    if (Object.prototype.hasOwnProperty.call(index, k)) {
+      // 同一订单：把云端（他人）更新的申诉/审核结果并进来，防止本地旧状态覆盖他人结果
+      try { if (qcMergeAppealInto(results[index[k]], cloudD.results[i])) merged++; } catch (e) {}
+      continue;
+    }
     var r = JSON.parse(JSON.stringify(cloudD.results[i]));
     delete r._part; r._index = results.length;
     results.push(r);
     rawData.push(JSON.parse(JSON.stringify(cloudD.rawData[i] || {})));
-    keys[k] = true; added++;
+    index[k] = results.length - 1; added++;
   }
   if (added > 0) showToast('已并入云端新增的 ' + added + ' 条数据（后台工具/其他设备上传）', 'info');
-  return added;
+  if (merged > 0) showToast('已同步 ' + merged + ' 条他人在云端更新的申诉/审核结果', 'info');
+  return added + merged;
 }
 function cloudSaveState() {
   if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化'));
@@ -608,6 +658,8 @@ function switchTab(tabName, el) {
   for (var j = 0; j < contents.length; j++) contents[j].classList.remove('active');
   el.classList.add('active');
   document.getElementById('tab-' + tabName).classList.add('active');
+  // 记住当前页签：刷新后恢复到用户离开时所在的页面（配合 qcRestoreTab）
+  try { sessionStorage.setItem('qc_active_tab', tabName); } catch (e) {}
   if (tabName === 'dashboard') setTimeout(qcSyncDashboard, 50);
   if (tabName === 'standard') setTimeout(renderStandard, 50);
   if (tabName === 'qclogic') setTimeout(renderQcLogic, 50);
@@ -6147,9 +6199,18 @@ function qcSessionRead() {
   try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { s = null; }
   if (!s || !s.name) return null;
   if (!s.ts || (Date.now() - s.ts) > SESSION_DAYS * 864e5) { try { localStorage.removeItem(SESSION_KEY); } catch (e) {} return null; }
+  // 刷新免登录：直接信任会话里保存的身份信息（登录时已写入 name/role/group）。
+  // 不再强制要求账号表能找到该用户——多人协作下账号表可能被别处覆盖导致本地暂时查不到，
+  // 若据此判定会话失效就会出现「一刷新就要重新登录」。账号表稍后会从云端同步并补齐。
   var u = qcFindUser(s.name);
-  if (!u) return null;
-  return { name: u.name, role: qcRoleOfUser(u), group: qcLeaderGroup(u.name) || '', ts: s.ts, mustChangePwd: !!u.mustChangePwd };
+  var role = s.role, group = s.group, mustChange = !!s.mustChangePwd;
+  if (u) {
+    // 账号表在时，用最新角色/组别刷新（管理员改权限能生效），不可用则沿用会话里的值
+    try { role = qcRoleOfUser(u) || role; } catch (e) {}
+    try { group = qcLeaderGroup(u.name) || group; } catch (e) {}
+    mustChange = !!u.mustChangePwd;
+  }
+  return { name: s.name, role: role || 'member', group: group || '', ts: s.ts, mustChangePwd: mustChange };
 }
 function qcAuthBoot() {
   var cached = qcReadCachedUsers();
@@ -6273,6 +6334,17 @@ function qcUpdateUserChip() {
   el.style.display = '';
   el.innerHTML = '<span class="uc-name">' + escHtml(AUTH.name) + '</span>' + (roleTxt ? '<span class="uc-role">' + escHtml(roleTxt) + '</span>' : '');
 }
+// 刷新后停留在当前页签：恢复登录前所在页面（无权限页签自动回退到质检明细）
+function qcRestoreTab() {
+  var name = null;
+  try { name = sessionStorage.getItem('qc_active_tab'); } catch (e) {}
+  if (!name) return;
+  var tab = document.getElementById('tab-' + name);
+  if (!tab) return;
+  if (name === 'users' && !qcCan('user.manage')) return;
+  if (name === 'qclogic' && !qcCan('logic.view')) return;
+  try { switchTabByName(name); } catch (e) {}
+}
 function qcReRenderAuthed() {
   try { renderStandard(); } catch (e) {}
   try { renderKnowledgeBase(); } catch (e) {}
@@ -6282,6 +6354,7 @@ function qcReRenderAuthed() {
   if (usersTab && usersTab.classList.contains('active') && !qcCan('user.manage')) switchTabByName('detail');
   var logicTab = document.getElementById('tab-qclogic');
   if (logicTab && logicTab.classList.contains('active') && !qcCan('logic.view')) switchTabByName('detail');
+  qcRestoreTab();
 }
 // ---------- 管理员快捷登录入口（2026-11-18）：从「修改密码」左侧一键切到管理员 ----------
 function qcAdminQuickLogin() {
@@ -6856,10 +6929,14 @@ function qcSyncAppealsFromCloud() {
       for (i = 0; i < results.length; i++) {
         var r = results[i], cr = map[qcAppealStableKey(r)];
         if (!cr) continue;
-        var os = qcAppealStatus(r), ns = (cr.appeal && cr.appeal.status) || '无申诉';
-        if (os !== ns) { r.appeal = cr.appeal; changed = true; }
+        // 用统一的时间戳比较合并他人申诉/审核结果（含评分/等级/明细），
+        // 不再只比对状态文字——同状态的复核改分、更新的审核时间也能同步过来
+        try { if (qcMergeAppealInto(r, cr)) { changed = true; } } catch (e) {
+          var os = qcAppealStatus(r), ns = (cr.appeal && cr.appeal.status) || '无申诉';
+          if (os !== ns) { r.appeal = cr.appeal; changed = true; }
+        }
       }
-      if (changed) qcRefreshAppealBadges();
+      if (changed) { try { renderDetailTable(); } catch (e) {} qcRefreshAppealBadges(); }
       var box = document.getElementById('appealInboxModal');
       if (box && box.classList.contains('show')) qcRenderAppealInbox();
       APPEAL_SYNC_BUSY = false;
