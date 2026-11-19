@@ -402,7 +402,7 @@ function normalizeResultAppeal(result) { if (!result) return result; result.reco
 function getAppealStatus(result) { return normalizeAppeal(result && result.appeal).status; }
 function appealStatusClass(status) { return status === '待审核' ? 'appeal-pending' : (status === '部分通过' || status === '申诉通过' ? 'appeal-approved' : (status === '申诉被拒' ? 'appeal-rejected' : 'appeal-none')); }
 function appealStatusBadge(status) { return '<span class="appeal-badge ' + appealStatusClass(status) + '">' + escHtml(status || '无申诉') + '</span>'; }
-function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
+function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
 function qcLoadSnapshotFallback() { try { if (rawData && rawData.length > 0) return; } catch(e) {} fetch('qc-snapshot-20261016.json', { cache: 'no-store' }).then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function(data) { if (!data || !data.rawData || !data.results || (rawData && rawData.length > 0)) return; importAllData(data); setCloudStatus('云端数据库隔离中，已加载本地快照（只读）', 'var(--warning)'); showToast('云端数据库暂不可用，已加载本地快照数据；云端恢复并刷新页面后将自动同步', 'info'); }).catch(function(e) { setCloudStatus('云端读取失败', 'var(--danger)'); }); }
 function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = JSON.parse(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
 function cloudSaveState() { if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化')); var payloadObj = cloudStatePayload(); var payload = { state_key: 'main', state_json: JSON.stringify(payloadObj), updated_by: 'anonymous' }; try { qcSaveCacheFromPayload(payloadObj); } catch (e) {} return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) { if (res.error) throw res.error; setCloudStatus('已同步云端', 'var(--success)'); return res; }).catch(function(err){ showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error'); throw err; }); }
@@ -462,7 +462,7 @@ function qcStateHash(s) { var h = 5381; for (var i = 0; i < s.length; i++) { h =
 function qcSlimPayloadString(data) {
   try {
     var slim = {}; for (var k in data) slim[k] = data[k];
-    if (data.results) slim.results = data.results.map(function(r){ var c={}; for(var kk in r){ if(kk!=='reply') c[kk]=r[kk]; } return c; });
+    if (data.results) slim.results = data.results.map(function(r){ var c={}; for(var kk in r){ if(kk!=='reply' && kk!=='_part') c[kk]=r[kk]; } return c; });
     return JSON.stringify(slim);
   } catch (e) { return ''; }
 }
@@ -2715,8 +2715,11 @@ function agentNameMatches(candidate, target) {
   return false;
 }
 // 本单去信账单：mine = 该客服封数，total = 本单客服去信合计，pct = 占比，assessed = 是否考核
+// 2026-11-19 修复：旧版把算错的 _part 写进了云端/本地缓存，导致匹配规则修好后页面仍显示 0%。
+// 现在只复用「本次运行内存里算出、且带当前算法版本戳」的结果；历史脏 _part 一律忽略并重算。
+var QC_PART_VER = 2;
 function sessionParticipation(r) {
-  if (r && r._part) return r._part;
+  if (r && r._part && r._part.v === QC_PART_VER) return r._part;
   var reply = String((r && r.reply) == null ? '' : r.reply);
   var res = { mine: 0, total: 0, pct: 0, assessed: false };
   if (reply && reply !== '无联客记录') {
@@ -2737,6 +2740,7 @@ function sessionParticipation(r) {
   }
   res.pct = res.total > 0 ? (res.mine / res.total) * 100 : 0;
   res.assessed = res.mine > 0 && res.pct >= 50;
+  res.v = QC_PART_VER;
   if (r) r._part = res;
   return res;
 }
@@ -5477,7 +5481,7 @@ function importAllData(data) {
     return;
   }
   rawData = data.rawData;
-  results = data.results.map(function(r, i) { r._index = i; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
+  results = data.results.map(function(r, i) { r._index = i; delete r._part; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
   if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
   try { if (typeof qcEnsureOrgAccounts === 'function') qcEnsureOrgAccounts(true); } catch (e) {}
   if (data.standards) { STANDARDS = data.standards; }
