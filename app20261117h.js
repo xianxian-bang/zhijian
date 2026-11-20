@@ -613,6 +613,8 @@ function qcMergeAppealInto(localR, cloudR) {
 }
 function qcMergeCloudNewRecords(cloudD) {
   if (!cloudD || !cloudD.results || !cloudD.rawData) return 0;
+  // 云端可能由后端工具直写（中文字段名/别名），先归一再合并，保证新增记录的金额/ODR 也能显示
+  try { qcNormalizeAmountOdrFields(cloudD); } catch (e) {}
   var index = {}, i;
   for (i = 0; i < results.length; i++) index[getStableRecordKey(results[i])] = i;
   var added = 0, merged = 0;
@@ -622,6 +624,18 @@ function qcMergeCloudNewRecords(cloudD) {
     if (Object.prototype.hasOwnProperty.call(index, k)) {
       // 同一订单：把云端（他人）更新的申诉/审核结果并进来，防止本地旧状态覆盖他人结果
       try { if (qcMergeAppealInto(results[index[k]], cloudD.results[i])) merged++; } catch (e) {}
+      // 后端工具/其他端后补的「订单金额」「FBM订单缺陷率」也要并进来（本地为空时补齐，不覆盖已有值）
+      try {
+        var _local = results[index[k]], _cloud = cloudD.results[i], _cw = cloudD.rawData[i] || {};
+        var _ca = qcAmtOf(_cloud) || qcAmtOf(_cw), _co = qcOdrOf(_cloud) || qcOdrOf(_cw);
+        if (_ca && !qcAmtOf(_local)) _local.orderAmount = _ca;
+        if (_co && !qcOdrOf(_local)) _local.fbmDefectRate = _co;
+        var _li = (_local._index !== undefined && _local._index !== null) ? _local._index : index[k];
+        if (rawData[_li]) {
+          if (_ca && !qcAmtOf(rawData[_li])) rawData[_li].orderAmount = _ca;
+          if (_co && !qcOdrOf(rawData[_li])) rawData[_li].fbmDefectRate = _co;
+        }
+      } catch (e) {}
       continue;
     }
     var r = JSON.parse(JSON.stringify(cloudD.results[i]));
@@ -754,6 +768,8 @@ function cloudSaveState() {
   ]);
   return pre.then(function() {
     var payloadObj = cloudStatePayload();
+    // 任意端字段归一：写回云端前把中英文/别名字段统一为标准字段，保证所有设备读到的都是同一套字段
+    try { qcNormalizeAmountOdrFields(payloadObj); } catch (e) {}
     // 永久删除墓碑：写回前剔除已删记录，旧设备/旧缓存就算还留着也写不回云端
     try { qcFilterDeletedData(payloadObj); } catch (e) {}
     var payload = { state_key: 'main', state_json: qcEncodeStateJson(payloadObj), updated_by: 'anonymous' };
@@ -787,13 +803,23 @@ function qcFetchLatestAndRefresh(force) {
   var now = Date.now();
   if (!force && (QC_FRESH_SYNC_BUSY || now - QC_FRESH_SYNC_AT < 5000)) return Promise.resolve(false);
   QC_FRESH_SYNC_AT = now; QC_FRESH_SYNC_BUSY = true;
+  var attempt = arguments.length > 1 ? arguments[1] : 0;   // 网络失败自动重试计数（最多2次）
   try {
     return qcLoadDeleteRegistry().then(function() {
     return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1).then(function(res){
       QC_FRESH_SYNC_BUSY = false;
       var row = res && res.data && res.data.length ? res.data[0] : null;
-      if (!row || !row.state_json) return false;
-      var d = qcDecodeStateJson(row.state_json); if (!d) return false;
+      if (!row || !row.state_json) {
+        // 云端没读到 main：明确告诉用户当前显示的是本地缓存，不要让状态栏永远停在"正在同步"
+        try { setCloudStatus('⚠ 云端没读到数据（网络异常），当前显示的是本机缓存 — 请点右上角「🔄 强制同步」重试', 'var(--danger)'); } catch (e) {}
+        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+        return false;
+      }
+      var d = qcDecodeStateJson(row.state_json); if (!d) {
+        try { setCloudStatus('⚠ 云端数据解析失败，当前显示的是本机缓存 — 请点右上角「🔄 强制同步」重试', 'var(--danger)'); } catch (e) {}
+        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+        return false;
+      }
       if (!d || !d.results || !d.rawData) return false;
       // 永久删除墓碑：过滤掉任何已删记录后再计算 hash / 刷新 UI
       try { qcFilterDeletedData(d); } catch (e) {}
@@ -811,9 +837,17 @@ function qcFetchLatestAndRefresh(force) {
       qcSaveCacheFromPayload(d);
       try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
       try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
+      // 同步成功后强制刷新三色申诉角标（防止停留在旧缓存时的旧数字，如"待审核 1"）
+      try { if (typeof qcRefreshAppealBadges === 'function') qcRefreshAppealBadges(); } catch (e) {}
       return true;
     });
-    }).catch(function(){ QC_FRESH_SYNC_BUSY = false; return false; });
+    }).catch(function(err){
+      // 网络失败：绝不能静默——状态栏红字提示 + 8秒后自动重试，最多重试2次
+      QC_FRESH_SYNC_BUSY = false;
+      try { setCloudStatus('⚠ 云端同步失败（网络问题），当前显示的是本机缓存，可能与最新数据不一致 — 点「🔄 强制同步」立即重试', 'var(--danger)'); } catch (e) {}
+      if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+      return false;
+    });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
 }
 // 一键强制同步（诊断/自救按钮）：彻底清掉本机旧缓存与 URL 旧快照，重置首次同步标志，
@@ -1116,7 +1150,12 @@ function afterParse(data, mode) {
   for (var hi = 0; hi < headers.length; hi++) {
     var h = headers[hi];
     var lh = h.toLowerCase().replace(/\s/g, '');
-    if (matchCol(h, lh, ['账号', 'account', '店铺', 'store'])) colMap.account = hi;
+    var hn = qcFieldNorm(h);
+    // 金额 / ODR 必须最先判定：英文表头（Order Amount、orderDefectRate）含 "order"，
+    // 放到后面会被「平台单号」的 order 关键词抢先匹配，导致后端上传的这两列识别不到。
+    if (QC_AMT_SET[hn] || /(订单金额|订单总额|订单总价|实付金额|付款金额|订单额|销售额)/.test(h) || /^(orderamount|amount|ordertotal|totalamount|ordermoney|ordervalue)/.test(lh)) colMap.orderAmount = hi;
+    else if (QC_ODR_SET[hn] || /(订单缺陷率|缺陷率)/.test(h) || /^(fbmdefectrate|fmbdefectrate|orderdefectrate|defectrate|odr)/.test(lh)) colMap.fbmDefectRate = hi;
+    else if (matchCol(h, lh, ['账号', 'account', '店铺', 'store'])) colMap.account = hi;
     else if (matchCol(h, lh, ['客服', 'agent', '客服姓名', '客服工号', 'operator', '客服人员'])) colMap.agent = hi;
     else if (matchCol(h, lh, ['平台单号', '平台订单', '订单号', '订单编号', 'orderid', 'orderno', 'order', '平台订单号'])) colMap.order = hi;
     else if (matchCol(h, lh, ['回邮数据', '客服回复', '回复内容', '邮件内容', '回复数据', 'reply', 'emailcontent', '回邮', '回复'])) colMap.reply = hi;
@@ -1126,8 +1165,6 @@ function afterParse(data, mode) {
     else if (matchCol(h, lh, ['是否有退款登记', '退款登记', '是否退款', 'refundreg', 'refundregistration'])) colMap.refundReg = hi;
     else if (matchCol(h, lh, ['是否有问题反馈', '问题反馈', '是否反馈', 'issuefeedback', 'feedback'])) colMap.issueFeedback = hi;
     else if (matchCol(h, lh, ['是否有补件', '是否补件', '补件', '是否补发', '补发', 'replenishment', 'reissue'])) colMap.replenishment = hi;
-    else if (matchCol(h, lh, ['订单金额', '订单总额', '实付金额', '金额', 'orderamount', 'amount', 'ordertotal'])) colMap.orderAmount = hi;
-    else if (matchCol(h, lh, ['FBM订单缺陷率', '订单缺陷率', 'FBM缺陷率', '缺陷率', 'fbmdefectrate', 'orderdefectrate', 'defectrate', 'odr'])) colMap.fbmDefectRate = hi;
   }
   var missing = [];
   if (colMap.account === undefined) missing.push('账号');
@@ -1247,8 +1284,8 @@ function runQualityCheck() {
       result.refundReg = rawData[i].refundReg || '';
       result.issueFeedback = rawData[i].issueFeedback || '';
       result.replenishment = rawData[i].replenishment || '';
-      result.orderAmount = rawData[i].orderAmount || '';
-      result.fbmDefectRate = rawData[i].fbmDefectRate || '';
+      result.orderAmount = qcAmtOf(rawData[i]);
+      result.fbmDefectRate = qcOdrOf(rawData[i]);
       result.recordKey = getRecordKey(result);
       var _prevAppeal = previousAppeals[result.recordKey] || previousAppealsStable[getStableRecordKey(result)] || null;
       result.appeal = _prevAppeal ? normalizeAppeal(_prevAppeal) : createEmptyAppeal();
@@ -3535,32 +3572,74 @@ function qcMoney(account, amount) {
   if (nums && nums.length) return '¥' + Number(nums[nums.length - 1].replace(/,/g, '')).toFixed(2);
   return s;
 }
-// 兼容多接口/多字段名：取订单金额与 ODR。
-// 优先 result 自身字段；缺失时按 _index 回退到同一条 rawData（后台工具/其他接口直接写云端时字段可能只在 rawData 上）。
-// 这样无论从哪个接口上传，只要上传数据里有这两个值，明细表都能显示出来。
-function rcOrderAmount(r) {
-  if (!r) return '';
-  var v = r.orderAmount;
-  if (v === undefined || v === null || v === '') {
-    var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
-    if (i >= 0 && typeof rawData !== 'undefined' && rawData[i]) {
-      var rw = rawData[i];
-      v = rw.orderAmount !== undefined ? rw.orderAmount : (rw.amount !== undefined ? rw.amount : (rw.orderTotal !== undefined ? rw.orderTotal : ''));
+// ============================================================
+// 订单金额 / ODR 通用字段识别（2026-11-20 v20261120d）
+// 无论数据从哪个端上传（网页 / 后端「邮件质检数据处理工具」/ 云端直写 / 审计恢复），
+// 只要记录里带有这两列（任意中英文列名/别名），都统一识别、双向补齐并显示：
+//   「订单金额」列 ← orderAmount / amount / 订单金额 / 订单总额 / ...
+//   「ODR」列      ← fbmDefectRate / FBM订单缺陷率 / FMB订单缺陷率 / 缺陷率 / ODR / ...
+// 后端工具常用中文表头，旧版只认英文 key 且英文表头会被「平台单号」的 order 关键词抢匹配，
+// 这里同时修掉这两处，保证「无论从什么端上传，该识别的都识别、该显示的都显示」。
+// ============================================================
+var QC_AMT_ALIASES = ['orderAmount', 'amount', 'orderTotal', 'totalAmount', 'orderMoney', 'orderValue',
+  '订单金额', '订单总额', '订单总价', '实付金额', '付款金额', '订单额', '销售额', '金额'];
+var QC_ODR_ALIASES = ['fbmDefectRate', 'orderDefectRate', 'defectRate', 'odr', 'fbmOdr', 'odrRate',
+  'FBM订单缺陷率', 'FMB订单缺陷率', '订单缺陷率', 'FBM缺陷率', 'FMB缺陷率', '缺陷率', 'ODR'];
+function qcFieldNorm(s) { return String(s === undefined || s === null ? '' : s).toLowerCase().replace(/[\s_\-()（）\[\]%]/g, ''); }
+function qcAliasSet(aliases) { var m = {}, i; for (i = 0; i < aliases.length; i++) m[qcFieldNorm(aliases[i])] = true; return m; }
+var QC_AMT_SET = qcAliasSet(QC_AMT_ALIASES), QC_ODR_SET = qcAliasSet(QC_ODR_ALIASES);
+// 从任意对象里按别名读取金额/ODR（忽略大小写、空格、下划线、括号、百分号）
+function qcReadAnyField(o, set) {
+  if (!o || typeof o !== 'object') return '';
+  for (var k in o) {
+    if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+    if (set[qcFieldNorm(k)]) {
+      var v = o[k];
+      if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
     }
   }
-  return (v === undefined || v === null) ? '' : String(v).trim();
+  return '';
 }
-function rcOdr(r) {
-  if (!r) return '';
-  var v = r.fbmDefectRate;
-  if (v === undefined || v === null || v === '') {
-    var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
-    if (i >= 0 && typeof rawData !== 'undefined' && rawData[i]) {
-      var rw = rawData[i];
-      v = rw.fbmDefectRate !== undefined ? rw.fbmDefectRate : (rw.odr !== undefined ? rw.odr : (rw.defectRate !== undefined ? rw.defectRate : ''));
-    }
+function qcAmtOf(o) { return qcReadAnyField(o, QC_AMT_SET); }
+function qcOdrOf(o) { return qcReadAnyField(o, QC_ODR_SET); }
+// 找一条 result 对应的 rawData：优先 _index；_index 错位（云端合并/墓碑过滤）时按平台单号兜底
+function qcRawFor(r) {
+  if (!r || typeof rawData === 'undefined' || !rawData || !rawData.length) return null;
+  var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
+  if (i >= 0 && rawData[i] && (!r.order || !rawData[i].order || rawData[i].order === r.order)) return rawData[i];
+  if (r.order) { for (var j = 0; j < rawData.length; j++) if (rawData[j] && rawData[j].order === r.order) return rawData[j]; }
+  return null;
+}
+function rcOrderAmount(r) { if (!r) return ''; return qcAmtOf(r) || qcAmtOf(qcRawFor(r)); }
+function rcOdr(r) { if (!r) return ''; return qcOdrOf(r) || qcOdrOf(qcRawFor(r)); }
+// 一次性归一：把任意端的别名字段统一写入标准字段 orderAmount / fbmDefectRate，
+// 并在 results 与 rawData 之间双向补齐（缺哪边补哪边），供明细表 / 导出 / 详情 / 回邮块统一读取。
+function qcNormalizeAmountOdrFields(d) {
+  if (!d || typeof d !== 'object') return d;
+  var rd = d.rawData, rs = d.results;
+  if (!Array.isArray(rd) || !Array.isArray(rs)) return d;
+  var byOrder = {}, i;
+  for (i = 0; i < rd.length; i++) if (rd[i] && rd[i].order) { if (!byOrder[rd[i].order]) byOrder[rd[i].order] = rd[i]; }
+  function lift(o) {
+    if (!o) return;
+    if (!o.orderAmount) { var a = qcAmtOf(o); if (a) o.orderAmount = a; }
+    if (!o.fbmDefectRate) { var v = qcOdrOf(o); if (v) o.fbmDefectRate = v; }
   }
-  return (v === undefined || v === null) ? '' : String(v).trim();
+  function mergeBoth(a, b) {
+    if (!a || !b) return;
+    if (!a.orderAmount) a.orderAmount = qcAmtOf(b);
+    if (!b.orderAmount) b.orderAmount = qcAmtOf(a);
+    if (!a.fbmDefectRate) a.fbmDefectRate = qcOdrOf(b);
+    if (!b.fbmDefectRate) b.fbmDefectRate = qcOdrOf(a);
+  }
+  for (i = 0; i < rs.length; i++) {
+    var r = rs[i]; if (!r) continue;
+    lift(r);
+    var idx = (r._index !== undefined && r._index !== null) ? r._index : i;
+    var rw = (rd[idx] && (!r.order || !rd[idx].order || rd[idx].order === r.order)) ? rd[idx] : byOrder[r.order];
+    if (rw) { lift(rw); mergeBoth(r, rw); }
+  }
+  return d;
 }
 function renderDetailTable() {
   var fG = document.getElementById('detailFilterGroup').value;
@@ -3584,9 +3663,9 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  // 列顺序（20261120b）：ODR 左移到「日期」之后、「账号」之前(往左移一点)，订单金额紧跟 ODR 右侧。
-  // 序号|组别|日期|ODR|订单金额|账号|客服|平台单号|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
-  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th class="cell-center" title="FBM 订单缺陷率">ODR</th><th title="订单金额（上传数据原值）">订单金额</th><th>账号</th><th>客服</th><th>平台单号</th>';
+  // 列顺序（20261120d）：ODR 紧跟「账号」之后，订单金额紧跟「平台单号」之后。
+  // 序号|组别|日期|账号|ODR|客服|平台单号|订单金额|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
+  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率（对应上传列「FBM订单缺陷率」）">ODR</th><th>客服</th><th>平台单号</th><th title="订单金额（对应上传列「订单金额」，上传数据原值）">订单金额</th>';
   for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
   html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
        + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
@@ -3600,9 +3679,11 @@ function renderDetailTable() {
       var r = filtered[j];
       var _odr = rcOdr(r), _amt = rcOrderAmount(r);
       html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
+            + '<td class="cell-nowrap">' + escHtml(r.account) + '</td>'
             + '<td class="cell-center">' + (_odr !== '' ? escHtml(_odr) : '-') + '</td>'
-            + '<td class="cell-amt" title="' + escHtml(_amt !== '' ? _amt : '') + '">' + (_amt !== '' ? escHtml(_amt) : '-') + '</td>'
-            + '<td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
+            + '<td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td>'
+            + '<td class="cell-nowrap">' + escHtml(r.order) + '</td>'
+            + '<td class="cell-amt" title="' + escHtml(_amt !== '' ? _amt : '') + '">' + (_amt !== '' ? escHtml(_amt) : '-') + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
         if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
@@ -5769,11 +5850,11 @@ function clearAllData() { if (!requireAdmin('清空数据')) return;
 // ============================================================
 function exportDetail(type) {
   if (results.length === 0) { showToast('无数据可导出', 'error'); return; }
-  var headers = ['序号', '组别', '账号', 'ODR', '客服', '平台单号', '订单金额', '日期'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
+  var headers = ['序号', '组别', '日期', '账号', 'ODR', '客服', '平台单号', '订单金额'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var row = [i + 1, getGroupByAgent(r.agent), r.account, rcOdr(r), r.agent, r.order, rcOrderAmount(r), r.date];
+    var row = [i + 1, getGroupByAgent(r.agent), r.date, r.account, rcOdr(r), canonicalAgentName(r.agent), r.order, rcOrderAmount(r)];
     for (var d = 0; d < DIM_NAMES.length; d++) { var s = r.scores[DIM_NAMES[d]]; row.push(s === -1 ? '-' : s); }
     var appeal = normalizeAppeal(r.appeal);
     row.push(r.processCheck || '', r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
@@ -5970,6 +6051,9 @@ function importAllData(data) {
   }
   // 永久删除墓碑：任何来源（云端 / 本地缓存 / URL 快照 / 审计恢复）的已删记录都不进入 UI
   try { data = qcFilterDeletedData(data); } catch (e) {}
+  // 任意端字段归一：把中英文/别名字段的「订单金额」「FBM订单缺陷率」统一收敛并双向补齐，
+  // 保证网页上传、后端工具、云端直写、审计恢复进来的数据都能在明细表 / 导出 / 详情显示。
+  try { qcNormalizeAmountOdrFields(data); } catch (e) {}
   rawData = data.rawData;
   results = data.results.map(function(r, i) { r._index = i; delete r._part; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
   if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
