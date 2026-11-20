@@ -426,6 +426,27 @@ function qcBumpGeneration(reason, count) {
     return qcSaveDeleteRegistry(reg).then(function(saved) { QC_REGISTRY_BUSY = false; return saved; });
   }).catch(function() { QC_REGISTRY_BUSY = false; return null; });
 }
+// 解除指定单号的永久删除限制（2026-11-20）：用户主动重新上传曾删除的单号时调用，
+// 只解除传入的这几个键，其余墓碑保持不变；防止旧数据复活的保护对其它场景照常生效
+function qcReleaseDeletedKeys(keys, reason) {
+  if (QC_REGISTRY_BUSY || !keys || !keys.length) return Promise.resolve(null);
+  QC_REGISTRY_BUSY = true;
+  return qcLoadDeleteRegistry().then(function(reg) {
+    reg = qcNormalizeRegistry(reg);
+    var released = 0;
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i] || '');
+      if (k && reg.deletedKeys[k]) { delete reg.deletedKeys[k]; released++; }
+      if (k && QC_DELETED_KEYS[k]) { delete QC_DELETED_KEYS[k]; }   // 本地缓存同步移除，避免写回时被“只增不减”合并回去
+    }
+    if (!released) { QC_REGISTRY_BUSY = false; return null; }
+    reg.generation = reg.generation + 1;
+    reg.deletedBatches.push({ gen: reg.generation, count: released, reason: '解除删除限制(重新上传): ' + (reason || ''), at: new Date().toISOString() });
+    if (reg.deletedBatches.length > 50) reg.deletedBatches = reg.deletedBatches.slice(-50);
+    reg.updatedAt = new Date().toISOString();
+    return qcSaveDeleteRegistry(reg).then(function(saved) { QC_REGISTRY_BUSY = false; return saved; });
+  }).catch(function() { QC_REGISTRY_BUSY = false; return null; });
+}
 function qcRenderGenerationBadge() {
   var el = document.getElementById('qcGenBadge');
   if (el) {
@@ -1211,11 +1232,13 @@ function afterParse(data, mode) {
     // 用日期无关的稳定键去重：上传表常无「日期」列，跨天重传同一单号也应视为重复
     var seenKeys = {};
     for (var _si = 0; _si < rawData.length; _si++) seenKeys[getStableRecordKey(rawData[_si])] = true;
-    var deduped = [], dupCount = 0;
+    var deduped = [], dupCount = 0, reUploadKeys = [];
     for (var _ni = 0; _ni < newRawData.length; _ni++) {
       var _key = getStableRecordKey(newRawData[_ni]);
-      // 已永久删除的单号即使再次上传也跳过，杜绝"删掉又冒出来"
-      if (seenKeys[_key] || qcIsDeletedKey(_key)) { dupCount++; continue; }
+      if (seenKeys[_key]) { dupCount++; continue; }
+      // 曾永久删除的单号再次上传 = 用户主动重新上传：解除该单号的删除限制并正常导入。
+      // 墓碑的「防复活」保护继续生效于旧缓存/URL快照等非主动上传路径（2026-11-20）。
+      if (qcIsDeletedKey(_key)) { reUploadKeys.push(_key); }
       seenKeys[_key] = true; deduped.push(newRawData[_ni]);
     }
     if (deduped.length === 0) {
@@ -1225,9 +1248,10 @@ function afterParse(data, mode) {
     newRawData = deduped;
     QC_APPEND_OLD_COUNT = rawData.length;
     QC_APPEND_PRESERVE = true;
+    try { if (reUploadKeys.length) qcReleaseDeletedKeys(reUploadKeys, '追加上传重新导入'); } catch (e) {}
     try { qcBumpGeneration('追加上传', newRawData.length); } catch (e) {}
     rawData = rawData.concat(newRawData);
-    showToast('追加 ' + newRawData.length + ' 条数据（共 ' + rawData.length + ' 条）' + (dupCount ? '，跳过重复 ' + dupCount + ' 条' : '') + (skippedUninspectable ? '，导入时剔除无法质检 ' + skippedUninspectable + ' 条' : '') + '，开始质检...', 'success');
+    showToast('追加 ' + newRawData.length + ' 条数据（共 ' + rawData.length + ' 条）' + (dupCount ? '，跳过重复 ' + dupCount + ' 条' : '') + (reUploadKeys.length ? '，其中 ' + reUploadKeys.length + ' 条为重新上传，已自动解除永久删除限制' : '') + (skippedUninspectable ? '，导入时剔除无法质检 ' + skippedUninspectable + ' 条' : '') + '，开始质检...', 'success');
   } else {
     QC_APPEND_OLD_COUNT = 0;
     QC_APPEND_PRESERVE = false;
