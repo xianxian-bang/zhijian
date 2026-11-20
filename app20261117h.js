@@ -3382,6 +3382,33 @@ function qcMoney(account, amount) {
   if (nums && nums.length) return '¥' + Number(nums[nums.length - 1].replace(/,/g, '')).toFixed(2);
   return s;
 }
+// 兼容多接口/多字段名：取订单金额与 ODR。
+// 优先 result 自身字段；缺失时按 _index 回退到同一条 rawData（后台工具/其他接口直接写云端时字段可能只在 rawData 上）。
+// 这样无论从哪个接口上传，只要上传数据里有这两个值，明细表都能显示出来。
+function rcOrderAmount(r) {
+  if (!r) return '';
+  var v = r.orderAmount;
+  if (v === undefined || v === null || v === '') {
+    var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
+    if (i >= 0 && typeof rawData !== 'undefined' && rawData[i]) {
+      var rw = rawData[i];
+      v = rw.orderAmount !== undefined ? rw.orderAmount : (rw.amount !== undefined ? rw.amount : (rw.orderTotal !== undefined ? rw.orderTotal : ''));
+    }
+  }
+  return (v === undefined || v === null) ? '' : String(v).trim();
+}
+function rcOdr(r) {
+  if (!r) return '';
+  var v = r.fbmDefectRate;
+  if (v === undefined || v === null || v === '') {
+    var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
+    if (i >= 0 && typeof rawData !== 'undefined' && rawData[i]) {
+      var rw = rawData[i];
+      v = rw.fbmDefectRate !== undefined ? rw.fbmDefectRate : (rw.odr !== undefined ? rw.odr : (rw.defectRate !== undefined ? rw.defectRate : ''));
+    }
+  }
+  return (v === undefined || v === null) ? '' : String(v).trim();
+}
 function renderDetailTable() {
   var fG = document.getElementById('detailFilterGroup').value;
   var fA = getMultiValues('account');
@@ -3404,7 +3431,9 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率">ODR</th><th>客服</th><th>平台单号</th>';
+  // 列顺序（20261120b）：ODR 左移到「日期」之后、「账号」之前(往左移一点)，订单金额紧跟 ODR 右侧。
+  // 序号|组别|日期|ODR|订单金额|账号|客服|平台单号|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
+  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th class="cell-center" title="FBM 订单缺陷率">ODR</th><th title="订单金额（上传数据原值）">订单金额</th><th>账号</th><th>客服</th><th>平台单号</th>';
   for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
   html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
        + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
@@ -3412,11 +3441,15 @@ function renderDetailTable() {
        + '<th title="占比 ≥ 50% 参与考核，只有「是」的单计入数据看板">是否考核</th></tr></thead><tbody>';
   var sendStat = buildSendStat(); // 只用于单元格 tooltip（该客服跨单累计）
   if (filtered.length === 0) {
-    html += '<tr><td colspan="' + (7 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
+    html += '<tr><td colspan="' + (8 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
-      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td><td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-center">' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td><td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
+      var _odr = rcOdr(r), _amt = rcOrderAmount(r);
+      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
+            + '<td class="cell-center">' + (_odr !== '' ? escHtml(_odr) : '-') + '</td>'
+            + '<td class="cell-amt" title="' + escHtml(_amt !== '' ? _amt : '') + '">' + (_amt !== '' ? escHtml(_amt) : '-') + '</td>'
+            + '<td class="cell-nowrap">' + escHtml(r.account) + '</td><td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.order) + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
         if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
@@ -3606,7 +3639,7 @@ function buildReplyDataBlockHtml(r, boxId) {
   html += '<div class="rc-base-row">'
         + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
-        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, r.orderAmount) + '</span></div>'
+        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, rcOrderAmount(r)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
@@ -3639,10 +3672,10 @@ function showDetail(index) {
   var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
   html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (r.fbmDefectRate !== undefined && r.fbmDefectRate !== '' ? escHtml(r.fbmDefectRate) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (rcOdr(r) !== '' ? escHtml(rcOdr(r)) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (r.orderAmount !== undefined && r.orderAmount !== '' ? escHtml(r.orderAmount) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (rcOrderAmount(r) !== '' ? escHtml(rcOrderAmount(r)) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
   var _dp = sessionParticipation(r);
   html += '<tr><td style="font-weight:600;">客服去信</td><td>该客服 ' + _dp.mine + ' 封 / 本单客服合计 ' + _dp.total + ' 封 · 占比 ' + _dp.pct.toFixed(1) + '%'
@@ -5581,7 +5614,7 @@ function exportDetail(type) {
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var row = [i + 1, getGroupByAgent(r.agent), r.account, r.fbmDefectRate || '', r.agent, r.order, r.orderAmount || '', r.date];
+    var row = [i + 1, getGroupByAgent(r.agent), r.account, rcOdr(r), r.agent, r.order, rcOrderAmount(r), r.date];
     for (var d = 0; d < DIM_NAMES.length; d++) { var s = r.scores[DIM_NAMES[d]]; row.push(s === -1 ? '-' : s); }
     var appeal = normalizeAppeal(r.appeal);
     row.push(r.processCheck || '', r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
