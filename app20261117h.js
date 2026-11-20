@@ -298,6 +298,142 @@ function getRecordKey(item) { return [item.account || '', item.agent || '', item
 // 日期无关的稳定键：上传表 date 为空时 inspectOne 会用“当天日期”补齐 result.date，导致 recordKey 每天变化、
 // 跨天重跑时申诉匹配不上而被丢弃（2026-10-15 修复）。申诉保留一律先用完整键、再用稳定键兜底。
 function getStableRecordKey(item) { return [item.account || '', item.agent || '', item.order || ''].join('||'); }
+
+// ============================================================
+// 永久删除墓碑 + 批次防复活（2026-11-20）
+// ------------------------------------------------------------
+// 背景：过去「删除」只是把数据从当前 main / 本地缓存里拿掉，系统并不记得这些单号被删过，
+// 于是旧设备内存、旧页面、URL #d= 快照、后台工具下一批上传只要又带上它们，就会重新写回云端。
+// 方案：在独立的云端登记表（state_key=qc_delete_registry，不与 main 一起被整份覆盖）里记住
+// 每个被删除记录的「稳定键」，并在所有 加载 / 合并 / 写回 入口统一过滤；配合单调递增的
+// 批次代号 batchGeneration 标记数据集版本，从根上让已删记录永不再出现。
+// ============================================================
+var DELETE_REGISTRY_ROW = 'qc_delete_registry';
+var QC_REGISTRY_CACHE_KEY = 'qc_delete_registry_v1';
+var QC_GEN = 1;
+var QC_DELETED_KEYS = {};
+var QC_REGISTRY_LOADED = false;
+var QC_REGISTRY_BUSY = false;
+
+function qcNormalizeRegistry(reg) {
+  reg = reg || {};
+  var out = {
+    schemaVersion: '1',
+    generation: Math.max(1, Number(reg.generation) || 1),
+    deletedKeys: {},
+    deletedBatches: [],
+    updatedAt: reg.updatedAt || ''
+  };
+  var dk = reg.deletedKeys || {};
+  if (Array.isArray(dk)) { for (var i = 0; i < dk.length; i++) if (dk[i]) out.deletedKeys[String(dk[i])] = true; }
+  else { for (var k in dk) if (dk[k]) out.deletedKeys[k] = true; }
+  if (Array.isArray(reg.deletedBatches)) out.deletedBatches = reg.deletedBatches.slice(-50);
+  return out;
+}
+function qcRegistryFromLocal() {
+  try { var raw = localStorage.getItem(QC_REGISTRY_CACHE_KEY); return raw ? qcNormalizeRegistry(JSON.parse(raw)) : null; }
+  catch (e) { return null; }
+}
+function qcRegistryApply(reg) {
+  if (!reg) return;
+  reg = qcNormalizeRegistry(reg);
+  QC_GEN = reg.generation;
+  QC_DELETED_KEYS = reg.deletedKeys;
+  QC_REGISTRY_LOADED = true;
+  try { localStorage.setItem(QC_REGISTRY_CACHE_KEY, JSON.stringify(reg)); } catch (e) {}
+  try { qcRenderGenerationBadge(); } catch (e) {}
+}
+function qcLoadLocalRegistry() { qcRegistryApply(qcRegistryFromLocal()); }
+function qcIsDeletedKey(k) { return !!(k && QC_DELETED_KEYS[k]); }
+function qcIsDeletedRecord(r) { return qcIsDeletedKey(getStableRecordKey(r)); }
+// 过滤一份数据快照：rawData 与 results 按稳定键同步过滤并重排 _index，任何来源加载/写回前都调用
+function qcFilterDeletedData(data) {
+  if (!data || !data.results || !data.rawData || !QC_REGISTRY_LOADED) return data;
+  var nk = [], nr = [], removed = 0;
+  for (var i = 0; i < data.results.length; i++) {
+    var r = data.results[i];
+    if (qcIsDeletedRecord(r)) { removed++; continue; }
+    r._index = nk.length; nk.push(r); nr.push(data.rawData[i] || {});
+  }
+  if (removed > 0) {
+    data.results = nk; data.rawData = nr;
+    try { showToast('已按永久删除名单过滤 ' + removed + ' 条旧数据', 'info'); } catch (e) {}
+  }
+  return data;
+}
+// 从云端读登记表（写回前会再次调用，确保用的是最新墓碑）
+function qcLoadDeleteRegistry() {
+  if (!cloudDb) return Promise.resolve(null);
+  return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', DELETE_REGISTRY_ROW).limit(1)
+    .then(function(res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      var reg = row && row.state_json ? qcNormalizeRegistry(qcDecodeStateJson(row.state_json) || {}) : qcNormalizeRegistry(null);
+      qcRegistryApply(reg);
+      return reg;
+    })
+    .catch(function() { QC_REGISTRY_LOADED = true; return null; });
+}
+// 追加式写回登记表：generation 单调递增、deletedKeys 只增不减、deletedBatches 只追加
+function qcSaveDeleteRegistry(reg) {
+  if (!cloudDb) return Promise.resolve(null);
+  reg = qcNormalizeRegistry(reg);
+  // 并发保护：合并本地已知墓碑，只增不减；批次号取最大值，避免旧页面把高版本改低
+  for (var k in QC_DELETED_KEYS) if (QC_DELETED_KEYS[k]) reg.deletedKeys[k] = true;
+  reg.generation = Math.max(reg.generation, QC_GEN);
+  var payload = { state_key: DELETE_REGISTRY_ROW, state_json: JSON.stringify(reg), updated_by: 'anonymous' };
+  return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
+    if (res.error) throw res.error;
+    qcRegistryApply(reg);
+    return reg;
+  });
+}
+// 把一批稳定键永久加入墓碑并递增批次代号（清空 / 清空上传时调用）
+function qcMarkDeleted(keys, reason, count) {
+  if (QC_REGISTRY_BUSY) return Promise.resolve(null);
+  QC_REGISTRY_BUSY = true;
+  return qcLoadDeleteRegistry().then(function(reg) {
+    reg = qcNormalizeRegistry(reg);
+    var added = 0;
+    for (var i = 0; i < keys.length; i++) {
+      var k = String(keys[i] || '');
+      if (k && !reg.deletedKeys[k]) { reg.deletedKeys[k] = true; added++; }
+    }
+    reg.generation = reg.generation + 1;
+    reg.deletedBatches.push({ gen: reg.generation, count: count || added, reason: reason || '', at: new Date().toISOString() });
+    if (reg.deletedBatches.length > 50) reg.deletedBatches = reg.deletedBatches.slice(-50);
+    reg.updatedAt = new Date().toISOString();
+    return qcSaveDeleteRegistry(reg).then(function(saved) {
+      QC_REGISTRY_BUSY = false;
+      try { showToast('已永久删除 ' + (count || added) + ' 条，批次升至 v' + reg.generation + '（这批数据将无法再复活）', 'success'); } catch (e) {}
+      return saved;
+    });
+  }).catch(function(err) {
+    QC_REGISTRY_BUSY = false;
+    try { showToast('删除登记失败：' + ((err && err.message) || '接口异常'), 'error'); } catch (e) {}
+    return null;
+  });
+}
+// 仅递增批次代号（追加上传时标记新批次，不写墓碑）
+function qcBumpGeneration(reason, count) {
+  if (QC_REGISTRY_BUSY) return Promise.resolve(null);
+  QC_REGISTRY_BUSY = true;
+  return qcLoadDeleteRegistry().then(function(reg) {
+    reg = qcNormalizeRegistry(reg);
+    reg.generation = reg.generation + 1;
+    reg.deletedBatches.push({ gen: reg.generation, count: count || 0, reason: reason || '追加上传', at: new Date().toISOString() });
+    if (reg.deletedBatches.length > 50) reg.deletedBatches = reg.deletedBatches.slice(-50);
+    reg.updatedAt = new Date().toISOString();
+    return qcSaveDeleteRegistry(reg).then(function(saved) { QC_REGISTRY_BUSY = false; return saved; });
+  }).catch(function() { QC_REGISTRY_BUSY = false; return null; });
+}
+function qcRenderGenerationBadge() {
+  var el = document.getElementById('qcGenBadge');
+  if (el) {
+    el.style.display = 'inline-block';
+    el.textContent = '数据批次 v' + QC_GEN + ' · 永久删除 ' + Object.keys(QC_DELETED_KEYS).length + ' 条';
+    el.title = '批次代号随每次上传/清空递增；永久删除名单在独立云端登记表中，任何设备都无法让已删数据复活';
+  }
+}
 function createEmptyAppeal() { return { status: '无申诉', reason: '', submittedAt: '', reviewer: '', reviewReason: '', reviewedAt: '', attachments: [], modules: [], moduleDecisions: {}, moduleReviewReasons: {}, moduleScores: {}, referenceAdded: false, referenceKnowledgeId: '', referenceAddedAt: '', referenceType: '', referenceKind: '', referenceTitle: '', referenceSummary: '' }; }
 function normalizeAppeal(appeal) { var a = appeal || {}; var base = createEmptyAppeal(); for (var k in base) if (base.hasOwnProperty(k)) base[k] = a[k] !== undefined && a[k] !== null ? a[k] : base[k]; if (APPEAL_STATUSES.indexOf(base.status) < 0) base.status = '无申诉'; if (!Array.isArray(base.attachments)) base.attachments = []; if (!Array.isArray(base.modules)) base.modules = []; if (!base.moduleDecisions || typeof base.moduleDecisions !== 'object') base.moduleDecisions = {}; if (!base.moduleReviewReasons || typeof base.moduleReviewReasons !== 'object') base.moduleReviewReasons = {}; if (!base.moduleScores || typeof base.moduleScores !== 'object') base.moduleScores = {}; base.referenceAdded = !!base.referenceAdded; return base; }
 function getAppealPassScore() { for (var i = 0; i < GRADE_RULES.length; i++) if (GRADE_RULES[i].grade === '达标') return Number(GRADE_RULES[i].minScore) || 80; return 80; }
@@ -434,7 +570,7 @@ function qcLoadSnapshotFallback() {
   // 造成「已经删掉的数据又冒出来」。现在只读失败仅提示，绝不自动替换用户数据。
   try { setCloudStatus('云端暂不可用，请稍后刷新重试', 'var(--danger)'); } catch (e) {}
 }
-function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = qcDecodeStateJson(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } else { try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} } setCloudStatus('云端已连接', 'var(--success)'); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
+function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return qcLoadDeleteRegistry().then(function() { return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = qcDecodeStateJson(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } else { try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} } setCloudStatus('云端已连接', 'var(--success)'); }); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
 // 写云端前先读一次：把后台工具/其他设备刚上传、本地还没有的记录并进来，避免整份覆盖导致新数据丢失
 // 申诉变更时间戳：用于多人协作时判断同一订单上谁的申诉/审核结果更新
 function qcAppealStamp(r) {
@@ -482,6 +618,7 @@ function qcMergeCloudNewRecords(cloudD) {
   var added = 0, merged = 0;
   for (i = 0; i < cloudD.results.length; i++) {
     var k = getStableRecordKey(cloudD.results[i]);
+    if (qcIsDeletedKey(k)) continue; // 永久删除墓碑：已删记录绝不从云端/旧设备并回来
     if (Object.prototype.hasOwnProperty.call(index, k)) {
       // 同一订单：把云端（他人）更新的申诉/审核结果并进来，防止本地旧状态覆盖他人结果
       try { if (qcMergeAppealInto(results[index[k]], cloudD.results[i])) merged++; } catch (e) {}
@@ -606,13 +743,19 @@ function qcAuditRestoreFromCloud() {
 }
 function cloudSaveState() {
   if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化'));
-  var pre = cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1)
-    .then(function(res) {
-      var row = res && res.data && res.data.length ? res.data[0] : null;
-      if (row && row.state_json) { try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {} }
-    }).catch(function() { return null; });
+  // 写回前并行做两件事：① 并入云端最新记录（他人上传/申诉）② 拉取最新永久删除名单
+  var pre = Promise.all([
+    cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1)
+      .then(function(res) {
+        var row = res && res.data && res.data.length ? res.data[0] : null;
+        if (row && row.state_json) { try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {} }
+      }).catch(function() { return null; }),
+    qcLoadDeleteRegistry()
+  ]);
   return pre.then(function() {
     var payloadObj = cloudStatePayload();
+    // 永久删除墓碑：写回前剔除已删记录，旧设备/旧缓存就算还留着也写不回云端
+    try { qcFilterDeletedData(payloadObj); } catch (e) {}
     var payload = { state_key: 'main', state_json: qcEncodeStateJson(payloadObj), updated_by: 'anonymous' };
     try { qcSaveCacheFromPayload(payloadObj); } catch (e) {}
     return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
@@ -625,7 +768,7 @@ function cloudSaveState() {
   });
 }
 function cloudClearState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').delete().eq('state_key','main').then(function(res) { if (res.error) throw res.error; try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} setCloudStatus('已同步云端', 'var(--success)'); }).catch(function(err){ showToast('云端清空失败：' + (err.message || ''), 'error'); throw err; }); }
-function initCloudBase() { if (!window.CloudBaseSDK) { setCloudStatus('云端SDK加载失败', 'var(--danger)'); return; } try { cloudApp = window.CloudBaseSDK.init({ env: CLOUDBASE_ENV_ID, region: CLOUDBASE_REGION, accessKey: CLOUDBASE_ACCESS_KEY, auth: { detectSessionInUrl: true } }); cloudDb = cloudApp.rdb(); cloudReady = true; var auth = cloudApp.auth; if (auth && typeof auth.signInAnonymously === 'function') { auth.signInAnonymously().then(function(res) { if (res && res.error) throw res.error; cloudLoadState(); }).catch(function(err) { setCloudStatus('匿名认证失败', 'var(--danger)'); showToast('云端匿名认证失败，尝试加载本地快照…', 'info'); qcLoadSnapshotFallback(); }); } else { cloudLoadState(); } } catch(e) { setCloudStatus('云端初始化失败', 'var(--danger)'); showToast('云端初始化失败：' + (e.message || ''), 'error'); } }
+function initCloudBase() { try { qcLoadLocalRegistry(); } catch (e) {} if (!window.CloudBaseSDK) { setCloudStatus('云端SDK加载失败', 'var(--danger)'); return; } try { cloudApp = window.CloudBaseSDK.init({ env: CLOUDBASE_ENV_ID, region: CLOUDBASE_REGION, accessKey: CLOUDBASE_ACCESS_KEY, auth: { detectSessionInUrl: true } }); cloudDb = cloudApp.rdb(); cloudReady = true; var auth = cloudApp.auth; if (auth && typeof auth.signInAnonymously === 'function') { auth.signInAnonymously().then(function(res) { if (res && res.error) throw res.error; cloudLoadState(); }).catch(function(err) { setCloudStatus('匿名认证失败', 'var(--danger)'); showToast('云端匿名认证失败，尝试加载本地快照…', 'info'); qcLoadSnapshotFallback(); }); } else { cloudLoadState(); } } catch(e) { setCloudStatus('云端初始化失败', 'var(--danger)'); showToast('云端初始化失败：' + (e.message || ''), 'error'); } }
 window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 
 // ============================================================
@@ -645,12 +788,15 @@ function qcFetchLatestAndRefresh(force) {
   if (!force && (QC_FRESH_SYNC_BUSY || now - QC_FRESH_SYNC_AT < 5000)) return Promise.resolve(false);
   QC_FRESH_SYNC_AT = now; QC_FRESH_SYNC_BUSY = true;
   try {
+    return qcLoadDeleteRegistry().then(function() {
     return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1).then(function(res){
       QC_FRESH_SYNC_BUSY = false;
       var row = res && res.data && res.data.length ? res.data[0] : null;
       if (!row || !row.state_json) return false;
       var d = qcDecodeStateJson(row.state_json); if (!d) return false;
       if (!d || !d.results || !d.rawData) return false;
+      // 永久删除墓碑：过滤掉任何已删记录后再计算 hash / 刷新 UI
+      try { qcFilterDeletedData(d); } catch (e) {}
       var cloudHash = qcStateHash(qcSlimPayloadString(d));
       var cachedHash = null; try { cachedHash = localStorage.getItem(QC_CACHE_HASH_KEY); } catch (e) {}
       // 本会话首次云端拉取：即使 hash 相同也强制刷新一次，确保 UI 一定等于云端最新（防本地旧缓存/网址旧快照残留）
@@ -666,6 +812,7 @@ function qcFetchLatestAndRefresh(force) {
       try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
       try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
       return true;
+    });
     }).catch(function(){ QC_FRESH_SYNC_BUSY = false; return false; });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
 }
@@ -677,6 +824,7 @@ function qcForceResync() {
   try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
   QC_BOOTSTRAP_SYNCED = false;
   QC_FRESH_SYNC_AT = 0; QC_FRESH_SYNC_BUSY = false;
+  try { qcLoadLocalRegistry(); } catch (e) {}
   showToast('正在强制从云端同步最新数据…', 'info');
   return qcFetchLatestAndRefresh(true).then(function (ok) {
     var total = (typeof results !== 'undefined' && results) ? results.length : 0;
@@ -1017,7 +1165,10 @@ function afterParse(data, mode) {
   if (newRawData.length === 0) { showToast('未解析到有效数据行' + (skippedUninspectable ? '（' + skippedUninspectable + ' 条因无法质检在导入时剔除）' : ''), 'error'); return; }
   // 追加模式（默认）：已有数据绝不改动；完全相同单号重复上传时自动跳过，避免重复计数。
   if (mode === 'clear' && rawData.length > 0) {
-    if (!confirm('您选择了「清空后上传」：将清除已有 ' + rawData.length + ' 条数据（含全部质检明细与申诉），不可撤销。\n如只想加入新数据，请点「取消」后选择「追加上传」。确认清空？')) return;
+    if (!confirm('您选择了「清空后上传」：将清除已有 ' + rawData.length + ' 条数据（含全部质检明细与申诉），并把它们永久标记为已删除（以后任何批次、任何设备都无法让它们再出现），不可撤销。\n如只想加入新数据，请点「取消」后选择「追加上传」。确认清空？')) return;
+    var _clearKeys2 = [];
+    for (var _ci2 = 0; _ci2 < rawData.length; _ci2++) _clearKeys2.push(getStableRecordKey(rawData[_ci2]));
+    try { qcMarkDeleted(_clearKeys2, '清空后上传', rawData.length); } catch (e) {}
   }
   if (mode === 'append' && rawData.length > 0) {
     // 用日期无关的稳定键去重：上传表常无「日期」列，跨天重传同一单号也应视为重复
@@ -1026,7 +1177,8 @@ function afterParse(data, mode) {
     var deduped = [], dupCount = 0;
     for (var _ni = 0; _ni < newRawData.length; _ni++) {
       var _key = getStableRecordKey(newRawData[_ni]);
-      if (seenKeys[_key]) { dupCount++; continue; }
+      // 已永久删除的单号即使再次上传也跳过，杜绝"删掉又冒出来"
+      if (seenKeys[_key] || qcIsDeletedKey(_key)) { dupCount++; continue; }
       seenKeys[_key] = true; deduped.push(newRawData[_ni]);
     }
     if (deduped.length === 0) {
@@ -1036,6 +1188,7 @@ function afterParse(data, mode) {
     newRawData = deduped;
     QC_APPEND_OLD_COUNT = rawData.length;
     QC_APPEND_PRESERVE = true;
+    try { qcBumpGeneration('追加上传', newRawData.length); } catch (e) {}
     rawData = rawData.concat(newRawData);
     showToast('追加 ' + newRawData.length + ' 条数据（共 ' + rawData.length + ' 条）' + (dupCount ? '，跳过重复 ' + dupCount + ' 条' : '') + (skippedUninspectable ? '，导入时剔除无法质检 ' + skippedUninspectable + ' 条' : '') + '，开始质检...', 'success');
   } else {
@@ -5592,7 +5745,13 @@ function exportOrg() {
 function clearAllData() { if (!requireAdmin('清空数据')) return;
   if (!requireCloudAdmin()) return;
   if (results.length === 0) { showToast('无数据可清空', 'info'); return; }
-  if (!confirm('确认清空所有质检数据？此操作不可撤销。')) return;
+  if (!confirm('确认清空所有质检数据？此操作不可撤销。\n清空后这些订单会被永久标记删除，以后任何批次、任何设备都无法让它们再出现。')) return;
+  // 永久删除墓碑：清空前把当前所有稳定键登记进云端墓碑，并升级批次代号
+  try {
+    var _clearKeys = [];
+    for (var _ci = 0; _ci < results.length; _ci++) _clearKeys.push(getStableRecordKey(results[_ci]));
+    qcMarkDeleted(_clearKeys, '手动清空全部数据', results.length);
+  } catch (e) {}
   rawData = []; results = [];
   clearDataFromUrl();
   cloudClearState();
@@ -5809,6 +5968,8 @@ function importAllData(data) {
     showToast('网址中的数据格式不正确', 'error');
     return;
   }
+  // 永久删除墓碑：任何来源（云端 / 本地缓存 / URL 快照 / 审计恢复）的已删记录都不进入 UI
+  try { data = qcFilterDeletedData(data); } catch (e) {}
   rawData = data.rawData;
   results = data.results.map(function(r, i) { r._index = i; delete r._part; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
   if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
