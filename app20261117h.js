@@ -669,6 +669,34 @@ function qcFetchLatestAndRefresh(force) {
     }).catch(function(){ QC_FRESH_SYNC_BUSY = false; return false; });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
 }
+// 一键强制同步（诊断/自救按钮）：彻底清掉本机旧缓存与 URL 旧快照，重置首次同步标志，
+// 无条件用云端 main 全量刷新 UI，并把申诉条数直接显示出来，便于确认"是否真的同步到了最新"。
+function qcForceResync() {
+  try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {}
+  try { localStorage.removeItem('qc_dashboard_cache_v1'); localStorage.removeItem('qc_dashboard_cache_hash_v1'); } catch (e) {}
+  try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
+  QC_BOOTSTRAP_SYNCED = false;
+  QC_FRESH_SYNC_AT = 0; QC_FRESH_SYNC_BUSY = false;
+  showToast('正在强制从云端同步最新数据…', 'info');
+  return qcFetchLatestAndRefresh(true).then(function (ok) {
+    var total = (typeof results !== 'undefined' && results) ? results.length : 0;
+    var appeal = 0;
+    try { appeal = (typeof qcAppealCounts === 'function') ? 0 : 0; } catch (e) {}
+    // 直接统计云端最新申诉条数（不受已读影响），给用户一个明确的确认数字
+    var appealAll = 0;
+    try {
+      for (var i = 0; i < results.length; i++) {
+        var a = results[i] && results[i].appeal;
+        if (a && a.status && a.status !== '无申诉') appealAll++;
+      }
+    } catch (e) {}
+    try { qcRefreshAppealBadges(); } catch (e) {}
+    var msg = '同步完成：共 ' + total + ' 条数据，其中 ' + appealAll + ' 条申诉' + (ok ? '（已用云端最新数据刷新）' : '（云端数据无变化）');
+    showToast(msg, 'success');
+    try { setCloudStatus('已强制同步 · ' + total + ' 条 · 申诉 ' + appealAll, 'var(--success)'); } catch (e) {}
+    return ok;
+  });
+}
 // 页面首次加载 / 标签页重新可见时，立即拉取最新（节流 5s）
 (function(){
   function onVisible(){
@@ -679,8 +707,10 @@ function qcFetchLatestAndRefresh(force) {
     window.addEventListener('focus', onVisible);
   } catch (e) {}
 })();
-var QC_CACHE_KEY = 'qc_dashboard_cache_v1';
-var QC_CACHE_HASH_KEY = 'qc_dashboard_cache_hash_v1';
+// v2 缓存命名空间：旧版(v1)缓存可能在特定机器上与云端 hash 巧合一致、导致"数据为最新"短路却仍是旧申诉数据。
+// 升命名空间后本机旧缓存被彻底弃用，首次一定走云端全量刷新，避免"别人刷新了、我这台没刷新"。
+var QC_CACHE_KEY = 'qc_dashboard_cache_v2';
+var QC_CACHE_HASH_KEY = 'qc_dashboard_cache_hash_v2';
 function qcStateHash(s) { var h = 5381; for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) | 0; } return (h >>> 0).toString(36) + '-' + s.length; }
 function qcSlimPayloadString(data) {
   try {
@@ -5781,6 +5811,10 @@ function importAllData(data) {
     showToast(_staleReason + '，正在按最新标准重新质检全部明细...', 'info');
     setTimeout(runQualityCheck, 400);
   }
+  // 数据整体替换后必须立即重算申诉角标：否则"云端已连接·数据为最新"短路分支不刷新 UI 时，
+  // 顶栏三色角标会停留在旧数据的数字（例如一直显示"待审核 1"）。放在函数末尾确保任何加载来源
+  // （云端首次同步 / 本地缓存 / URL 快照）注入新数据后角标都与 results 保持一致。
+  try { if (typeof qcRefreshAppealBadges === 'function') qcRefreshAppealBadges(); } catch (e) {}
 }
 
 // ============================================================
