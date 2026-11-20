@@ -636,6 +636,8 @@ window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 // ============================================================
 // ---- 打开即最新：主动拉取 + 回邮同步刷新（2026-11-18 h） ----
 var QC_FRESH_SYNC_AT = 0, QC_FRESH_SYNC_BUSY = false;
+// 启动后是否已完成首次"强制用云端数据刷新UI"。首次一定是云端为准，避免本地旧缓存/网址旧快照覆盖最新数据。
+var QC_BOOTSTRAP_SYNCED = false;
 // 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
 function qcFetchLatestAndRefresh(force) {
   try { if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false); } catch (e) { return Promise.resolve(false); }
@@ -651,14 +653,17 @@ function qcFetchLatestAndRefresh(force) {
       if (!d || !d.results || !d.rawData) return false;
       var cloudHash = qcStateHash(qcSlimPayloadString(d));
       var cachedHash = null; try { cachedHash = localStorage.getItem(QC_CACHE_HASH_KEY); } catch (e) {}
-      if (cachedHash === cloudHash) {
-        // 内容一致：不动 UI，避免打断；但确保回邮/缓存与云端一致（幂等）
+      // 本会话首次云端拉取：即使 hash 相同也强制刷新一次，确保 UI 一定等于云端最新（防本地旧缓存/网址旧快照残留）
+      if (cachedHash === cloudHash && QC_BOOTSTRAP_SYNCED) {
+        // 内容一致且已强制同步过：不动 UI，避免打断；确保回邮/缓存与云端一致（幂等）
         try { setCloudStatus('云端已连接 · 数据为最新', 'var(--success)'); } catch (e) {}
         return false;
       }
-      // 有更新：整体替换（importAllData 内已按 rawData 覆盖回邮），并刷新缓存
+      // 首次同步 或 有更新：整体替换（importAllData 内已按 rawData 覆盖回邮），并刷新缓存
+      QC_BOOTSTRAP_SYNCED = true;
       importAllData(d);
       qcSaveCacheFromPayload(d);
+      try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
       try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
       return true;
     }).catch(function(){ QC_FRESH_SYNC_BUSY = false; return false; });
@@ -720,16 +725,20 @@ function qcCacheSyncFromCloud(data, rawStateJson) {
     if (isFat && typeof cloudSaveState === 'function') {
       setTimeout(function() { try { cloudSaveState().catch(function(){}); } catch (e) {} }, 2000);
     }
-    if (cachedHash === cloudHash) {
-      // 缓存数据与云端一致：缓存秒开已正确，不重复渲染打断用户
+    // 启动后首次云端同步：无条件用云端数据刷新 UI，避免网址#d=旧快照/本地旧缓存残留导致"刷新后看不到更新"
+    if (cachedHash === cloudHash && QC_BOOTSTRAP_SYNCED) {
+      // 缓存数据与云端一致且本会话已强制同步过一次：不重复渲染打断用户
       try { localStorage.setItem(QC_CACHE_KEY, LZString.compressToUTF16(cloudJson)); localStorage.setItem(QC_CACHE_HASH_KEY, cloudHash); } catch (e) {}
       setCloudStatus('云端已连接', 'var(--success)');
       return;
     }
-    // 云端有更新：重新渲染并刷新缓存
+    // 首次同步 或 云端有更新：重新渲染并刷新缓存
+    QC_BOOTSTRAP_SYNCED = true;
     importAllData(data);
     qcSaveCacheFromPayload(data);
-  } catch (e) { importAllData(data); }
+    // 首次同步后清除网址里的旧 #d= 快照，避免下次刷新又灌入旧数据
+    try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
+  } catch (e) { QC_BOOTSTRAP_SYNCED = true; importAllData(data); }
 }
 // ============================================================
 // Tab 切换
@@ -5852,7 +5861,8 @@ document.addEventListener('DOMContentLoaded', function() {
   renderKnowledgeBase();
   renderOrg();
   initAdminMode();
-  loadFromUrlHash();
+  // 网址#d=快照降级为"云端兜底"：仅当云端在4秒内没连上时才加载，避免旧快照覆盖云端最新数据
+  try { setTimeout(function(){ try { if (!QC_BOOTSTRAP_SYNCED) loadFromUrlHash(); } catch (e) {} }, 4000); } catch (e) {}
   if (window.CloudBaseSDK) initCloudBase();
 });
 
