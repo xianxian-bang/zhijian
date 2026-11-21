@@ -361,6 +361,69 @@ function qcFilterDeletedData(data) {
   }
   return data;
 }
+// ============================================================
+// 数据不变量自愈（2026-11-21）：rawData[i] 必须与 results[i] 严格一一对应（同稳定键）。
+// 反复「清空→重导入」时，追加保留旧结果 + qc-tool 推送 + pending 重算 + 墓碑解除 并发，
+// 会让两个数组错位（同一单号配到别人的分数、回邮被按索引张冠李戴、总条数随机变化）。
+// 本函数以 results 为真相，按稳定键为每个结果重新配对原始行，重建后两个数组严格对齐、幂等：
+// 无论调用多少次、数据从哪个来源来，结果都完全一致 —— 这是「删除重导入结果可复现」的根基。
+// ============================================================
+function qcRealignData(data) {
+  if (!data || !Array.isArray(data.results) || !Array.isArray(data.rawData)) return data;
+  var results = data.results, raw = data.rawData;
+  // 1) 按稳定键建 rawData 索引：同名键保留回邮内容最长的一条（信息最全）
+  var rawByKey = {}, rawOrder = [];
+  for (var i = 0; i < raw.length; i++) {
+    var rk = getStableRecordKey(raw[i] || {});
+    if (!rawByKey[rk] || String((raw[i].reply || '')).length > String((rawByKey[rk].reply || '')).length) {
+      if (!rawByKey[rk]) rawOrder.push(rk);
+      rawByKey[rk] = raw[i];
+    }
+  }
+  // 2) 以 results 为准去重（稳定键保留第一条，通常申诉/评分最完整），并按其结果重建 rawData
+  var seen = {}, outR = [], outRaw = [];
+  for (var j = 0; j < results.length; j++) {
+    var r = results[j];
+    var k = getStableRecordKey(r || {});
+    if (!k || seen[k]) continue;           // 丢弃无键/重复结果
+    seen[k] = true;
+    outR.push(r);
+    var src = rawByKey[k] || {};
+    // 固定字段顺序构造，保证任意次数重建后对象键顺序完全一致（幂等）
+    var FIELDS = ['account', 'agent', 'order', 'date', 'customer', 'reply', 'qcWeek',
+      'processCheck', 'refundReg', 'issueFeedback', 'replenishment', 'orderAmount', 'fbmDefectRate'];
+    var rebuilt = {};
+    for (var fi = 0; fi < FIELDS.length; fi++) {
+      var f = FIELDS[fi];
+      var val = src[f];
+      if (val === undefined || val === null || val === '') val = r[f];
+      if (f === 'reply') val = (typeof src.reply === 'string' ? src.reply : (typeof r.reply === 'string' ? r.reply : ''));
+      rebuilt[f] = val === undefined || val === null ? '' : val;
+    }
+    // 保留原始行里 FIELDS 之外的其它扩展字段（同样按固定顺序追加）
+    for (var f2 in src) if (FIELDS.indexOf(f2) < 0 && f2 !== '_index') rebuilt[f2] = src[f2];
+    outRaw.push(rebuilt);
+  }
+  var changed = (outR.length !== results.length) || (outRaw.length !== raw.length);
+  if (!changed) {
+    // 数量一致也校验顺序对齐，错位则同样重建
+    for (var m = 0; m < outR.length; m++) {
+      if (getStableRecordKey(outR[m]) !== getStableRecordKey(raw[m])) { changed = true; break; }
+    }
+  }
+  data.results = outR;
+  data.rawData = outRaw;
+  // 3) 结果里的分数/等级只认同一条记录：grade 必须由 totalScore 派生，清除错位遗留
+  for (var n = 0; n < outR.length; n++) {
+    var rr = outR[n];
+    if (rr && typeof rr.totalScore === 'number' && rr.totalScore >= 0 && !rr.redlineViolation) {
+      var g = determineGrade(rr.totalScore);
+      if (rr.grade !== g && rr.grade !== '参考案例' && rr.grade !== '无法质检') rr.grade = g;
+    }
+    rr._index = n;
+  }
+  return data;
+}
 // 从云端读登记表（写回前会再次调用，确保用的是最新墓碑）
 function qcLoadDeleteRegistry() {
   if (!cloudDb) return Promise.resolve(null);
@@ -445,6 +508,24 @@ function qcReleaseDeletedKeys(keys, reason) {
     if (reg.deletedBatches.length > 50) reg.deletedBatches = reg.deletedBatches.slice(-50);
     reg.updatedAt = new Date().toISOString();
     return qcSaveDeleteRegistry(reg).then(function(saved) { QC_REGISTRY_BUSY = false; return saved; });
+  }).catch(function() { QC_REGISTRY_BUSY = false; return null; });
+}
+// 干净重置墓碑（2026-11-21）：「清空全部数据」时调用，把永久删除名单清空、批次升一级。
+// 这样重新导入同一批数据不会被旧墓碑当成「已删单号复活」而过滤，保证删除重导入幂等可复现。
+function qcResetRegistry(reason) {
+  if (!cloudDb) { QC_DELETED_KEYS = {}; QC_REGISTRY_LOADED = true; return Promise.resolve(null); }
+  QC_REGISTRY_BUSY = true;
+  var reg = qcNormalizeRegistry(null);
+  reg.generation = (Number(QC_GEN) || 1) + 1;
+  reg.deletedKeys = {};
+  reg.deletedBatches.push({ gen: reg.generation, count: 0, reason: '干净重置(清空全部): ' + (reason || ''), at: new Date().toISOString() });
+  reg.updatedAt = new Date().toISOString();
+  var payload = { state_key: DELETE_REGISTRY_ROW, state_json: JSON.stringify(reg), updated_by: 'anonymous' };
+  return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
+    if (res && res.error) throw res.error;
+    qcRegistryApply(reg);
+    QC_REGISTRY_BUSY = false;
+    return reg;
   }).catch(function() { QC_REGISTRY_BUSY = false; return null; });
 }
 function qcRenderGenerationBadge() {
@@ -667,6 +748,10 @@ function qcMergeCloudNewRecords(cloudD) {
   }
   if (added > 0) showToast('已并入云端新增的 ' + added + ' 条数据（后台工具/其他设备上传）', 'info');
   if (merged > 0) showToast('已同步 ' + merged + ' 条他人在云端更新的申诉/审核结果', 'info');
+  // 并入后强制对齐：新增记录顺序与 results 尾部一一对应，杜绝跨批次错位累积
+  if (added > 0 || merged > 0) {
+    try { qcRealignData({ results: results, rawData: rawData }); } catch (e) {}
+  }
   return added + merged;
 }
 
@@ -793,6 +878,10 @@ function cloudSaveState() {
     try { qcNormalizeAmountOdrFields(payloadObj); } catch (e) {}
     // 永久删除墓碑：写回前剔除已删记录，旧设备/旧缓存就算还留着也写不回云端
     try { qcFilterDeletedData(payloadObj); } catch (e) {}
+    // 写回前强制对齐：以内存 results 为真相重建 rawData，杜绝把错位/重复脏数据固化进云端
+    try { qcRealignData(payloadObj); } catch (e) {}
+    // 同步内存：让 UI 看到的条数与写回云端的一致（否则明细表数字和云端对不上）
+    if (payloadObj.results && payloadObj.rawData) { results = payloadObj.results; rawData = payloadObj.rawData; }
     var payload = { state_key: 'main', state_json: qcEncodeStateJson(payloadObj), updated_by: 'anonymous' };
     try { qcSaveCacheFromPayload(payloadObj); } catch (e) {}
     return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
@@ -1223,10 +1312,9 @@ function afterParse(data, mode) {
   if (newRawData.length === 0) { showToast('未解析到有效数据行' + (skippedUninspectable ? '（' + skippedUninspectable + ' 条因无法质检在导入时剔除）' : ''), 'error'); return; }
   // 追加模式（默认）：已有数据绝不改动；完全相同单号重复上传时自动跳过，避免重复计数。
   if (mode === 'clear' && rawData.length > 0) {
-    if (!confirm('您选择了「清空后上传」：将清除已有 ' + rawData.length + ' 条数据（含全部质检明细与申诉），并把它们永久标记为已删除（以后任何批次、任何设备都无法让它们再出现），不可撤销。\n如只想加入新数据，请点「取消」后选择「追加上传」。确认清空？')) return;
-    var _clearKeys2 = [];
-    for (var _ci2 = 0; _ci2 < rawData.length; _ci2++) _clearKeys2.push(getStableRecordKey(rawData[_ci2]));
-    try { qcMarkDeleted(_clearKeys2, '清空后上传', rawData.length); } catch (e) {}
+    if (!confirm('您选择了「清空后上传」：将清除已有 ' + rawData.length + ' 条数据（含全部质检明细与旧的删除记录），以全新空库导入本次文件。重新导入同一批数据结果完全一致。\n如只想加入新数据，请点「取消」后选择「追加上传」。确认清空？')) return;
+    // 2026-11-21：与「清空全部数据」一致，清空后上传也走干净重置，不写永久删除墓碑
+    try { qcResetRegistry('清空后上传'); } catch (e) {}
   }
   if (mode === 'append' && rawData.length > 0) {
     // 用日期无关的稳定键去重：上传表常无「日期」列，跨天重传同一单号也应视为重复
@@ -1296,8 +1384,10 @@ function runQualityCheck() {
     var end = Math.min(batch + batchSize, total);
     for (var i = batch; i < end; i++) {
       if (i < preserveCount) {
-        var _old = oldByKey[getStableRecordKey(rawData[i])] || oldResults[i];
-        if (_old) { _old._index = i; results.push(_old); keptCount++; continue; }
+        // 只按稳定键保留旧结果（含申诉/评分），绝不按索引回退 —— 索引回退会把别人的分数套到本单号，
+        // 是「重导入后大量单据错误不达标、每次结果不同」的直接原因（2026-11-21 修复）。
+        var _old = oldByKey[getStableRecordKey(rawData[i])];
+        if (_old) { var _c = JSON.parse(JSON.stringify(_old)); _c._index = i; results.push(_c); keptCount++; continue; }
       }
       var result = inspectOne(rawData[i]);
       result._index = i;
@@ -2724,6 +2814,8 @@ function applyExcellentGate(result) {
 
 function determineGrade(total) {
   for (var i = 0; i < GRADE_RULES.length; i++) if (total >= GRADE_RULES[i].minScore) return GRADE_RULES[i].grade;
+  // 兜底（2026-11-21）：等级规则为空/损坏时仍按内置阈值判分，杜绝「所有单据恒为不达标」
+  if (!GRADE_RULES || !GRADE_RULES.length) return total >= 86 ? '优秀' : (total >= 80 ? '达标' : '不达标');
   return '不达标';
 }
 // 达标单维度分夹到「达标档」：2026-11-19
@@ -5861,13 +5953,11 @@ function exportOrg() {
 function clearAllData() { if (!requireAdmin('清空数据')) return;
   if (!requireCloudAdmin()) return;
   if (results.length === 0) { showToast('无数据可清空', 'info'); return; }
-  if (!confirm('确认清空所有质检数据？此操作不可撤销。\n清空后这些订单会被永久标记删除，以后任何批次、任何设备都无法让它们再出现。')) return;
-  // 永久删除墓碑：清空前把当前所有稳定键登记进云端墓碑，并升级批次代号
-  try {
-    var _clearKeys = [];
-    for (var _ci = 0; _ci < results.length; _ci++) _clearKeys.push(getStableRecordKey(results[_ci]));
-    qcMarkDeleted(_clearKeys, '手动清空全部数据', results.length);
-  } catch (e) {}
+  if (!confirm('确认清空所有质检数据？此操作不可撤销。\n清空后看板回到全新空库状态：旧数据、旧打分、旧的删除记录一并清除，重新导入同一批数据将得到完全一致的结果。')) return;
+  // 2026-11-21：清空 = 干净重置。原先会把全部单号写入「永久删除墓碑」，导致重新导入同一批时
+  // 被当成「已删单号复活」而异步解除/残留过滤 —— 这是「删除重导入后条数忽多忽少、结果不稳定」的根因之一。
+  // 现在清空时一并重置墓碑，让「清空→重导入」成为幂等操作。
+  try { qcResetRegistry('手动清空全部数据'); } catch (e) {}
   rawData = []; results = [];
   clearDataFromUrl();
   cloudClearState();
@@ -6089,12 +6179,24 @@ function importAllData(data) {
   // 任意端字段归一：把中英文/别名字段的「订单金额」「FBM订单缺陷率」统一收敛并双向补齐，
   // 保证网页上传、后端工具、云端直写、审计恢复进来的数据都能在明细表 / 导出 / 详情显示。
   try { qcNormalizeAmountOdrFields(data); } catch (e) {}
+  // 数据不变量自愈：无论数据来自云端/本地缓存/URL快照/工具推送，先按稳定键把 results 与 rawData
+  // 重建为严格一一对应，再进入 UI。这是「反复删除重导入结果稳定」的关键：错位数据在这里被归位。
+  try { qcRealignData(data); } catch (e) {}
   rawData = data.rawData;
-  results = data.results.map(function(r, i) { r._index = i; delete r._part; if (data.rawData[i] && typeof data.rawData[i].reply === 'string') { r.reply = data.rawData[i].reply; } return normalizeResultAppeal(r); });
+  results = data.results.map(function(r, i) {
+    r._index = i; delete r._part;
+    // 回邮按稳定键从已对齐的 rawData 取（qcRealignData 已保证同索引同源），不再信任外部索引
+    var _src = data.rawData[i];
+    if (_src && typeof _src.reply === 'string') { r.reply = _src.reply; }
+    return normalizeResultAppeal(r);
+  });
   if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
   try { if (typeof qcEnsureOrgAccounts === 'function') qcEnsureOrgAccounts(true); } catch (e) {}
-  if (data.standards) { STANDARDS = data.standards; }
-  if (data.gradeRules) { GRADE_RULES = data.gradeRules; }
+  // 2026-11-21：配置字段只接受「非空数组」覆盖。反复清空/写回时这些字段可能被写成 []，
+  // 若照单全收会把内置质检标准/等级规则/知识库清空 → determineGrade 遍历空规则恒返回「不达标」，
+  // 这就是「重导入后大量单据错误不达标、每次结果不同」的根因之一。空数组一律忽略，保留当前有效配置。
+  if (data.standards && data.standards.length) { STANDARDS = data.standards; }
+  if (data.gradeRules && data.gradeRules.length) { GRADE_RULES = data.gradeRules; }
   if (data.knowledgeBase && data.knowledgeBase.length) { KNOWLEDGE_BASE = data.knowledgeBase; }
   var kbBackfilled = ensureKnowledgeRequirements();
   scheduleSensitiveWordsRefresh();
