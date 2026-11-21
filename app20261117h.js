@@ -370,6 +370,21 @@ function qcFilterDeletedData(data) {
 // ============================================================
 function qcRealignData(data) {
   if (!data || !Array.isArray(data.results) || !Array.isArray(data.rawData)) return data;
+  // 2026-11-21e 关键修复（上一轮 d 版回归）：results 尚未覆盖全部 rawData 时，绝不能"以 results 为真相"重建，
+  // 否则会把还没有质检结果的原始数据整条丢掉。典型场景：qc-tool 追加推送后 results=[]、rawData 有数据；
+  // 或追加上传后 results 暂时只含旧行、新行尚未重算。此时 rawData 才是数据源真相，原样保留，
+  // 交给随后的 runQualityCheck 为缺失的键生成 results。
+  // 这正是"推送后打开看板数据消失 / results 永远为 0 / 再传被判全部重复"连锁故障的直接根因。
+  var _pending = {};
+  for (var _pi = 0; _pi < data.rawData.length; _pi++) {
+    var _pk = getStableRecordKey(data.rawData[_pi] || {});
+    if (_pk) _pending[_pk] = true;
+  }
+  for (var _pj = 0; _pj < data.results.length; _pj++) {
+    var _prk = getStableRecordKey(data.results[_pj] || {});
+    if (_prk && _pending[_prk]) delete _pending[_prk];
+  }
+  if (Object.keys(_pending).length > 0) return data;   // 存在"有原始数据但无质检结果"的键 → 待重算，保留原样
   var results = data.results, raw = data.rawData;
   // 1) 按稳定键建 rawData 索引：同名键保留回邮内容最长的一条（信息最全）
   var rawByKey = {}, rawOrder = [];
@@ -908,6 +923,23 @@ var QC_FRESH_SYNC_AT = 0, QC_FRESH_SYNC_BUSY = false;
 // 启动后是否已完成首次"强制用云端数据刷新UI"。首次一定是云端为准，避免本地旧缓存/网址旧快照覆盖最新数据。
 var QC_BOOTSTRAP_SYNCED = false;
 // 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
+// 2026-11-21f：云端确认为「空库」时，把本地缓存与界面一并重置到全新空库状态。
+// 删除后旧数据之所以会「复活」，是因为云端 main 已删、本地缓存仍留着旧数据，
+// 此后任意 cloudSaveState() 都会把本地旧数据重新写回云端。这里从源头断开该链路。
+function qcApplyEmptyCloudState() {
+  try { rawData = []; results = []; } catch (e) {}
+  try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {}
+  try { localStorage.removeItem('qc_dashboard_cache_v1'); localStorage.removeItem('qc_dashboard_cache_hash_v1'); } catch (e) {}
+  try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
+  QC_BOOTSTRAP_SYNCED = true;
+  try { document.getElementById('detailEmpty').style.display = 'block'; } catch (e) {}
+  try { document.getElementById('detailContent').style.display = 'none'; } catch (e) {}
+  try { document.getElementById('dataInfo').style.display = 'none'; } catch (e) {}
+  try { document.getElementById('detailBadge').textContent = '0'; } catch (e) {}
+  try { document.getElementById('dashboardEmpty').style.display = 'block'; } catch (e) {}
+  try { document.getElementById('dashboardContent').style.display = 'none'; } catch (e) {}
+  try { setCloudStatus('云端为空库（数据已清空）', 'var(--success)'); } catch (e) {}
+}
 function qcFetchLatestAndRefresh(force) {
   try { if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false); } catch (e) { return Promise.resolve(false); }
   var now = Date.now();
@@ -920,7 +952,15 @@ function qcFetchLatestAndRefresh(force) {
       QC_FRESH_SYNC_BUSY = false;
       var row = res && res.data && res.data.length ? res.data[0] : null;
       if (!row || !row.state_json) {
-        // 云端没读到 main：明确告诉用户当前显示的是本地缓存，不要让状态栏永远停在"正在同步"
+        // 2026-11-21f：区分两种「读不到 main」，这是删除后旧数据复活的关键漏洞。
+        // ① 查询成功但云端确实没有 main 行 = 用户主动清空后的合法空库 → 清空本地缓存与 UI，
+        //    绝不能继续显示本机旧缓存（否则用户会以为没删掉，且写操作会把旧数据复活写回云端）。
+        // ② 查询本身失败（res.error / 无 data 字段）= 网络异常 → 保留本地缓存并重试。
+        var isNetworkError = !!(res && res.error) || !(res && res.data);
+        if (!isNetworkError) {
+          try { qcApplyEmptyCloudState(); } catch (e) {}
+          return false;
+        }
         try { setCloudStatus('⚠ 云端没读到数据（网络异常），当前显示的是本机缓存 — 请点右上角「🔄 强制同步」重试', 'var(--danger)'); } catch (e) {}
         if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
         return false;
@@ -6221,6 +6261,10 @@ function importAllData(data) {
   var _fpNow = standardsFingerprint();
   var _fpCloud = data.standardsFingerprint || '';
   var _staleReason = (data.qcLogicVersion !== QC_LOGIC_VERSION) ? '质检判分逻辑已升级' : (_fpCloud !== _fpNow ? '质检标准已更新' : '');
+  // 2026-11-21e 兜底：有原始数据但 results 为空（如 qc-tool 推送后尚未重算、或重算中断残留），
+  // 无论版本号/标准指纹是否一致，都必须重算，否则看板会一直显示 0 条、用户误以为数据丢失。
+  var _resultsMissing = (rawData.length > 0 && results.length === 0);
+  if (_resultsMissing) _staleReason = '数据已完成上传，正在生成质检结果';
   if (rawData.length > 0 && _staleReason && !window._qcLogicMigrating) {
     window._qcLogicMigrating = true;
     showToast(_staleReason + '，正在按最新标准重新质检全部明细...', 'info');
