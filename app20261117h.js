@@ -3636,6 +3636,17 @@ function qcRawFor(r) {
 }
 function rcOrderAmount(r) { if (!r) return ''; return qcAmtOf(r) || qcAmtOf(qcRawFor(r)); }
 function rcOdr(r) { if (!r) return ''; return qcOdrOf(r) || qcOdrOf(qcRawFor(r)); }
+// ODR 统一展示：小数 0.0132 → 1.32%；数值 1.8 → 1.80%；百分比文本 1.80% → 1.80%（2026-11-21）
+function qcFmtOdr(v) {
+  if (v === undefined || v === null) return '';
+  var s = String(v).trim();
+  if (!s) return '';
+  var isPct = /[%％]/.test(s);
+  var num = parseFloat(s.replace(/[%％,\s]/g, ''));
+  if (!isFinite(num)) return s;
+  if (isPct || num > 1) return num.toFixed(2) + '%';
+  return (num * 100).toFixed(2) + '%';
+}
 // 一次性归一：把任意端的别名字段统一写入标准字段 orderAmount / fbmDefectRate，
 // 并在 results 与 rawData 之间双向补齐（缺哪边补哪边），供明细表 / 导出 / 详情 / 回邮块统一读取。
 function qcNormalizeAmountOdrFields(d) {
@@ -3701,7 +3712,7 @@ function renderDetailTable() {
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
-      var _odr = rcOdr(r), _amt = rcOrderAmount(r);
+      var _odr = qcFmtOdr(rcOdr(r)), _amt = rcOrderAmount(r);
       html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
             + '<td class="cell-nowrap">' + escHtml(r.account) + '</td>'
             + '<td class="cell-center">' + (_odr !== '' ? escHtml(_odr) : '-') + '</td>'
@@ -3930,7 +3941,7 @@ function showDetail(index) {
   var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
   html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (rcOdr(r) !== '' ? escHtml(rcOdr(r)) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (qcFmtOdr(rcOdr(r)) !== '' ? escHtml(qcFmtOdr(rcOdr(r))) : '-') + '</td></tr>';
   html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
   html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (rcOrderAmount(r) !== '' ? escHtml(rcOrderAmount(r)) : '-') + '</td></tr>';
@@ -5878,7 +5889,7 @@ function exportDetail(type) {
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var row = [i + 1, getGroupByAgent(r.agent), r.date, r.account, rcOdr(r), canonicalAgentName(r.agent), r.order, rcOrderAmount(r)];
+    var row = [i + 1, getGroupByAgent(r.agent), r.date, r.account, qcFmtOdr(rcOdr(r)), canonicalAgentName(r.agent), r.order, rcOrderAmount(r)];
     for (var d = 0; d < DIM_NAMES.length; d++) { var s = r.scores[DIM_NAMES[d]]; row.push(s === -1 ? '-' : s); }
     var appeal = normalizeAppeal(r.appeal);
     row.push(r.processCheck || '', r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
