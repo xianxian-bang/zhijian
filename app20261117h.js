@@ -672,10 +672,10 @@ function qcDecodeStateJson(raw) {
 }
 function qcEncodeStateJson(obj) {
   var json = JSON.stringify(obj);
-  // 兼容性优先：明文格式新旧版代码都能读取。压缩格式(LZ1:)只有支持解压的新版能读，
-  // 一旦线上仍有旧版设备在线，就会报「云端读取失败」。因此只有明文体积大到可能触发
-  // Supabase 写入超时（>9MB）时才压缩；日常数据量（当前约5.7MB）一律明文保存，保证多版本混用稳定。
-  var bigEnoughToCompress = json.length > 9 * 1024 * 1024;
+  // 2026-11-21g：实测 Supabase 在明文 ~4.8MB 就会 statement timeout（1002 条大批量写回必现），
+  // 因此把压缩阈值降到 3.5MB——数据一大就压缩（压后约 1.3MB），彻底避开超时。
+  // 线上看板(qcDecodeStateJson)与 qc-tool 均已支持 LZ1: 解压，压缩格式多端可读，安全。
+  var bigEnoughToCompress = json.length > 3.5 * 1024 * 1024;
   if (bigEnoughToCompress && typeof LZString !== 'undefined' && LZString.compressToBase64) {
     return QC_STATE_LZ_PREFIX + LZString.compressToBase64(json);
   }
@@ -784,6 +784,13 @@ function qcAuditHash(s) {
   for (i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   return 'e' + (h >>> 0).toString(36);
 }
+// 2026-11-21g 申诉继承规则：回邮内容指纹。同一平台单号仅当回邮内容完全一致时才继承历史申诉，
+// 内容变了（哪怕只改一个字）视为全新订单，走全新质检、不继承任何申诉/审核状态。
+// 归一化只去掉首尾空白与行尾空白，保留正文差异（含标点/换行），确保"内容一致"判定严格。
+function qcReplyFp(reply) {
+  var s = String(reply == null ? '' : reply).replace(/[ \t]+$/gm, '').replace(/^\s+|\s+$/g, '');
+  return qcAuditHash(s);
+}
 // 由一条结果记录构造审计事件（快照：申诉对象 + 评分/等级/明细 + 操作人/时间）
 function qcAuditEventFrom(r, action) {
   if (!r) return null;
@@ -798,6 +805,7 @@ function qcAuditEventFrom(r, action) {
   return {
     id: qcAuditHash(key + '||' + (a.status || '') + '||' + stamp),
     recordKey: key,
+    replyFp: qcReplyFp(r.reply),   // 2026-11-21g：回邮内容指纹，继承时用于判定"是否同一份内容"
     order: r.order || '', agent: r.agent || '', account: r.account || '', date: r.date || '',
     action: action || '', status: a.status || '无申诉',
     appeal: JSON.parse(JSON.stringify(a)),
@@ -856,10 +864,15 @@ function qcAuditRestoreFromCloud() {
         if (!prev || String(e.opTime || '') > String(prev.opTime || '')) latest[e.recordKey] = e;
       }
       // 先把事件按「伪云端记录」合并进本地结果（复用统一的时间戳/进度比较）
+      // 2026-11-21g 申诉继承规则：同一单号只有回邮内容一致才继承；历史无指纹事件(v<g版)按兼容处理。
       var changed = 0;
       for (i = 0; i < results.length; i++) {
         var r = results[i], ev = latest[getStableRecordKey(r)];
         if (!ev || !ev.appeal) continue;
+        if (ev.replyFp) {
+          var _fpNow = qcReplyFp((typeof r.reply === 'string') ? r.reply : (rawData[i] && rawData[i].reply) || '');
+          if (ev.replyFp !== _fpNow) continue;   // 回邮内容变了 → 全新订单，不继承历史申诉
+        }
         var pseudo = { appeal: ev.appeal, totalScore: ev.totalScore, grade: ev.grade, scores: ev.scores, details: ev.details };
         try { if (qcMergeAppealInto(r, pseudo)) changed++; } catch (e) {}
       }
@@ -1402,11 +1415,14 @@ function matchCol(h, lh, keywords) {
 // ============================================================
 function runQualityCheck() {
   showProgress('正在质检...', '准备中');
+  // 2026-11-21g：申诉历史快照同时记录回邮内容指纹。继承时要求「同一平台单号 + 回邮内容完全一致」，
+  // 回邮变了（内容不一致）视为全新订单 → 不继承任何申诉/审核状态，走全新质检。
   var previousAppeals = {}, previousAppealsStable = {};
   for (var p = 0; p < results.length; p++) {
     var previous = normalizeResultAppeal(results[p]);
-    previousAppeals[previous.recordKey] = previous.appeal;
-    previousAppealsStable[getStableRecordKey(previous)] = previous.appeal;
+    var _snap = { appeal: previous.appeal, fp: qcReplyFp(previous.reply) };
+    previousAppeals[previous.recordKey] = _snap;
+    previousAppealsStable[getStableRecordKey(previous)] = _snap;
   }
   // 追加上传：旧记录按稳定键原样保留，绝不重新打分、不改动申诉；只质检新条目
   var preserveCount = QC_APPEND_PRESERVE ? Math.min(QC_APPEND_OLD_COUNT, rawData.length) : 0;
@@ -1441,7 +1457,13 @@ function runQualityCheck() {
       result.orderAmount = qcAmtOf(rawData[i]);
       result.fbmDefectRate = qcOdrOf(rawData[i]);
       result.recordKey = getRecordKey(result);
-      var _prevAppeal = previousAppeals[result.recordKey] || previousAppealsStable[getStableRecordKey(result)] || null;
+      // 2026-11-21g：把本次回邮内容同步到 result 并按内容指纹判定申诉继承。
+      var _curReply = (typeof rawData[i].reply === 'string') ? rawData[i].reply : '';
+      result.reply = _curReply;
+      var _curFp = qcReplyFp(_curReply);
+      var _snap = previousAppeals[result.recordKey] || previousAppealsStable[getStableRecordKey(result)] || null;
+      // 只有「历史快照存在」且「回邮内容指纹完全一致」才继承申诉；内容变了视为全新订单，全新质检。
+      var _prevAppeal = (_snap && _snap.fp === _curFp) ? _snap.appeal : null;
       result.appeal = _prevAppeal ? normalizeAppeal(_prevAppeal) : createEmptyAppeal();
       normalizeResultAppeal(result);
       results.push(result);
@@ -6261,13 +6283,30 @@ function importAllData(data) {
   var _fpNow = standardsFingerprint();
   var _fpCloud = data.standardsFingerprint || '';
   var _staleReason = (data.qcLogicVersion !== QC_LOGIC_VERSION) ? '质检判分逻辑已升级' : (_fpCloud !== _fpNow ? '质检标准已更新' : '');
-  // 2026-11-21e 兜底：有原始数据但 results 为空（如 qc-tool 推送后尚未重算、或重算中断残留），
-  // 无论版本号/标准指纹是否一致，都必须重算，否则看板会一直显示 0 条、用户误以为数据丢失。
-  var _resultsMissing = (rawData.length > 0 && results.length === 0);
-  if (_resultsMissing) _staleReason = '数据已完成上传，正在生成质检结果';
+  // 2026-11-21g 兜底（修复条数跳变的根因）：只要 results 没有覆盖全部 rawData，就必须补算。
+  // 旧版只判 results.length===0，覆盖不到「第二批 qc-tool 追加后 rawData=1002/results=194」这种中间态：
+  // 此时 qcRealignData 因存在 pending 键保留原样 → results 停在 194，条数显示为 194，
+  // 而刷新又被本地缓存（1002 条完整版）覆盖回 1002 → 这就是「1002↔190 来回跳」的直接原因。
+  // 现在按「稳定键集合差集」判断：rawData 中存在任何一个没有质检结果的键，都立即补算。
+  var _missingKeys = 0;
+  try {
+    var _haveKeys = {};
+    for (var _hi = 0; _hi < results.length; _hi++) { var _hk = getStableRecordKey(results[_hi] || {}); if (_hk) _haveKeys[_hk] = true; }
+    for (var _rj = 0; _rj < rawData.length; _rj++) { var _rk = getStableRecordKey(rawData[_rj] || {}); if (_rk && !_haveKeys[_rk]) _missingKeys++; }
+  } catch (e) { _missingKeys = (rawData.length > results.length) ? (rawData.length - results.length) : 0; }
+  var _resultsMissing = (rawData.length > 0 && (results.length === 0 || _missingKeys > 0));
+  if (_resultsMissing) _staleReason = '质检结果未覆盖全部数据，正在补齐';
   if (rawData.length > 0 && _staleReason && !window._qcLogicMigrating) {
     window._qcLogicMigrating = true;
-    showToast(_staleReason + '，正在按最新标准重新质检全部明细...', 'info');
+    // 2026-11-21g：仅「结果缺失」而版本/指纹都没变时，开启保旧模式——
+    // 已有质检结果的记录（含分数/申诉）按稳定键原样保留，只给缺失的键补算，避免已有 194 条被重新打分。
+    // 若是逻辑/标准升级导致全量重算，则不加保旧标志，全部按最新标准重算。
+    var _onlyMissing = _resultsMissing && (data.qcLogicVersion === QC_LOGIC_VERSION) && (_fpCloud === _fpNow);
+    if (_onlyMissing && results.length > 0) {
+      QC_APPEND_PRESERVE = true;
+      QC_APPEND_OLD_COUNT = rawData.length;
+    }
+    showToast(_staleReason + (_onlyMissing ? '（保留已有结果，只补缺失部分）...' : '，正在按最新标准重新质检全部明细...'), 'info');
     setTimeout(runQualityCheck, 400);
   }
   // 数据整体替换后必须立即重算申诉角标：否则"云端已连接·数据为最新"短路分支不刷新 UI 时，
@@ -7587,12 +7626,15 @@ function qcSyncAppealsFromCloud() {
     setTimeout(function () {
       try { if (typeof cloudDb !== 'undefined' && cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
     }, 2600);
-    // 低频兜底：登录态下每 15s 重算一次，并拉一次云端最新申诉状态（内部有节流/并发保护）
+    // 2026-11-21g 多人实时协作：每 4s 拉一次云端 main，用内容 hash 对比——
+    // 无变化则零渲染成本短路，有变化则全量以云端为准刷新（申诉/审核/质检结果/新增数据一并同步）。
+    // qcFetchLatestAndRefresh(true) 内部有 hash 短路 + 并发保护，高频调用安全。
     setInterval(function () {
       try { qcRefreshAppealBadges(); } catch (e) {}
+      try { if (cloudDb) qcFetchLatestAndRefresh(true); } catch (e) {}   // 云端 main 权威同步（4s）
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
-      try { if (typeof cloudDb !== 'undefined' && cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
-    }, 15000);
+      try { if (cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
+    }, 4000);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
