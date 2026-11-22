@@ -1072,16 +1072,9 @@ function qcForceResync() {
     return ok;
   });
 }
-// 页面首次加载 / 标签页重新可见时，立即拉取最新（节流 5s）
-(function(){
-  function onVisible(){
-    try { if (document.visibilityState === 'visible') qcFetchLatestAndRefresh(false); } catch (e) {}
-  }
-  try {
-    document.addEventListener('visibilitychange', onVisible);
-    window.addEventListener('focus', onVisible);
-  } catch (e) {}
-})();
+// 【20261122b·需求2】禁止切标签页/窗口聚焦时自动刷新数据。
+// 数据刷新只保留三个触发点：① 打开页面时 ② 用户点「🔄 强制同步」按钮 ③ 导入/上传数据保存后。
+// 避免切回页面时云端旧数据覆盖本地新数据，导致"数据来回跳动"。
 // v2 缓存命名空间：旧版(v1)缓存可能在特定机器上与云端 hash 巧合一致、导致"数据为最新"短路却仍是旧申诉数据。
 // 升命名空间后本机旧缓存被彻底弃用，首次一定走云端全量刷新，避免"别人刷新了、我这台没刷新"。
 var QC_CACHE_KEY = 'qc_dashboard_cache_v2';
@@ -6332,8 +6325,20 @@ function importAllData(data, source) {
   // 云端权威来源：用云端知识库刷新内存，并写入本地权威副本。
   // 本地来源（缓存/URL快照）：不信任其携带的知识库，优先用本地权威副本恢复内存，杜绝回退内置旧版。
   if (__fromCloud && data.knowledgeBase && data.knowledgeBase.length) {
-    KNOWLEDGE_BASE = data.knowledgeBase;
-    try { localStorage.setItem('qc_kb_authoritative_v1', JSON.stringify(KNOWLEDGE_BASE)); } catch (e) {}
+    // 【20261122b·需求3】云端 KB 只有比本地权威副本"更新"才采纳：比较最新 updatedAt/createdAt，
+    // 其次条数。防止旧批次云端写入（如工具端只带 4 条旧知识）把本地新版知识库顶回旧版本。
+    function __kbStamp(arr) {
+      var t = '', c = 0;
+      try { for (var i = 0; i < arr.length; i++) { var it = arr[i] || {}; var s = String(it.updatedAt || it.createdAt || ''); if (s > t) t = s; c++; } } catch (e) {}
+      return { t: t, c: c };
+    }
+    var __kbCloud = __kbStamp(data.knowledgeBase), __kbLocal = { t: '', c: 0 };
+    try { var _authKb = JSON.parse(localStorage.getItem('qc_kb_authoritative_v1') || 'null'); if (Array.isArray(_authKb)) __kbLocal = __kbStamp(_authKb); } catch (e) {}
+    var __kbCloudNewer = (__kbLocal.c === 0) || (__kbCloud.t > __kbLocal.t) || (__kbCloud.t === __kbLocal.t && __kbCloud.c > __kbLocal.c);
+    if (__kbCloudNewer) {
+      KNOWLEDGE_BASE = data.knowledgeBase;
+      try { localStorage.setItem('qc_kb_authoritative_v1', JSON.stringify(KNOWLEDGE_BASE)); } catch (e) {}
+    }
   } else if (!__fromCloud) {
     try {
       var _kbLocal = localStorage.getItem('qc_kb_authoritative_v1');
@@ -7710,9 +7715,12 @@ function qcSyncAppealsFromCloud() {
     // 2026-11-21g 多人实时协作：每 4s 拉一次云端 main，用内容 hash 对比——
     // 无变化则零渲染成本短路，有变化则全量以云端为准刷新（申诉/审核/质检结果/新增数据一并同步）。
     // qcFetchLatestAndRefresh(true) 内部有 hash 短路 + 并发保护，高频调用安全。
+    // 【20261122b·需求2】后台轮询不再拉取云端 main 主数据（此前每 4s 整包覆盖一次，
+    // 云端若是旧批次就会把本地新数据顶掉，这是"数据来回跳动/突然变成其他数据"的直接根因）。
+    // 主数据刷新只由：打开页面 / 手动「🔄 强制同步」/ 导入保存后 三个入口触发。
+    // 申诉与角标走独立云端行（qc_appeal_*），带合并逻辑，保持原有 4s 同步不受影响。
     setInterval(function () {
       try { qcRefreshAppealBadges(); } catch (e) {}
-      try { if (cloudDb) qcFetchLatestAndRefresh(true); } catch (e) {}   // 云端 main 权威同步（4s）
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
       try { if (cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
     }, 4000);
