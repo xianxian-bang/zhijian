@@ -687,7 +687,39 @@ function qcLoadSnapshotFallback() {
   // 造成「已经删掉的数据又冒出来」。现在只读失败仅提示，绝不自动替换用户数据。
   try { setCloudStatus('云端暂不可用，请稍后刷新重试', 'var(--danger)'); } catch (e) {}
 }
-function cloudLoadState() { if (!cloudDb) return Promise.resolve(); try { qcCloudLoadUsers(); } catch (e) {} try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {} return qcLoadDeleteRegistry().then(function() { return cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key','main').limit(1).then(function(res) { if (res.error) throw res.error; var row = res.data && res.data.length ? res.data[0] : null; if (row && row.state_json) { var data = qcDecodeStateJson(row.state_json); if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); } } else { try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} } setCloudStatus('云端已连接', 'var(--success)'); }); }).catch(function(err){ var msg = err && (err.message || err.details || err.hint) || '接口返回异常'; setCloudStatus('云端读取失败', 'var(--danger)'); qcLoadSnapshotFallback(); }); }
+function cloudLoadState() {
+  if (!cloudDb) return Promise.resolve();
+  try { qcCloudLoadUsers(); } catch (e) {}
+  try { if (typeof qcCloudLoadAppealReads === 'function') qcCloudLoadAppealReads(); } catch (e) {}
+  // 【20261122c】用单例读 main，与 qcFetchLatestAndRefresh 共用同一次下载，杜绝并发重复拉取
+  return qcLoadDeleteRegistry().then(function() {
+    // 【20261122d·探针优先】先比对 updated_at，缓存即最新则不下载全量
+    return qcProbeMainUpd().catch(function() { return null; }).then(function(upd) {
+      var cachedUpd = null; try { cachedUpd = localStorage.getItem(QC_MAIN_UPD_KEY); } catch (e) {}
+      var hasCache = false; try { hasCache = !!localStorage.getItem(QC_CACHE_KEY); } catch (e) {}
+      if (upd && upd !== 'EMPTY' && hasCache && cachedUpd && upd === cachedUpd) {
+        QC_MAIN_FRESH_AT = Date.now(); QC_CLOUD_LAST_OK = Date.now(); QC_BOOTSTRAP_SYNCED = true;
+        setCloudStatus('云端已连接 · 数据为最新', 'var(--success)');
+        return;
+      }
+      return qcFetchMainRow(false).then(function(res) {
+      if (!res) return;
+      if (res.error) throw res.error;
+      var row = res.data && res.data.length ? res.data[0] : null;
+      if (row && row.state_json) {
+        try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
+        var data = qcDecodeStateJson(row.state_json);
+        if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); }
+      } else {
+        try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); localStorage.removeItem(QC_MAIN_UPD_KEY); } catch (e) {}
+      }
+      });
+    });
+  }).catch(function(err) {
+    setCloudStatus('云端读取失败', 'var(--danger)');
+    qcLoadSnapshotFallback();
+  });
+}
 // 写云端前先读一次：把后台工具/其他设备刚上传、本地还没有的记录并进来，避免整份覆盖导致新数据丢失
 // 申诉变更时间戳：用于多人协作时判断同一订单上谁的申诉/审核结果更新
 function qcAppealStamp(r) {
@@ -891,16 +923,18 @@ function qcAuditRestoreFromCloud() {
 }
 function cloudSaveState() {
   if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化'));
+  // 【20261122e·防写爆①写单例】已有一次保存在进行中时直接复用它，杜绝连续触发（连点按钮/旧格式静默重写+导入碰撞）造成的重复整包写入
+  if (QC_WRITE_PROMISE) { try { setCloudStatus('正在同步，请稍候…', 'var(--warning)'); } catch (e) {} return QC_WRITE_PROMISE; }
   // 写回前并行做两件事：① 并入云端最新记录（他人上传/申诉）② 拉取最新永久删除名单
   var pre = Promise.all([
-    cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1)
+    qcFetchMainRow(true)
       .then(function(res) {
         var row = res && res.data && res.data.length ? res.data[0] : null;
         if (row && row.state_json) { try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {} }
       }).catch(function() { return null; }),
     qcLoadDeleteRegistry()
   ]);
-  return pre.then(function() {
+  QC_WRITE_PROMISE = pre.then(function() {
     var payloadObj = cloudStatePayload();
     // 任意端字段归一：写回云端前把中英文/别名字段统一为标准字段，保证所有设备读到的都是同一套字段
     try { qcNormalizeAmountOdrFields(payloadObj); } catch (e) {}
@@ -910,18 +944,38 @@ function cloudSaveState() {
     try { qcRealignData(payloadObj); } catch (e) {}
     // 同步内存：让 UI 看到的条数与写回云端的一致（否则明细表数字和云端对不上）
     if (payloadObj.results && payloadObj.rawData) { results = payloadObj.results; rawData = payloadObj.rawData; }
+    // 【20261122e·防写爆②内容去重】数据与上次成功写入完全一致时不重复整包写入——
+    // 数据库每次更新都会把旧版本留成死数据，重复写同样的内容是上次"表被写爆"的直接元凶
+    var slimJson = qcSlimPayloadString(payloadObj);
+    var wHash = qcStateHash(slimJson);
+    var lastHash = null; try { lastHash = localStorage.getItem(QC_LAST_WRITE_HASH_KEY); } catch (e) {}
+    if (lastHash && lastHash === wHash) {
+      try { qcSaveCacheFromPayload(payloadObj); } catch (e) {}
+      setCloudStatus('数据未变化，无需重复同步', 'var(--success)');
+      QC_WRITE_PROMISE = null;
+      return { skipped: true };
+    }
     var payload = { state_key: 'main', state_json: qcEncodeStateJson(payloadObj), updated_by: 'anonymous' };
+    // 【20261122e·防写爆③体积警戒】压缩后仍超 6MB 说明数据异常膨胀，立即明确提示而不是默默写爆
+    if (payload.state_json && payload.state_json.length > 6000000) { try { showToast('警告：云端数据体积异常膨胀（约 ' + (Math.round(payload.state_json.length / 10000) / 100) + 'MB），请截图反馈', 'error'); } catch (e) {} }
     try { qcSaveCacheFromPayload(payloadObj); } catch (e) {}
     return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
       if (res.error) throw res.error;
-      setCloudStatus('已同步云端', 'var(--success)'); return res;
+      // 【20261122d】保存成功后记录云端新 updated_at：本地缓存此时=云端最新，下次启动探针可直接跳过全量下载
+      try { var nu = res && res.data && res.data[0] && res.data[0].updated_at; if (nu) { localStorage.setItem(QC_MAIN_UPD_KEY, nu); } else { localStorage.removeItem(QC_MAIN_UPD_KEY); } } catch (e) {}
+      try { localStorage.setItem(QC_LAST_WRITE_HASH_KEY, wHash); } catch (e) {}
+      setCloudStatus('已同步云端', 'var(--success)');
+      QC_WRITE_PROMISE = null;
+      return res;
     });
   }).catch(function(err){
+    QC_WRITE_PROMISE = null;
     showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error');
     throw err;
   });
+  return QC_WRITE_PROMISE;
 }
-function cloudClearState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').delete().eq('state_key','main').then(function(res) { if (res.error) throw res.error; try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {} setCloudStatus('已同步云端', 'var(--success)'); }).catch(function(err){ showToast('云端清空失败：' + (err.message || ''), 'error'); throw err; }); }
+function cloudClearState() { if (!cloudDb) return Promise.resolve(); return cloudDb.from('qc_dashboard_state').delete().eq('state_key','main').then(function(res) { if (res.error) throw res.error; try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); localStorage.removeItem(QC_LAST_WRITE_HASH_KEY); localStorage.removeItem(QC_MAIN_UPD_KEY); } catch (e) {} setCloudStatus('已同步云端', 'var(--success)'); }).catch(function(err){ showToast('云端清空失败：' + (err.message || ''), 'error'); throw err; }); }
 function initCloudBase() { try { qcLoadLocalRegistry(); } catch (e) {} if (!window.CloudBaseSDK) { setCloudStatus('云端SDK加载失败', 'var(--danger)'); return; } try { cloudApp = window.CloudBaseSDK.init({ env: CLOUDBASE_ENV_ID, region: CLOUDBASE_REGION, accessKey: CLOUDBASE_ACCESS_KEY, auth: { detectSessionInUrl: true } }); cloudDb = cloudApp.rdb(); cloudReady = true; var auth = cloudApp.auth; if (auth && typeof auth.signInAnonymously === 'function') { auth.signInAnonymously().then(function(res) { if (res && res.error) throw res.error; cloudLoadState(); }).catch(function(err) { setCloudStatus('匿名认证失败', 'var(--danger)'); showToast('云端匿名认证失败，尝试加载本地快照…', 'info'); qcLoadSnapshotFallback(); }); } else { cloudLoadState(); } } catch(e) { setCloudStatus('云端初始化失败', 'var(--danger)'); showToast('云端初始化失败：' + (e.message || ''), 'error'); } }
 window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 
@@ -938,6 +992,49 @@ var QC_FRESH_SYNC_AT = 0, QC_FRESH_SYNC_BUSY = false;
 var QC_CLOUD_LAST_OK = 0;
 // 启动后是否已完成首次"强制用云端数据刷新UI"。首次一定是云端为准，避免本地旧缓存/网址旧快照覆盖最新数据。
 var QC_BOOTSTRAP_SYNCED = false;
+// 【20261122c·单例 main 下载】main 行约 2.6MB，此前启动被 cloudLoadState 与
+// qcFetchLatestAndRefresh 并发重复下载，两个大响应互相抢带宽 → 首个也要 80~100 秒，
+// 第二个直接卡死，看板在前 100 秒全显示 0。这里把「读 main」统一为单例 Promise：
+// 12 秒窗口内所有调用复用同一次网络请求，彻底消除重复下载。
+var QC_MAINROW_PROMISE = null, QC_MAINROW_AT = 0, QC_MAINROW_TTL = 12000;
+function qcFetchMainRow(force) {
+  try { if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(null); } catch (e) { return Promise.resolve(null); }
+  var now = Date.now();
+  if (!force && QC_MAINROW_PROMISE && (now - QC_MAINROW_AT) < QC_MAINROW_TTL) return QC_MAINROW_PROMISE;
+  QC_MAINROW_AT = now;
+  var q = cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key', 'main').limit(1)
+    .then(function(res) { QC_CLOUD_LAST_OK = Date.now(); return res; })
+    .catch(function(err) { QC_MAINROW_PROMISE = null; QC_MAINROW_AT = 0; throw err; });
+  QC_MAINROW_PROMISE = q;
+  return q;
+}
+// 【20261122d·时间戳探针】启动时先查几十字节的 updated_at（亚秒级返回，不下载 2.6MB 大包）：
+// 本地缓存的 updated_at 与云端一致 → 缓存即云端最新，跳过全量下载，零切换零跳动；
+// 不一致 → 才走单例全量下载，一次性切换到最新并弹明确提示。绝不回退、绝不来回跳。
+var QC_MAIN_UPD_KEY = 'qc_main_updated_at_v1';
+var QC_MAIN_FRESH_AT = 0;
+var QC_BOOT_PROBE_PROMISE = null;
+function qcToastOnce(msg, type) {
+  try {
+    var t = Date.now();
+    if (qcToastOnce._at && t - qcToastOnce._at < 3000) return;
+    qcToastOnce._at = t;
+    if (typeof showToast === 'function') showToast(msg, type || 'success');
+  } catch (e) {}
+}
+function qcProbeMainUpd() {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(null);
+  if (!QC_BOOT_PROBE_PROMISE) {
+    QC_BOOT_PROBE_PROMISE = cloudDb.from('qc_dashboard_state').select('updated_at').eq('state_key', 'main').limit(1)
+      .then(function(res) {
+        if (res.error) throw res.error;
+        var row = res.data && res.data.length ? res.data[0] : null;
+        return row ? (row.updated_at || null) : 'EMPTY'; // 'EMPTY' = 云端 main 已被删除，必须走全量逻辑处理空库
+      })
+      .catch(function(err) { QC_BOOT_PROBE_PROMISE = null; throw err; });
+  }
+  return QC_BOOT_PROBE_PROMISE;
+}
 // 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
 // 2026-11-21f：云端确认为「空库」时，把本地缓存与界面一并重置到全新空库状态。
 // 删除后旧数据之所以会「复活」，是因为云端 main 已删、本地缓存仍留着旧数据，
@@ -960,11 +1057,29 @@ function qcFetchLatestAndRefresh(force) {
   try { if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(false); } catch (e) { return Promise.resolve(false); }
   var now = Date.now();
   if (!force && (QC_FRESH_SYNC_BUSY || now - QC_FRESH_SYNC_AT < 5000)) return Promise.resolve(false);
+  // 【20261122d】启动时等待时间戳探针结果再决定：缓存=云端最新 → 跳过全量下载（零跳动）；
+  // 探针慢于 60ms 启动也不会竞态（这里主动 await 同一个探针 Promise）。
+  if (!force && typeof qcProbeMainUpd === 'function') {
+    QC_FRESH_SYNC_AT = now;
+    return qcProbeMainUpd().catch(function() { return null; }).then(function(upd) {
+      if (upd && upd !== 'EMPTY') {
+        var cu = null; try { cu = localStorage.getItem(QC_MAIN_UPD_KEY); } catch (e) {}
+        var hc = false; try { hc = !!localStorage.getItem(QC_CACHE_KEY); } catch (e) {}
+        if (hc && cu && upd === cu) {
+          QC_MAIN_FRESH_AT = Date.now(); QC_CLOUD_LAST_OK = Date.now(); QC_BOOTSTRAP_SYNCED = true;
+          try { setCloudStatus('云端已连接 · 数据为最新', 'var(--success)'); } catch (e) {}
+          return false;
+        }
+      }
+      return qcFetchLatestAndRefresh(true, 0, true);
+    });
+  }
   QC_FRESH_SYNC_AT = now; QC_FRESH_SYNC_BUSY = true;
   var attempt = arguments.length > 1 ? arguments[1] : 0;   // 网络失败自动重试计数（最多2次）
+  var reuseRow = arguments.length > 2 ? !!arguments[2] : false; // 【20261122d】探针触发时复用单例下载，避免双请求
   try {
     return qcLoadDeleteRegistry().then(function() {
-    return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key','main').limit(1).then(function(res){
+    return qcFetchMainRow(force && !reuseRow).then(function(res){
       QC_FRESH_SYNC_BUSY = false;
       var row = res && res.data && res.data.length ? res.data[0] : null;
       if (!row || !row.state_json) {
@@ -1003,6 +1118,7 @@ function qcFetchLatestAndRefresh(force) {
         if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 6000); }
         return false;
       }
+      try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
       var d = qcDecodeStateJson(row.state_json); if (!d) {
         // 【需求4·防误报】解析失败多为压缩格式过渡态，静默重试即可，不误导用户"网络异常"
         try { setCloudStatus('云端数据校验中，正在重试…', 'var(--warning)'); } catch (e) {}
@@ -1028,6 +1144,7 @@ function qcFetchLatestAndRefresh(force) {
       qcSaveCacheFromPayload(d);
       try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
       try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
+      try { qcToastOnce('检测到云端有更新，已切换为最新数据', 'success'); } catch (e) {}
       // 同步成功后强制刷新三色申诉角标（防止停留在旧缓存时的旧数字，如"待审核 1"）
       try { if (typeof qcRefreshAppealBadges === 'function') qcRefreshAppealBadges(); } catch (e) {}
       return true;
@@ -1087,14 +1204,45 @@ function qcSlimPayloadString(data) {
     return JSON.stringify(slim);
   } catch (e) { return ''; }
 }
+// 【20261122e·localStorage 防护】旧版遗留键清理：v1 缓存早已被 v2 取代，
+// 若还在会白占几百 KB~几 MB 空间；若 v2 缺失而 v1 还在则先迁移再清，保证不丢缓存。
+var QC_LAST_WRITE_HASH_KEY = 'qc_last_write_hash_v1';
+var QC_WRITE_PROMISE = null;
+function qcCleanupLegacyStorage() {
+  try {
+    var v2 = localStorage.getItem(QC_CACHE_KEY);
+    var v1 = localStorage.getItem('qc_dashboard_cache_v1');
+    if (!v2 && v1) {
+      try { localStorage.setItem(QC_CACHE_KEY, v1); } catch (e) {}
+      var h1 = localStorage.getItem('qc_dashboard_cache_hash_v1');
+      if (h1) { try { localStorage.setItem(QC_CACHE_HASH_KEY, h1); } catch (e) {} }
+    }
+    localStorage.removeItem('qc_dashboard_cache_v1');
+    localStorage.removeItem('qc_dashboard_cache_hash_v1');
+  } catch (e) {}
+}
 function qcSaveCacheFromPayload(dataObj) {
   try {
     if (typeof LZString === 'undefined' || !dataObj || !dataObj.results || !dataObj.rawData) return;
     var json = qcSlimPayloadString(dataObj);
     if (!json) return;
     var enc = LZString.compressToUTF16(json);
-    localStorage.setItem(QC_CACHE_KEY, enc);
-    localStorage.setItem(QC_CACHE_HASH_KEY, qcStateHash(json));
+    // 【20261122e】体积警戒：缓存超过 4.5M 字符（localStorage 限额约 5M）说明数据膨胀，提前预警
+    if (enc.length > 4500000) { try { console.warn('[QC] 本机缓存体积接近上限：' + enc.length + ' 字符'); } catch (e) {} }
+    try {
+      localStorage.setItem(QC_CACHE_KEY, enc);
+    } catch (e1) {
+      // 【20261122e】空间不足：先清旧版遗留键再重试一次；仍失败则停用本机缓存（页面自动切纯云端模式，功能不受影响）
+      try { qcCleanupLegacyStorage(); } catch (e2) {}
+      try {
+        localStorage.setItem(QC_CACHE_KEY, enc);
+      } catch (e3) {
+        try { console.warn('[QC] localStorage 空间不足，本机缓存已停用，页面改为纯云端模式'); } catch (e4) {}
+        try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e5) {}
+        return;
+      }
+    }
+    try { localStorage.setItem(QC_CACHE_HASH_KEY, qcStateHash(json)); } catch (e6) {}
   } catch (e) { /* localStorage 满或不可用，静默跳过，不影响主流程 */ }
 }
 function qcLoadCacheFast() {
@@ -1134,6 +1282,7 @@ function qcCacheSyncFromCloud(data, rawStateJson) {
     QC_BOOTSTRAP_SYNCED = true;
     importAllData(data, 'cloud');
     qcSaveCacheFromPayload(data);
+    try { qcToastOnce('检测到云端有更新，已切换为最新数据', 'success'); } catch (e) {}
     // 首次同步后清除网址里的旧 #d= 快照，避免下次刷新又灌入旧数据
     try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
   } catch (e) { QC_BOOTSTRAP_SYNCED = true; importAllData(data, 'cloud'); }
@@ -5896,7 +6045,8 @@ var AMZ_SYNC_ANON = 'sb_publishable_zuV-Roc02QN2epZYwb0SJQ_qOB9felB';
 function openAmzSyncModal() { if (AUTH && !requireAdmin('从 AMZ 同步')) return;
   if (!requireCloudAdmin()) return;
   try {
-    var c = JSON.parse(sessionStorage.getItem('qc_amz_cred') || 'null');
+    // 【20261122c】优先读长期凭据(localStorage)，兼容旧会话凭据(sessionStorage)
+    var c = JSON.parse(localStorage.getItem('qc_amz_cred') || sessionStorage.getItem('qc_amz_cred') || 'null');
     if (c && c.u) document.getElementById('amzSyncUser').value = c.u;
     if (c && c.p) document.getElementById('amzSyncPwd').value = c.p;
   } catch (e) {}
@@ -5910,6 +6060,8 @@ function amzSyncRpc(fn, body, token) {
   return fetch(AMZ_SYNC_URL + '/rest/v1/rpc/' + fn, { method: 'POST', headers: headers, body: JSON.stringify(body || {}) })
     .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error((j && (j.message || j.detail)) || ('HTTP ' + r.status)); return j; }); });
 }
+// 【20261122c】token 会话内缓存：同一次打开页面只登录一次，避免反复登录导致"同步不稳定"
+var QC_AMZ_TOKEN = null, QC_AMZ_TOKEN_USER = '';
 function confirmSyncOrgFromAMZ() {
   if (!requireCloudAdmin()) return;
   var u = document.getElementById('amzSyncUser').value.trim();
@@ -5918,8 +6070,14 @@ function confirmSyncOrgFromAMZ() {
   var btn = document.getElementById('amzSyncBtn');
   if (!u || !pwd) { msg.textContent = '请填写 AMZ 用户名和密码'; return; }
   msg.textContent = '正在连接 AMZ…'; btn.disabled = true;
-  amzSyncRpc('amz_login', { p_user: u, p_pwd: pwd }).then(function (login) {
-    if (!login || !login.ok || !login.token) throw new Error('AMZ 登录失败，请检查用户名/口令');
+  var loginP = (QC_AMZ_TOKEN && QC_AMZ_TOKEN_USER === u)
+    ? Promise.resolve({ ok: true, token: QC_AMZ_TOKEN })
+    : amzSyncRpc('amz_login', { p_user: u, p_pwd: pwd }).then(function (login) {
+        if (!login || !login.ok || !login.token) throw new Error('AMZ 登录失败，请检查用户名/口令');
+        QC_AMZ_TOKEN = login.token; QC_AMZ_TOKEN_USER = u;
+        return login;
+      });
+  loginP.then(function (login) {
     msg.textContent = '已登录，正在读取达标设置…';
     return amzSyncRpc('amz_pull', { p_token: login.token }, login.token);
   }).then(function (data) {
@@ -5945,11 +6103,17 @@ function confirmSyncOrgFromAMZ() {
     for (var _ni = 0; _ni < newOrg.length; _ni++) { var _ld = _oldLeaders[newOrg[_ni].group]; if (_ld && newOrg[_ni].agents.indexOf(_ld) >= 0) newOrg[_ni].leader = _ld; }
     ORG_DATA = newOrg;
     saveOrg(); renderOrg(); cloudSaveState();
+    // 【20261122c】凭据长期保存，下次打开无需重新填写
+    try { localStorage.setItem('qc_amz_cred', JSON.stringify({ u: u, p: pwd })); } catch (e) {}
     try { sessionStorage.setItem('qc_amz_cred', JSON.stringify({ u: u, p: pwd })); } catch (e) {}
     closeAmzSyncModal(); btn.disabled = false;
     showToast('已从 AMZ 同步组织架构：' + newOrg.length + ' 个分类组 / ' + agentN + ' 名客服', 'success');
   }).catch(function (err) {
-    msg.textContent = '同步失败：' + ((err && err.message) || err); btn.disabled = false;
+    // 【20261122c】失败时保留凭据，明确提示可直接点「同步」重试；登录失效时清 token 强制重新登录
+    QC_AMZ_TOKEN = null; QC_AMZ_TOKEN_USER = '';
+    var em = (err && err.message) || String(err);
+    msg.innerHTML = '同步失败：' + em + ' — 请检查网络/口令后直接点「同步」重试';
+    btn.disabled = false;
   });
 }
 
@@ -6466,8 +6630,10 @@ function loadFromUrlHash() {
 // 初始化
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
-  // 【需求1·打开即最新】不再先用本地缓存渲染旧数据。优先拉云端；只有云端读取失败时才回退缓存。
-  // 缓存秒开能力保留为函数 qcLoadCacheFast()，仅在 qcFetchLatestAndRefresh 判定网络失败时调用。
+  // 【20261122c·修复看板归零】先用本地缓存秒开渲染，看板立刻有真实数据（不再是 0）；
+  // 随后单例拉云端：hash 相同不重绘（无跳动），不同才更新为最新。二者共用一次 main 下载。
+  try { qcCleanupLegacyStorage(); } catch (e) {} // 【20261122e】清理旧版遗留键，释放 localStorage 空间
+  try { qcLoadCacheFast(); } catch (e) {}
   try { setTimeout(function(){ qcFetchLatestAndRefresh(false); }, 60); } catch (e) {}
   try { qcAuthBoot(); } catch (e) { console.warn('auth boot failed', e); }
   document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
