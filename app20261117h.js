@@ -933,6 +933,9 @@ window.addEventListener('cloudbase-sdk-ready', initCloudBase);
 // ============================================================
 // ---- 打开即最新：主动拉取 + 回邮同步刷新（2026-11-18 h） ----
 var QC_FRESH_SYNC_AT = 0, QC_FRESH_SYNC_BUSY = false;
+// 【需求4·防误报】全局拉取去抖：即便 force 也不允许多个并发请求叠加；
+// 同时记录最近一次成功时间，网络抖动时不会反复弹红字。
+var QC_CLOUD_LAST_OK = 0;
 // 启动后是否已完成首次"强制用云端数据刷新UI"。首次一定是云端为准，避免本地旧缓存/网址旧快照覆盖最新数据。
 var QC_BOOTSTRAP_SYNCED = false;
 // 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
@@ -969,18 +972,41 @@ function qcFetchLatestAndRefresh(force) {
         // ① 查询成功但云端确实没有 main 行 = 用户主动清空后的合法空库 → 清空本地缓存与 UI，
         //    绝不能继续显示本机旧缓存（否则用户会以为没删掉，且写操作会把旧数据复活写回云端）。
         // ② 查询本身失败（res.error / 无 data 字段）= 网络异常 → 保留本地缓存并重试。
-        var isNetworkError = !!(res && res.error) || !(res && res.data);
-        if (!isNetworkError) {
-          try { qcApplyEmptyCloudState(); } catch (e) {}
+        // 【需求4·防误报】只有「明确服务端错误」或「无 data 字段」才算网络异常；
+        // data=[]（合法的空库）必须连续两次确认为空才敢清空，避免单次抖动把线上数据当空库。
+        var errObj = res && res.error;
+        var hasDataField = !!(res && Object.prototype.hasOwnProperty.call(res, 'data'));
+        var isNetworkError = !!errObj || !hasDataField;
+        if (!isNetworkError && res && Array.isArray(res.data)) {
+          // data=[] 视为「疑似空库」：先不清空，交给下一轮再确认一次
+          var emptySeen = (window.QC_EMPTY_CLOUD_SEEN || 0) + 1;
+          window.QC_EMPTY_CLOUD_SEEN = emptySeen;
+          if (emptySeen >= 2) {
+            try { qcApplyEmptyCloudState(); } catch (e) {}
+            window.QC_EMPTY_CLOUD_SEEN = 0;
+          } else {
+            try { setCloudStatus('云端返回空数据，正在二次确认…', 'var(--warning)'); } catch (e) {}
+            if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 1500); }
+          }
           return false;
         }
-        try { setCloudStatus('⚠ 云端没读到数据（网络异常），当前显示的是本机缓存 — 请点右上角「🔄 强制同步」重试', 'var(--danger)'); } catch (e) {}
-        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+        if (!isNetworkError) return false;
+        // 【需求4·防误报】若本会话近期成功读到过云端，则短暂失败属网络抖动：静默重试，不弹红字。
+        var recentlyOk = (Date.now() - QC_CLOUD_LAST_OK) < 120000;
+        if (recentlyOk) {
+          try { setCloudStatus('云端短暂波动，正在自动重试…', 'var(--warning)'); } catch (e) {}
+        } else {
+          try { setCloudStatus('⚠ 暂时无法连接云端（已保留上次数据），正在自动重试…', 'var(--danger)'); } catch (e) {}
+        }
+        // 网络失败回退缓存：用本地缓存渲染，保证知识库/组织架构不丢失（缓存中含完整配置）
+        if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
+        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 6000); }
         return false;
       }
       var d = qcDecodeStateJson(row.state_json); if (!d) {
-        try { setCloudStatus('⚠ 云端数据解析失败，当前显示的是本机缓存 — 请点右上角「🔄 强制同步」重试', 'var(--danger)'); } catch (e) {}
-        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+        // 【需求4·防误报】解析失败多为压缩格式过渡态，静默重试即可，不误导用户"网络异常"
+        try { setCloudStatus('云端数据校验中，正在重试…', 'var(--warning)'); } catch (e) {}
+        if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 3000); }
         return false;
       }
       if (!d || !d.results || !d.rawData) return false;
@@ -991,12 +1017,14 @@ function qcFetchLatestAndRefresh(force) {
       // 本会话首次云端拉取：即使 hash 相同也强制刷新一次，确保 UI 一定等于云端最新（防本地旧缓存/网址旧快照残留）
       if (cachedHash === cloudHash && QC_BOOTSTRAP_SYNCED) {
         // 内容一致且已强制同步过：不动 UI，避免打断；确保回邮/缓存与云端一致（幂等）
+        QC_CLOUD_LAST_OK = Date.now();
         try { setCloudStatus('云端已连接 · 数据为最新', 'var(--success)'); } catch (e) {}
         return false;
       }
       // 首次同步 或 有更新：整体替换（importAllData 内已按 rawData 覆盖回邮），并刷新缓存
       QC_BOOTSTRAP_SYNCED = true;
-      importAllData(d);
+      QC_CLOUD_LAST_OK = Date.now();
+      importAllData(d, 'cloud');
       qcSaveCacheFromPayload(d);
       try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
       try { setCloudStatus('已同步到最新数据', 'var(--success)'); } catch (e) {}
@@ -1007,8 +1035,10 @@ function qcFetchLatestAndRefresh(force) {
     }).catch(function(err){
       // 网络失败：绝不能静默——状态栏红字提示 + 8秒后自动重试，最多重试2次
       QC_FRESH_SYNC_BUSY = false;
-      try { setCloudStatus('⚠ 云端同步失败（网络问题），当前显示的是本机缓存，可能与最新数据不一致 — 点「🔄 强制同步」立即重试', 'var(--danger)'); } catch (e) {}
-      if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 8000); }
+      var recentlyOk2 = (Date.now() - QC_CLOUD_LAST_OK) < 120000;
+      try { setCloudStatus(recentlyOk2 ? '云端短暂波动，正在自动重试…' : '⚠ 暂时无法连接云端（已保留上次数据），正在自动重试…', recentlyOk2 ? 'var(--warning)' : 'var(--danger)'); } catch (e) {}
+      if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
+      if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 6000); }
       return false;
     });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
@@ -1082,7 +1112,7 @@ function qcLoadCacheFast() {
     if (!json) return false;
     var data = JSON.parse(json);
     if (!data || !data.results || !data.rawData || !data.results.length) return false;
-    importAllData(data);
+    importAllData(data, 'local');
     setCloudStatus('本地缓存已加载，正在同步云端…', 'var(--warning)');
     if (typeof qcRefreshAppealBadges === 'function') { try { qcRefreshAppealBadges(); } catch (e) {} }
     return true;
@@ -1109,11 +1139,11 @@ function qcCacheSyncFromCloud(data, rawStateJson) {
     }
     // 首次同步 或 云端有更新：重新渲染并刷新缓存
     QC_BOOTSTRAP_SYNCED = true;
-    importAllData(data);
+    importAllData(data, 'cloud');
     qcSaveCacheFromPayload(data);
     // 首次同步后清除网址里的旧 #d= 快照，避免下次刷新又灌入旧数据
     try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
-  } catch (e) { QC_BOOTSTRAP_SYNCED = true; importAllData(data); }
+  } catch (e) { QC_BOOTSTRAP_SYNCED = true; importAllData(data, 'cloud'); }
 }
 // ============================================================
 // Tab 切换
@@ -3171,7 +3201,9 @@ function renderMultiSel(key) {
   var h = '<button type="button" class="msel-btn" onclick="toggleMultiPanel(\'' + key + '\')">'
         + escHtml(multiBtnText(key)) + ' <span class="msel-caret">▾</span></button>';
   h += '<div class="msel-panel" id="mselpanel_' + key + '" style="display:none;">';
-  h += '<div class="msel-tools"><span onclick="setMultiAll(\'' + key + '\',true)">全选</span><span onclick="setMultiAll(\'' + key + '\',false)">清空</span></div>';
+  h += '<div class="msel-tools"><span onclick="setMultiAll(\'' + key + '\',true)">全选</span>'
+     + (key === 'account' ? '<span class="msel-search-wrap"><input type="text" id="mselSearch_account" class="msel-search-input" placeholder="搜索账号，多个用英文逗号分隔" onkeydown="if(event.key===\'Enter\'){event.preventDefault();searchMultiAccount();}"><button type="button" class="msel-search-btn" onclick="searchMultiAccount()">搜索</button></span>' : '')
+     + '<span onclick="setMultiAll(\'' + key + '\',false)">清空</span></div>';
   for (var i = 0; i < opts.length; i++) {
     var v = opts[i], on = vals.indexOf(v) >= 0;
     h += '<label class="msel-opt"><input type="checkbox" value="' + escHtml(v) + '"' + (on ? ' checked' : '')
@@ -3205,6 +3237,33 @@ function onMultiCheck(key, el) {
   clearHiddenSelect(key);
   updateMultiBtn(key);
   renderDetailTable();
+}
+// 【需求5】账号搜索：支持单个账号或英文逗号分隔多个账号；精确匹配下拉选项后写入多选状态。
+function searchMultiAccount() {
+  var input = document.getElementById('mselSearch_account');
+  var raw = input ? String(input.value || '') : '';
+  var terms = raw.split(',').map(function(s){ return String(s||'').trim(); }).filter(function(s){ return s.length > 0; });
+  if (!terms.length) { showToast('请输入要搜索的账号', 'info'); return; }
+  var opts = multiOptions('account');
+  var hits = [];
+  for (var i = 0; i < terms.length; i++) {
+    var t = terms[i], matched = null;
+    for (var j = 0; j < opts.length; j++) { if (opts[j] === t) { matched = t; break; } }
+    if (!matched) {
+      // 大小写不敏感兜底
+      for (var k = 0; k < opts.length; k++) { if (opts[k].toLowerCase() === t.toLowerCase()) { matched = opts[k]; break; } }
+    }
+    if (matched && hits.indexOf(matched) < 0) hits.push(matched);
+  }
+  if (!hits.length) { showToast('未找到匹配的账号：' + terms.join(', '), 'error'); return; }
+  multiSelState.account = hits;
+  var hidden = document.getElementById('detailFilterAccount');
+  if (hidden) hidden.value = '';
+  renderMultiSel('account');
+  var panel = document.getElementById('mselpanel_account');
+  if (panel) panel.style.display = 'block';
+  renderDetailTable();
+  showToast('已筛选出 ' + hits.length + ' 个账号' + (hits.length < terms.length ? '（' + (terms.length - hits.length) + ' 个未匹配）' : ''), 'success');
 }
 function setMultiAll(key, on) {
   multiSelState[key] = on ? multiOptions(key) : [];
@@ -4062,7 +4121,7 @@ function buildReplyDataBlockHtml(r, boxId) {
   html += '<div class="rc-base-row">'
         + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
-        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + qcMoney(r.account, rcOrderAmount(r)) + '</span></div>'
+        + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + (function(){ var _a = rcOrderAmount(r); return _a !== '' ? escHtml(_a) : '-'; })() + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
@@ -5632,6 +5691,7 @@ function saveKnowledgeItem() { if (!qcRequireKnowledgeEdit(document.getElementBy
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) { KNOWLEDGE_BASE[i] = item; found = true; break; }
   if (!found) KNOWLEDGE_BASE.push(item);
   closeKnowledgeModal(); renderKnowledgeBase();
+  try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
   scheduleSensitiveWordsRefresh();
   if (rawData.length) { runQualityCheck(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求，正在重新质检全部数据', 'info'); }
   else { cloudSaveState(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求', 'success'); }
@@ -5642,6 +5702,7 @@ function deleteKnowledgeItem(id) { var _it = null; for (var _k = 0; _k < KNOWLED
   if (!item || !confirm('确认删除“' + item.title + '”？删除后会重新质检全部已有数据。')) return;
   if (item.fileCloudPath && cloudApp && cloudApp.storage) { try { cloudApp.storage.from('qc-appeals').delete(item.fileCloudPath).catch(function(){}); } catch (e) {} }
   KNOWLEDGE_BASE = KNOWLEDGE_BASE.filter(function(k) { return k.id !== id; });
+  try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
   renderKnowledgeBase(); scheduleSensitiveWordsRefresh();
   if (rawData.length) { runQualityCheck(); showToast('知识已删除，正在重新质检全部数据', 'info'); } else { cloudSaveState(); showToast('知识已删除并同步云端', 'success'); }
 }
@@ -6231,7 +6292,14 @@ function exportAllData() {
   showToast('已导出 ' + results.length + ' 条质检数据', 'success');
 }
 
-function importAllData(data) {
+// 【需求4·配置保护】知识库本地权威副本：只写不改判分，网络失败时用它兜底，绝不回退内置旧版。
+function qcPersistKbLocal() {
+  try { if (Array.isArray(KNOWLEDGE_BASE) && KNOWLEDGE_BASE.length) localStorage.setItem('qc_kb_authoritative_v1', JSON.stringify(KNOWLEDGE_BASE)); } catch (e) {}
+}
+function importAllData(data, source) {
+  // 【需求4】source='cloud' 表示云端权威数据；其余（本地缓存/URL快照/兜底）一律视为 local。
+  // 只有云端权威数据才允许更新知识库并写入权威副本，避免旧缓存把知识库带回旧版本。
+  var __fromCloud = (source === 'cloud');
   if (!data || !data.results || !data.rawData) {
     showToast('网址中的数据格式不正确', 'error');
     return;
@@ -6252,14 +6320,26 @@ function importAllData(data) {
     if (_src && typeof _src.reply === 'string') { r.reply = _src.reply; }
     return normalizeResultAppeal(r);
   });
-  if (data.orgData) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
+  // 【需求4·配置保护】orgData 必须是非空数组才覆盖，空数组/空对象一律忽略，防止组织架构被清空。
+  if (Array.isArray(data.orgData) && data.orgData.length) { ORG_DATA = data.orgData; normalizeOrgData(); saveOrg(); }
   try { if (typeof qcEnsureOrgAccounts === 'function') qcEnsureOrgAccounts(true); } catch (e) {}
   // 2026-11-21：配置字段只接受「非空数组」覆盖。反复清空/写回时这些字段可能被写成 []，
   // 若照单全收会把内置质检标准/等级规则/知识库清空 → determineGrade 遍历空规则恒返回「不达标」，
   // 这就是「重导入后大量单据错误不达标、每次结果不同」的根因之一。空数组一律忽略，保留当前有效配置。
   if (data.standards && data.standards.length) { STANDARDS = data.standards; }
   if (data.gradeRules && data.gradeRules.length) { GRADE_RULES = data.gradeRules; }
-  if (data.knowledgeBase && data.knowledgeBase.length) { KNOWLEDGE_BASE = data.knowledgeBase; }
+  // 【需求4·知识库不回退】
+  // 云端权威来源：用云端知识库刷新内存，并写入本地权威副本。
+  // 本地来源（缓存/URL快照）：不信任其携带的知识库，优先用本地权威副本恢复内存，杜绝回退内置旧版。
+  if (__fromCloud && data.knowledgeBase && data.knowledgeBase.length) {
+    KNOWLEDGE_BASE = data.knowledgeBase;
+    try { localStorage.setItem('qc_kb_authoritative_v1', JSON.stringify(KNOWLEDGE_BASE)); } catch (e) {}
+  } else if (!__fromCloud) {
+    try {
+      var _kbLocal = localStorage.getItem('qc_kb_authoritative_v1');
+      if (_kbLocal) { var _kbObj = JSON.parse(_kbLocal); if (Array.isArray(_kbObj) && _kbObj.length) KNOWLEDGE_BASE = _kbObj; }
+    } catch (e) {}
+  }
   var kbBackfilled = ensureKnowledgeRequirements();
   scheduleSensitiveWordsRefresh();
   document.getElementById('detailEmpty').style.display = 'none';
@@ -6365,7 +6445,7 @@ function loadFromUrlHash() {
     }
     var data = JSON.parse(jsonStr);
     if (data && data.results && data.rawData) {
-      importAllData(data);
+      importAllData(data, 'local');
       var status = document.getElementById('urlDataStatus');
       if (status) { status.style.display = 'block'; status.textContent = '数据已从网址加载'; }
       showToast('已自动加载网址中的 ' + data.results.length + ' 条质检数据', 'success');
@@ -6381,8 +6461,9 @@ function loadFromUrlHash() {
 // 初始化
 // ============================================================
 document.addEventListener('DOMContentLoaded', function() {
-  try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) { console.warn('cache load failed', e); }
-  try { setTimeout(function(){ qcFetchLatestAndRefresh(false); }, 300); } catch (e) {}
+  // 【需求1·打开即最新】不再先用本地缓存渲染旧数据。优先拉云端；只有云端读取失败时才回退缓存。
+  // 缓存秒开能力保留为函数 qcLoadCacheFast()，仅在 qcFetchLatestAndRefresh 判定网络失败时调用。
+  try { setTimeout(function(){ qcFetchLatestAndRefresh(false); }, 60); } catch (e) {}
   try { qcAuthBoot(); } catch (e) { console.warn('auth boot failed', e); }
   document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
   document.getElementById('recordModal').addEventListener('click', function(e) { if (e.target === this) closeRecordModal(); });
