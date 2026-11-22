@@ -275,6 +275,8 @@ function getGroupByAgent(name) {
 // ============================================================
 var rawData = [];
 var results = [];
+// 【20261122f】看板数据源绑定守卫：最近一次有效的质检结果副本（results 意外被清空时用于恢复/兜底渲染）
+var QC_LAST_GOOD_RESULTS = [];
 // 追加上传时：前 N 条旧明细原样保留（含评分、明细、申诉），只质检新加入的条目
 var QC_APPEND_PRESERVE = false;
 var QC_APPEND_OLD_COUNT = 0;
@@ -708,6 +710,7 @@ function cloudLoadState() {
       var row = res.data && res.data.length ? res.data[0] : null;
       if (row && row.state_json) {
         try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
+        window.QC_EMPTY_CLOUD_SEEN = 0; // 【20261122f】成功读到数据即重置空库计数
         var data = qcDecodeStateJson(row.state_json);
         if (data && data.results && data.rawData) { qcCacheSyncFromCloud(data, row.state_json); }
       } else {
@@ -943,7 +946,20 @@ function cloudSaveState() {
     // 写回前强制对齐：以内存 results 为真相重建 rawData，杜绝把错位/重复脏数据固化进云端
     try { qcRealignData(payloadObj); } catch (e) {}
     // 同步内存：让 UI 看到的条数与写回云端的一致（否则明细表数字和云端对不上）
-    if (payloadObj.results && payloadObj.rawData) { results = payloadObj.results; rawData = payloadObj.rawData; }
+    // 【20261122f·看板归零根因修复】cloudStatePayload 的 results 是云端瘦身格式（无 reply/_part），
+    // 此前直接赋给内存 results 会让全部明细丢失回邮 → isAssessedResult 判定全部失效（_part 还会按空回邮
+    // 缓存 assessed:false）→ 数据看板统计归零。这正是「上传/保存后来回切换看板变 0」的根因。
+    // 现在与 importAllData 同款：按索引从 rawData 回填回邮再入内存。
+    if (payloadObj.results && payloadObj.rawData) {
+      rawData = payloadObj.rawData;
+      results = payloadObj.results.map(function(r, i) {
+        r._index = i; delete r._part;
+        var _src = payloadObj.rawData[i];
+        if (_src && typeof _src.reply === 'string') { r.reply = _src.reply; }
+        return normalizeResultAppeal(r);
+      });
+      try { if (results.length) QC_LAST_GOOD_RESULTS = results; } catch (e2) {}
+    }
     // 【20261122e·防写爆②内容去重】数据与上次成功写入完全一致时不重复整包写入——
     // 数据库每次更新都会把旧版本留成死数据，重复写同样的内容是上次"表被写爆"的直接元凶
     var slimJson = qcSlimPayloadString(payloadObj);
@@ -1040,6 +1056,8 @@ function qcProbeMainUpd() {
 // 删除后旧数据之所以会「复活」，是因为云端 main 已删、本地缓存仍留着旧数据，
 // 此后任意 cloudSaveState() 都会把本地旧数据重新写回云端。这里从源头断开该链路。
 function qcApplyEmptyCloudState() {
+  // 【20261122f】清空前把现有数据快照备份到回收站键（qc_cache_trash_v1），万一误判可完整恢复
+  try { if (results && results.length > 0) { try { localStorage.setItem('qc_cache_trash_v1', JSON.stringify({ t: Date.now(), cache: localStorage.getItem(QC_CACHE_KEY) || '', total: results.length })); } catch (e3) {} QC_LAST_GOOD_RESULTS = []; } } catch (e4) {}
   try { rawData = []; results = []; } catch (e) {}
   try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {}
   try { localStorage.removeItem('qc_dashboard_cache_v1'); localStorage.removeItem('qc_dashboard_cache_hash_v1'); } catch (e) {}
@@ -1096,7 +1114,7 @@ function qcFetchLatestAndRefresh(force) {
           // data=[] 视为「疑似空库」：先不清空，交给下一轮再确认一次
           var emptySeen = (window.QC_EMPTY_CLOUD_SEEN || 0) + 1;
           window.QC_EMPTY_CLOUD_SEEN = emptySeen;
-          if (emptySeen >= 2) {
+          if (emptySeen >= 3) {
             try { qcApplyEmptyCloudState(); } catch (e) {}
             window.QC_EMPTY_CLOUD_SEEN = 0;
           } else {
@@ -1119,6 +1137,7 @@ function qcFetchLatestAndRefresh(force) {
         return false;
       }
       try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
+      window.QC_EMPTY_CLOUD_SEEN = 0; // 【20261122f】成功读到数据即重置空库计数
       var d = qcDecodeStateJson(row.state_json); if (!d) {
         // 【需求4·防误报】解析失败多为压缩格式过渡态，静默重试即可，不误导用户"网络异常"
         try { setCloudStatus('云端数据校验中，正在重试…', 'var(--warning)'); } catch (e) {}
@@ -1604,20 +1623,29 @@ function runQualityCheck() {
   QC_APPEND_PRESERVE = false;
   QC_APPEND_OLD_COUNT = 0;
   var keptCount = 0;
-  results = [];
+  // 【20261122f·看板稳定】重建改为「后台缓冲 + 完成后原子切换」：重建期间 results 保持旧数据可见，
+  // 看板/明细在切换完成前绝不出现 0；任何单条异常只降级该条，不再中断整个重建链。
+  var _nextResults = [];
+  window._qcRebuilding = true;
   var total = rawData.length;
   var batchSize = 50;
   var batch = 0;
   function processBatch() {
     var end = Math.min(batch + batchSize, total);
+    try {
     for (var i = batch; i < end; i++) {
       if (i < preserveCount) {
         // 只按稳定键保留旧结果（含申诉/评分），绝不按索引回退 —— 索引回退会把别人的分数套到本单号，
         // 是「重导入后大量单据错误不达标、每次结果不同」的直接原因（2026-11-21 修复）。
         var _old = oldByKey[getStableRecordKey(rawData[i])];
-        if (_old) { var _c = JSON.parse(JSON.stringify(_old)); _c._index = i; results.push(_c); keptCount++; continue; }
+        if (_old) { var _c = JSON.parse(JSON.stringify(_old)); _c._index = i; _nextResults.push(_c); keptCount++; continue; }
       }
-      var result = inspectOne(rawData[i]);
+      var result = null;
+      try { result = inspectOne(rawData[i]); } catch (_qcErr) {
+        // 【20261122f】单条质检异常不再中断重建链：降级为「无法质检」占位并继续
+        result = { grade: '无法质检', totalScore: -1, scores: {}, details: {} };
+        try { if (typeof console !== 'undefined') console.warn('[QC] 单条质检异常已降级:', i, String(_qcErr && _qcErr.message || _qcErr).slice(0, 80)); } catch (e2) {}
+      }
       result._index = i;
       // 透传批次归属周（上传时固定写入，历史批次不改动）
       result.qcWeek = rawData[i].qcWeek || '';
@@ -1638,11 +1666,21 @@ function runQualityCheck() {
       var _prevAppeal = (_snap && _snap.fp === _curFp) ? _snap.appeal : null;
       result.appeal = _prevAppeal ? normalizeAppeal(_prevAppeal) : createEmptyAppeal();
       normalizeResultAppeal(result);
-      results.push(result);
+      _nextResults.push(result);
+    }
+    } catch (_pbErr) {
+      // 【20261122f】批次级兜底：任何异常都不中断重建链
+      try { console.warn('[QC] 批次异常已跳过:', String(_pbErr && _pbErr.message || _pbErr).slice(0, 100)); } catch (e2) {}
     }
     updateProgress(Math.round((end / total) * 100), '正在质检', '已完成 ' + end + ' / ' + total);
     if (end < total) { batch = end; setTimeout(processBatch, 10); }
-    else { setTimeout(function() { hideProgress(); onQualityCheckDone(); }, 300); }
+    else {
+      // 【20261122f】重建完成：原子切换结果集（切换前 UI 一直显示旧数据），再刷新 UI 与云端
+      results = _nextResults;
+      QC_LAST_GOOD_RESULTS = _nextResults;
+      window._qcRebuilding = false;
+      setTimeout(function() { hideProgress(); onQualityCheckDone(); }, 300);
+    }
   }
   processBatch();
 }
@@ -4868,7 +4906,14 @@ function renderWeeklyKpi(data) {
 }
 
 function renderDashboard() {
-  if (results.length === 0) { document.getElementById('dashboardEmpty').style.display = 'block'; document.getElementById('dashboardContent').style.display = 'none'; return; }
+  // 【20261122f·数据源绑定守卫】结果集意外为空但明细有数据时，用最近一次有效结果渲染，看板绝不归零
+  var _src = results;
+  if ((!_src || _src.length === 0) && rawData.length > 0 && QC_LAST_GOOD_RESULTS.length > 0) {
+    _src = QC_LAST_GOOD_RESULTS;
+    try { setCloudStatus('看板数据自愈中（结果集异常已回滚）', 'var(--warning)'); } catch (e) {}
+  }
+  if (_src.length === 0) { document.getElementById('dashboardEmpty').style.display = 'block'; document.getElementById('dashboardContent').style.display = 'none'; return; }
+  if (QC_LAST_GOOD_RESULTS.length !== _src.length) QC_LAST_GOOD_RESULTS = _src.slice();
   document.getElementById('dashboardEmpty').style.display = 'none';
   document.getElementById('dashboardContent').style.display = 'block';
   var fG = document.getElementById('dashFilterGroup').value;
@@ -4876,8 +4921,8 @@ function renderDashboard() {
   var fAg = document.getElementById('dashFilterAgent').value;
   var filtered = [];
   var skippedUnassessed = 0;
-  for (var i = 0; i < results.length; i++) {
-    var r = results[i];
+  for (var i = 0; i < _src.length; i++) {
+    var r = _src[i];
     if (fG && dashboardGroup(r) !== fG) continue;
     if (fA && r.account !== fA) continue;
     if (fAg && canonicalAgentName(r.agent) !== fAg) continue;
@@ -4887,7 +4932,7 @@ function renderDashboard() {
   }
   var dashboardData = filtered;
   // 环比上下文用全部 results（含未参与考核的单）建立，避免筛选变化时基准周漂移
-  wowBuildContext(results);
+  wowBuildContext(_src);
   renderKPI(dashboardData, skippedUnassessed);
   try { if (typeof renderWeeklyKpi === 'function') renderWeeklyKpi(dashboardData); } catch (e) {}
   wowDecorateKPI(dashboardData);
@@ -6239,6 +6284,7 @@ function clearAllData() { if (!requireAdmin('清空数据')) return;
   // 现在清空时一并重置墓碑，让「清空→重导入」成为幂等操作。
   try { qcResetRegistry('手动清空全部数据'); } catch (e) {}
   rawData = []; results = [];
+  QC_LAST_GOOD_RESULTS = [];
   clearDataFromUrl();
   cloudClearState();
   document.getElementById('detailEmpty').style.display = 'block';
@@ -7890,6 +7936,18 @@ function qcSyncAppealsFromCloud() {
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
       try { if (cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
     }, 4000);
+    // 【20261122f】看板归零看门狗（正常时零开销）：明细有数据但结果集意外清空 → 自动回滚最近有效结果并重绘
+    setInterval(function () {
+      try {
+        if (window._qcRebuilding) return;
+        if (typeof rawData === 'undefined' || typeof results === 'undefined' || typeof QC_LAST_GOOD_RESULTS === 'undefined') return;
+        if (rawData.length > 0 && results.length === 0 && QC_LAST_GOOD_RESULTS.length > 0) {
+          results = QC_LAST_GOOD_RESULTS.slice();
+          try { renderDetailTable(); renderDashboard(); } catch (e2) {}
+          try { showToast('检测到质检结果异常，已自动恢复', 'info'); } catch (e3) {}
+        }
+      } catch (e) {}
+    }, 5000);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
