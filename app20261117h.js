@@ -412,9 +412,11 @@ function qcRealignData(data) {
     outR.push(r);
     var src = rawByKey[k] || {};
     // 固定字段顺序构造，保证任意次数重建后对象键顺序完全一致（幂等）
-    var FIELDS = ['account', 'agent', 'order', 'date', 'customer', 'reply', 'qcWeek',
+    var FIELDS = ['account', 'agent', 'order', 'date', 'dateEnd', 'customer', 'reply', 'qcWeek',
       'processCheck', 'refundReg', 'issueFeedback', 'replenishment', 'orderAmount', 'fbmDefectRate',
-      'bizType', 'returnInfo', 'azInfo', 'negReview', 'custEmotion', 'batchId'];
+      'bizType', 'returnInfo', 'azInfo', 'negReview', 'custEmotion', 'batchId',
+      'claimStatus', 'odrImpact', 'claimDate', 'buyerIssue', 'buyerNote',
+      'reviewTime', 'reviewContent', 'reviewRating', 'appealContent'];
     var rebuilt = {};
     for (var fi = 0; fi < FIELDS.length; fi++) {
       var f = FIELDS[fi];
@@ -1527,6 +1529,17 @@ function afterParse(data, mode) {
     else if (matchCol(h, lh, ['账号', 'account', '店铺', 'store'])) colMap.account = hi;
     else if (matchCol(h, lh, ['客服', 'agent', '客服姓名', '客服工号', 'operator', '客服人员'])) colMap.agent = hi;
     else if (matchCol(h, lh, ['平台单号', '平台订单', '订单号', '订单编号', 'orderid', 'orderno', 'order', '平台订单号'])) colMap.order = hi;
+    // 【20261123e·需求3】AZ / 中差评 专属列必须先于「日期 / 回邮数据」判定：
+    // 「评价时间」「索赔日期」都含「时间/日期」，否则会被通用日期列抢走；「申诉内容」也不能被回邮别名抢。
+    else if (h === '索赔状态' || h === '理赔状态' || h.indexOf('索赔状态') >= 0) colMap.claimStatus = hi;
+    else if (h.indexOf('影响订单缺陷率') >= 0 || h === '是否影响ODR' || lh === 'odrimpact' || lh === 'affectodr') colMap.odrImpact = hi;
+    else if (h === '索赔日期' || h === '理赔日期' || h.indexOf('索赔日期') >= 0) colMap.claimDate = hi;
+    else if (h === '买家问题' || h.indexOf('买家问题') >= 0 || lh === 'buyerissue') colMap.buyerIssue = hi;
+    else if (h === '买家备注' || h.indexOf('买家备注') >= 0 || lh === 'buyernote') colMap.buyerNote = hi;
+    else if (h === '评价时间' || h === '评论时间' || lh === 'reviewtime') colMap.reviewTime = hi;
+    else if (h === '评价内容' || h === '评论内容' || lh === 'reviewcontent') colMap.reviewContent = hi;
+    else if (h === '评论评级' || h === '评价评级' || h === '星级' || lh === 'reviewrating' || lh === 'stars') colMap.reviewRating = hi;
+    else if (h === '申诉内容' || h.indexOf('申诉内容') >= 0 || lh === 'appealcontent') colMap.appealContent = hi;
     else if (matchCol(h, lh, ['回邮数据', '客服回复', '回复内容', '邮件内容', '回复数据', 'reply', 'emailcontent', '回邮', '回复'])) colMap.reply = hi;
     else if (matchCol(h, lh, ['日期', 'date', '时间', '更新日期'])) colMap.date = hi;
     else if (matchCol(h, lh, ['客户邮件', '客户来信', 'customeremail', '客户咨询', '客户消息'])) colMap.customer = hi;
@@ -1545,7 +1558,11 @@ function afterParse(data, mode) {
   if (colMap.account === undefined) missing.push('账号');
   if (colMap.agent === undefined) missing.push('客服');
   if (colMap.order === undefined) missing.push('平台单号');
-  if (colMap.reply === undefined) missing.push('回邮数据');
+  // 【20261123e·需求3/4】AZ / 中差评 表格没有「回邮数据」列，只要求有「申诉内容 / 评价内容」；
+  // 邮件类型仍强制要求「回邮数据」。两条上传链路共用这段逻辑。
+  var _hasTypeCol = (colMap.bizType !== undefined);
+  var _hasTypeContent = (colMap.appealContent !== undefined || colMap.reviewContent !== undefined);
+  if (colMap.reply === undefined && !(_hasTypeCol && _hasTypeContent)) missing.push('回邮数据');
   if (missing.length > 0) {
     showToast('缺少必填列：' + missing.join('、') + '。检测到的列：' + headers.join(', '), 'error');
     return;
@@ -1560,9 +1577,17 @@ function afterParse(data, mode) {
     var account = String(row[colMap.account] || '').trim();
     var agent = String(row[colMap.agent] || '').trim();
     var order = String(row[colMap.order] || '').trim();
-    var reply = String(row[colMap.reply] || '').trim();
+    var reply = colMap.reply !== undefined ? String(row[colMap.reply] || '').trim() : '';
+    // 【20261123e·需求3】AZ / 中差评：类型来自表格「类型」列（AZ / 中差评 / 空 / 邮件 → 邮件）
+    var rawType = colMap.bizType !== undefined ? String(row[colMap.bizType] || '').trim() : '';
+    var bizType = qcNormBizType(rawType);
+    var appealContent = colMap.appealContent !== undefined ? String(row[colMap.appealContent] || '').trim() : '';
+    var reviewContent = colMap.reviewContent !== undefined ? String(row[colMap.reviewContent] || '').trim() : '';
+    // 非邮件类型没有「回邮数据」列：用申诉/评价内容充当质检文本，保证判分与详情能跑通
+    if (!reply && bizType !== '邮件') reply = appealContent || reviewContent;
     if (!account && !agent && !order && !reply) continue;
-    if (wouldBeUninspectable(reply)) { skippedUninspectable++; continue; }
+    // 邮件类型沿用「无法质检过滤」；AZ/中差评只要导入成功即计入考核，不做剔除
+    if (bizType === '邮件' && wouldBeUninspectable(reply)) { skippedUninspectable++; continue; }
     newRawData.push({ account: account, agent: agent, order: order, reply: reply,
       qcWeek: batchWeek.key,
       date: colMap.date !== undefined ? String(row[colMap.date] || '').trim() : '',
@@ -1573,7 +1598,16 @@ function afterParse(data, mode) {
       replenishment: colMap.replenishment !== undefined ? String(row[colMap.replenishment] || '').trim() : '',
       orderAmount: colMap.orderAmount !== undefined ? String(row[colMap.orderAmount] || '').trim() : '',
       fbmDefectRate: colMap.fbmDefectRate !== undefined ? String(row[colMap.fbmDefectRate] || '').trim() : '',
-      bizType: colMap.bizType !== undefined ? String(row[colMap.bizType] || '').trim() : '',
+      bizType: bizType,
+      claimStatus: colMap.claimStatus !== undefined ? String(row[colMap.claimStatus] || '').trim() : '',
+      odrImpact: colMap.odrImpact !== undefined ? String(row[colMap.odrImpact] || '').trim() : '',
+      claimDate: colMap.claimDate !== undefined ? String(row[colMap.claimDate] || '').trim() : '',
+      buyerIssue: colMap.buyerIssue !== undefined ? String(row[colMap.buyerIssue] || '').trim() : '',
+      buyerNote: colMap.buyerNote !== undefined ? String(row[colMap.buyerNote] || '').trim() : '',
+      reviewTime: colMap.reviewTime !== undefined ? String(row[colMap.reviewTime] || '').trim() : '',
+      reviewContent: reviewContent,
+      reviewRating: colMap.reviewRating !== undefined ? String(row[colMap.reviewRating] || '').trim() : '',
+      appealContent: appealContent,
       returnInfo: colMap.returnInfo !== undefined ? String(row[colMap.returnInfo] || '').trim() : '',
       azInfo: colMap.azInfo !== undefined ? String(row[colMap.azInfo] || '').trim() : '',
       negReview: colMap.negReview !== undefined ? String(row[colMap.negReview] || '').trim() : '',
@@ -1696,6 +1730,16 @@ function runQualityCheck() {
       result.negReview = rawData[i].negReview || qcReadAnyField(rawData[i], QC_NEG_SET) || '';
       result.custEmotion = rawData[i].custEmotion || qcReadAnyField(rawData[i], QC_EMO_SET) || '';
       result.batchId = rawData[i].batchId || '';
+      // 【20261123e·需求3】AZ / 中差评 申诉数据字段（详情页按类型渲染）
+      result.claimStatus = rawData[i].claimStatus || '';
+      result.odrImpact = rawData[i].odrImpact || '';
+      result.claimDate = rawData[i].claimDate || '';
+      result.buyerIssue = rawData[i].buyerIssue || '';
+      result.buyerNote = rawData[i].buyerNote || '';
+      result.reviewTime = rawData[i].reviewTime || '';
+      result.reviewContent = rawData[i].reviewContent || '';
+      result.reviewRating = rawData[i].reviewRating || '';
+      result.appealContent = rawData[i].appealContent || '';
       result.recordKey = getRecordKey(result);
       // 2026-11-21g：把本次回邮内容同步到 result 并按内容指纹判定申诉继承。
       var _curReply = (typeof rawData[i].reply === 'string') ? rawData[i].reply : '';
@@ -1815,6 +1859,10 @@ function applyKnowledgeToResult(result, agentText, customerText) {
 function inspectOne(item) {
   var reply = item.reply || '';
   var customer = item.customer || '';
+  // 【20261123e·需求3】AZ / 中差评：没有「客服回邮」概念，质检文本 = 申诉内容 / 评价内容。
+  // 走独立判分入口（维度与达标线跟邮件一致，仅受检文本不同）；对应 SOP 上传后在此替换判定规则。
+  var _btItem = qcBizTypeOf(item);
+  if (_btItem === 'AZ' || _btItem === '中差评') return inspectNonMail(item, _btItem);
   if (reply === '无联客记录' || reply === '' || reply.length < 5) {
     return applyKnowledgeToResult({ account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
       reply: reply, customer: customer,
@@ -1902,6 +1950,63 @@ function inspectOne(item) {
       reply: reply, customer: customer, scores: scores, totalScore: total, grade: determineGrade(total), issues: issues, details: details,
       amazonExcluded: amazonExcludedCount, amazonIncluded: amazonIncludedCount };
     return applyKnowledgeToResult(finalResult, agentText, customerText);
+}
+
+// ============================================================
+// 【20261123e·需求3】AZ / 中差评 判分入口
+// 说明：这两类目前没有「客服回邮」，受检文本是表格里的「申诉内容」（AZ 另含买家问题/买家备注，
+// 中差评另含评价内容）。维度、满分、达标线、等级阈值与邮件完全一致，只是评判维度标准（SOP）不同。
+// SOP 尚未上传：此处先按通用六维度文本质量判分；SOP 上传后，只需替换本函数内的判定分支
+// （QC_TYPE_SOP 中按 type 取维度规则），其余统计 / 申诉 / 看板逻辑不受影响。
+// ============================================================
+var QC_TYPE_SOP = { AZ: null, '中差评': null };   // 预留：SOP 上传后写入 {dims:[], keywords:{}, ...}
+function inspectNonMail(item, bizType) {
+  var appeal = String(item.appealContent || '').trim();
+  var buyer = String(bizType === 'AZ' ? (item.buyerIssue || '') : (item.reviewContent || '')).trim();
+  var extra = [item.buyerNote, item.claimStatus, item.odrImpact, item.reviewRating].filter(function(x) { return String(x || '').trim(); }).join(' ');
+  // 受检文本：申诉内容为主体（卖家侧陈述），买家侧内容作为客户语义上下文
+  var agentText = (appeal + (extra ? ' ' + extra : '')).trim() || String(item.reply || '').trim();
+  var customerText = buyer;
+  var scores = {}, issues = [], details = {};
+  var sop = QC_TYPE_SOP[bizType] || null;
+  try {
+    var pr = checkProhibition(agentText, agentText + ' ' + customerText);
+    scores['平台禁忌'] = pr.score; details['平台禁忌'] = pr;
+    if (pr.issues.length > 0) issues.push.apply(issues, pr.issues);
+    if (pr.score === 0 && pr.issues.length > 0) {
+      var rdims = ['语言语法表达', '方案合理性', '流程&操作完整性', '服务技巧', '服务态度'];
+      for (var rd = 0; rd < rdims.length; rd++) { scores[rdims[rd]] = 0; details[rdims[rd]] = { score: 0, grade: '不达标', issues: ['红线违规，整单0分'] }; }
+      return { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
+        reply: agentText, customer: customerText, scores: scores, totalScore: 0, grade: '不达标', issues: issues, details: details, redlineViolation: true };
+    }
+    var lr = checkLanguage(agentText, customerText);
+    scores['语言语法表达'] = lr.score; details['语言语法表达'] = lr;
+    if (lr.issues.length > 0) for (var i1 = 0; i1 < lr.issues.length; i1++) issues.push('[语言语法表达] ' + lr.issues[i1]);
+    var sr = checkSolution(agentText, customerText);
+    scores['方案合理性'] = sr.score; details['方案合理性'] = sr;
+    if (sr.issues.length > 0) for (var i2 = 0; i2 < sr.issues.length; i2++) issues.push('[方案合理性] ' + sr.issues[i2]);
+    var pc = checkProcess(agentText, { reply: agentText, customerText: customerText });
+    scores['流程&操作完整性'] = pc.score; details['流程&操作完整性'] = pc;
+    if (pc.issues.length > 0) for (var i3 = 0; i3 < pc.issues.length; i3++) issues.push('[流程&操作完整性] ' + pc.issues[i3]);
+    var sk = checkSkill(agentText, customerText);
+    scores['服务技巧'] = sk.score; details['服务技巧'] = sk;
+    if (sk.issues.length > 0) for (var i4 = 0; i4 < sk.issues.length; i4++) issues.push('[服务技巧] ' + sk.issues[i4]);
+    var at = checkAttitude(agentText);
+    scores['服务态度'] = at.score; details['服务态度'] = at;
+    if (at.issues.length > 0) for (var i5 = 0; i5 < at.issues.length; i5++) issues.push('[服务态度] ' + at.issues[i5]);
+  } catch (e) {
+    // 极端文本导致判定异常：降级为「无法质检」，不中断整批（不参与统计，与邮件一致）
+    return { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
+      reply: agentText, customer: customerText, scores: {}, totalScore: -1, grade: '无法质检',
+      issues: ['申诉内容判定异常，请检查该条内容'], details: {} };
+  }
+  var total = scores['语言语法表达'] + scores['方案合理性'] + scores['流程&操作完整性'] + scores['服务技巧'] + scores['服务态度'];
+  if (!isFinite(total)) total = -1;
+  var fr = { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
+    reply: agentText, customer: customerText, scores: scores, totalScore: total,
+    grade: total < 0 ? '无法质检' : determineGrade(total), issues: issues, details: details,
+    socType: bizType, sopPending: !sop };
+  return applyKnowledgeToResult(fr, agentText, customerText);
 }
 
 function isAmazonBlock(block) {
@@ -3674,7 +3779,7 @@ var QC_PART_VER = 2;
 function sessionParticipation(r) {
   if (r && r._part && r._part.v === QC_PART_VER) return r._part;
   var reply = String((r && r.reply) == null ? '' : r.reply);
-  var res = { mine: 0, total: 0, pct: 0, assessed: false };
+  var res = { mine: 0, total: 0, pct: 0, assessed: false, typeAssessed: false };
   if (reply && reply !== '无联客记录') {
     var blocks = reply.indexOf('收起') >= 0 ? reply.split('收起') : [reply];
     var named = 0, target = normalizeAgentName(canonicalAgentName(r && r.agent));
@@ -3693,6 +3798,13 @@ function sessionParticipation(r) {
   }
   res.pct = res.total > 0 ? (res.mine / res.total) * 100 : 0;
   res.assessed = res.mine > 0 && res.pct >= 50;
+  // 【20261123d·需求3】AZ / 中差评没有客服回邮会话，不存在去信占比：
+  // 只要导入成功即计入该客服考核（看板统计 / 汇总报表与邮件同一套口径）。
+  try {
+    var _bt = String((r && r.bizType) || '');
+    if (_bt !== 'AZ' && _bt !== '中差评') _bt = rcBizType(r);
+    if (_bt === 'AZ' || _bt === '中差评') { res.typeAssessed = true; res.assessed = true; }
+  } catch (e) {}
   res.v = QC_PART_VER;
   if (r) r._part = res;
   return res;
@@ -4249,6 +4361,8 @@ function qcNormalizeAmountOdrFields(d) {
     if (!byKey[key]) byKey[key] = rd[i];
   }
   var extra = [['bizType', QC_TYPE_SET], ['returnInfo', QC_RET_SET], ['azInfo', QC_AZ_SET], ['negReview', QC_NEG_SET], ['custEmotion', QC_EMO_SET]];
+  // 【20261123e·需求3/4】AZ / 中差评 专用字段：任何一端上传都按标准键双向补齐
+  var PLAIN = ['claimStatus', 'odrImpact', 'claimDate', 'buyerIssue', 'buyerNote', 'reviewTime', 'reviewContent', 'reviewRating', 'appealContent'];
   function lift(o) {
     if (!o) return;
     if (!o.orderAmount) { var a = qcAmtOf(o); if (a) o.orderAmount = a; }
@@ -4268,6 +4382,13 @@ function qcNormalizeAmountOdrFields(d) {
       var av = qcAliasRaw(a, x[1], x[0]), bv = qcAliasRaw(b, x[1], x[0]);
       if (av === '' && bv !== '') a[x[0]] = bv;
       if (bv === '' && av !== '') b[x[0]] = av;
+    });
+    // AZ / 中差评 专用字段：缺哪边补哪边（含「申诉内容」）
+    PLAIN.forEach(function(k) {
+      var av2 = String(a[k] == null ? '' : a[k]).trim();
+      var bv2 = String(b[k] == null ? '' : b[k]).trim();
+      if (av2 === '' && bv2 !== '') a[k] = b[k];
+      if (bv2 === '' && av2 !== '') b[k] = a[k];
     });
     if (!a.batchId && b.batchId) a.batchId = b.batchId;
     if (!b.batchId && a.batchId) b.batchId = a.batchId;
@@ -4304,12 +4425,17 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  // 列顺序（20261123b）：类型紧跟「序号」，ODR 紧跟「账号」之后，订单金额紧跟「平台单号」之后。
-  // 序号|类型|组别|日期|账号|ODR|客服|平台单号|订单金额|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
-  var html = '<thead><tr><th>序号</th><th class="cell-center">类型</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率（对应上传列「FBM订单缺陷率」）">ODR</th><th>客服</th><th>平台单号</th><th title="订单金额（对应上传列「订单金额」，上传数据原值）">订单金额</th>';
-  for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
-  html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
-       + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
+  // 列顺序：序号|类型|组别|日期|账号|ODR|客服|平台单号|订单金额 ‖ [维度] ‖ 总分|等级 ‖ 申诉状态|操作 ‖ 去信数|占比|是否考核
+  // 【20261123d·需求1】分组竖线改用语义 class（cell-group-end / cell-group-start），
+  // 不再用 nth-child(8)：上一版新增「类型」列后所有索引后移一位，竖线落到「平台单号」右侧，
+  // 把「平台单号 + 订单金额」这对关联信息割裂。现在竖线固定画在「订单金额」右侧、
+  // 也就是订单金额与第一个评分维度（语言语法表达）之间。
+  var DIM_END = DIM_NAMES.length;
+  var html = '<thead><tr><th>序号</th><th class="cell-center">类型</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率（对应上传列「FBM订单缺陷率」）">ODR</th><th>客服</th><th>平台单号</th><th class="cell-group-end" title="订单金额（对应上传列「订单金额」，上传数据原值）；与平台单号同属基础信息分组">订单金额</th>';
+  for (var d = 0; d < DIM_NAMES.length; d++) html += '<th class="' + (d === 0 ? 'cell-group-start' : '') + '">' + DIM_NAMES[d] + '</th>';
+  html += '<th class="cell-group-end">总分</th><th>等级</th>'
+       + '<th class="cell-group-start">申诉状态</th><th class="cell-group-end">操作</th>'
+       + '<th class="cell-group-start" title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
        + '<th title="该客服去信 ÷ 本单全部客服去信（同一顾客可能被多位客服服务过）">占比</th>'
        + '<th title="占比 ≥ 50% 参与考核，只有「是」的单计入数据看板">是否考核</th></tr></thead><tbody>';
   var sendStat = buildSendStat(); // 只用于单元格 tooltip（该客服跨单累计）
@@ -4320,36 +4446,44 @@ function renderDetailTable() {
       var r = filtered[j];
       var _odr = qcFmtOdr(rcOdr(r)), _amt = rcOrderAmount(r);
       var _bt = rcBizType(r);
+      var _isMailType = (_bt === '邮件');
       var _btCls = _bt === 'AZ' ? 'biz-az' : (_bt === '中差评' ? 'biz-neg' : 'biz-mail');
       html += '<tr><td>' + (j + 1) + '</td>'
             + '<td class="cell-center"><span class="biz-badge ' + _btCls + '">' + escHtml(_bt) + '</span></td>'
-            + '<td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
+            + '<td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(qcDateRangeText(r)) + '</td>'
             + '<td class="cell-nowrap">' + escHtml(r.account) + '</td>'
             + '<td class="cell-center">' + (_odr !== '' ? escHtml(_odr) : '-') + '</td>'
             + '<td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td>'
             + '<td class="cell-nowrap">' + escHtml(r.order) + '</td>'
-            + '<td class="cell-amt" title="' + escHtml(_amt !== '' ? _amt : '') + '">' + (_amt !== '' ? escHtml(_amt) : '-') + '</td>';
+            + '<td class="cell-amt cell-group-end" title="' + escHtml(_amt !== '' ? _amt : '') + '">' + (_amt !== '' ? escHtml(_amt) : '-') + '</td>';
       for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
         var score = r.scores[DIM_NAMES[d2]];
-        if (score === -1) html += '<td><span class="score-badge score-na">-</span></td>';
-        else if (DIM_NAMES[d2] === '平台禁忌' && score === 0 && r.redlineViolation) html += '<td><span class="score-badge score-fail">违规</span></td>';
+        var _dimCls = d2 === 0 ? ' cell-group-start' : '';
+        if (score === -1) html += '<td class="' + _dimCls + '"><span class="score-badge score-na">-</span></td>';
+        else if (DIM_NAMES[d2] === '平台禁忌' && score === 0 && r.redlineViolation) html += '<td class="' + _dimCls + '"><span class="score-badge score-fail">违规</span></td>';
         else {
           var det = r.details[DIM_NAMES[d2]];
           var gr = det ? det.grade : '';
           var cls = gr === '优秀' ? 'score-excellent' : (gr === '达标' ? 'score-pass' : 'score-fail');
-          html += '<td><span class="score-badge ' + cls + '">' + score + '</span></td>';
+          html += '<td class="' + _dimCls + '"><span class="score-badge ' + cls + '">' + score + '</span></td>';
         }
       }
-      if (r.totalScore === -1) { html += '<td><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">无法质检</span></td>'; }
-      else if (isReferenceCaseResult(r)) { html += '<td><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">参考案例</span></td>'; }
-      else { var tc = r.grade === '优秀' ? 'score-excellent' : (r.grade === '达标' ? 'score-pass' : 'score-fail'); html += '<td><span class="score-badge ' + tc + '">' + r.totalScore + '</span></td><td><span class="score-badge ' + tc + '">' + r.grade + '</span></td>'; }
+      if (r.totalScore === -1) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">无法质检</span></td>'; }
+      else if (isReferenceCaseResult(r)) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">参考案例</span></td>'; }
+      else { var tc = r.grade === '优秀' ? 'score-excellent' : (r.grade === '达标' ? 'score-pass' : 'score-fail'); html += '<td class="cell-group-end"><span class="score-badge ' + tc + '">' + r.totalScore + '</span></td><td><span class="score-badge ' + tc + '">' + r.grade + '</span></td>'; }
       var appealStatus = getAppealStatus(r);
-      html += '<td>' + appealStatusBadge(appealStatus) + '</td><td><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span> <span class="clickable" onclick="openAppealModal(' + r._index + ')">申诉</span></td>';
+      html += '<td class="cell-group-start">' + appealStatusBadge(appealStatus) + '</td><td class="cell-group-end"><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span> <span class="clickable" onclick="openAppealModal(' + r._index + ')">申诉</span></td>';
       var _os = orderSendStat(r);
       var _part = sessionParticipation(r);
       var _agentTotal = sendStat.byAgent[canonicalAgentName(r.agent) || '（未填写客服）'] || 0;
-      html += '<td title="本单：该客服 ' + _os.count + ' 封 / 客服合计 ' + _part.total + ' 封；该客服名下全部质检单累计 ' + _agentTotal + ' 封">' + _os.count + '</td><td>' + _os.pct + '</td>'
-            + '<td><span class="score-badge ' + (_part.assessed ? 'score-pass' : 'score-na') + '">' + (_part.assessed ? '是' : '否') + '</span></td></tr>';
+      // 【20261123d·需求3】AZ / 中差评不统计去信占比；但只要导入成功就计入该客服考核
+      if (_isMailType) {
+        html += '<td class="cell-group-start" title="本单：该客服 ' + _os.count + ' 封 / 客服合计 ' + _part.total + ' 封；该客服名下全部质检单累计 ' + _agentTotal + ' 封">' + _os.count + '</td><td>' + _os.pct + '</td>'
+              + '<td><span class="score-badge ' + (_part.assessed ? 'score-pass' : 'score-na') + '">' + (_part.assessed ? '是' : '否') + '</span></td></tr>';
+      } else {
+        html += '<td class="cell-group-start" title="' + _bt + ' 类型不统计去信数（无客服回邮会话）">-</td><td title="' + _bt + ' 类型不统计去信占比">-</td>'
+              + '<td><span class="score-badge score-pass" title="' + _bt + ' 类型导入成功即计入该客服考核">是</span></td></tr>';
+      }
     }
   }
   html += '</tbody>';
@@ -4502,7 +4636,150 @@ function jumpToDetailByOrder(order) {
 
 // 「回邮数据」块公共构建（明细详情与申诉弹窗共用，按订单号对应同一份内容）
 // boxId 用于回邮气泡渲染的容器标识（两处弹窗各自独立，避免 ID 冲突）
+// ============================================================
+// 【20261123e·需求3】AZ / 中差评「申诉数据」板块
+//  - 第一行：账号 / ODR / 平台订单号 / 订单金额 / 客服 / 总分（与邮件一致）
+//  - 其后每个标题一行：AZ = 索赔状态·是否影响订单缺陷率·索赔日期·买家问题·买家备注·申诉内容
+//                      中差评 = 评价时间·评价内容·评论评级·申诉内容
+//  - 申诉内容按「亚马逊操作 / 您操作」切块，倒序（由近及远）可点击展开/收缩，并提供有回复/无回复标识
+// ============================================================
+function qcRawField(r, key) {
+  if (!r) return '';
+  var v = r[key];
+  if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+  var rw = null;
+  try { rw = qcRawFor(r); } catch (e) {}
+  if (rw && rw[key] !== undefined && rw[key] !== null && String(rw[key]).trim() !== '') return String(rw[key]).trim();
+  return '';
+}
+// 解析申诉内容为条目数组：[{who:'亚马逊操作'|'您操作', time, gmt, body}]
+function qcParseAppealThread(text) {
+  var raw = String(text || '').replace(/\r/g, '');
+  if (!raw.trim()) return [];
+  var lines = raw.split('\n');
+  var items = [], cur = null;
+  function pushCur() { if (cur) { cur.body = cur.bodyLines.join('\n').trim(); delete cur.bodyLines; items.push(cur); } }
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i].replace(/^[ \t\u00a0]+|[ \t\u00a0]+$/g, '');
+    if (!ln) { if (cur) cur.bodyLines.push(''); continue; }
+    var isWho = /^(亚马逊操作|您操作|卖家操作|Amazon|You)\s*$/i.test(ln);
+    if (isWho) {
+      pushCur();
+      cur = { who: /您|卖家|^you$/i.test(ln) ? '您操作' : '亚马逊操作', time: '', gmt: '', bodyLines: [] };
+      continue;
+    }
+    if (!cur) { cur = { who: '', time: '', gmt: '', bodyLines: [] }; }
+    var mTime = ln.match(/^(\d{4})[年\/\-.](\d{1,2})[月\/\-.](\d{1,2})日?$/);
+    if (mTime && !cur.time) {
+      cur.time = mTime[1] + '-' + ('0' + mTime[2]).slice(-2) + '-' + ('0' + mTime[3]).slice(-2);
+      continue;
+    }
+    if (/^GMT[+\-]\d/i.test(ln)) { cur.gmt = ln; continue; }
+    cur.bodyLines.push(ln);
+  }
+  pushCur();
+  // 无「操作」标题的纯文本 → 视为单条
+  if (!items.length) return [{ who: '', time: '', gmt: '', body: raw.trim() }];
+  // 由近及远：按时间倒序（无时间的排最后，保持原相对顺序）
+  return items.map(function(x, idx) { x._i = idx; return x; }).sort(function(a, b) {
+    if (a.time && b.time) return a.time < b.time ? 1 : (a.time > b.time ? -1 : a._i - b._i);
+    if (a.time) return -1;
+    if (b.time) return 1;
+    return a._i - b._i;
+  });
+}
+function qcAppealThreadHtml(text, boxId) {
+  var items = qcParseAppealThread(text);
+  if (!items.length) return '<div class="rc-empty-hint">暂无申诉内容</div>';
+  var hasOur = items.some(function(x) { return x.who === '您操作'; });
+  var html = '<div class="rc-thread" id="' + boxId + '">';
+  // 有回复 / 无回复 标识（两种按钮样式；点击可筛选该侧内容）
+  html += '<div class="rc-reply-toggle" data-box="' + boxId + '">'
+    + '<button type="button" class="' + (hasOur ? 'on' : '') + '" onclick="qcThreadFilter(\'' + boxId + '\',\'ours\')">有回复</button>'
+    + '<button type="button" class="' + (!hasOur ? 'on' : '') + '" onclick="qcThreadFilter(\'' + boxId + '\',\'all\')">无回复</button>'
+    + '</div>';
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var id = boxId + '_t' + i;
+    var isAmz = it.who === '亚马逊操作';
+    var meta = [it.time, it.gmt].filter(function(x) { return !!x; }).join(' ');
+    var preview = String(it.body || '').replace(/\s+/g, ' ').slice(0, 60);
+    html += '<div class="rc-thread-item' + (isAmz ? ' rc-thread-amz' : '') + '" data-who="' + (it.who === '您操作' ? 'ours' : 'amz') + '">'
+      + '<div class="rc-thread-head" onclick="qcThreadToggle(\'' + id + '\')">'
+      + '<span class="rc-thread-who">' + escHtml(it.who || '申诉记录') + '</span>'
+      + '<span class="rc-thread-sub">' + escHtml(preview) + '</span>'
+      + '<span class="rc-thread-time">' + escHtml(meta) + '</span>'
+      + '<span class="rc-thread-caret">▶</span></div>'
+      + '<div class="rc-thread-body" id="' + id + '">' + escHtml(it.body || '') + '</div></div>';
+  }
+  return html + '</div>';
+}
+function qcThreadToggle(id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var item = el.parentNode;
+  if (item) item.classList.toggle('open');
+}
+function qcThreadFilter(boxId, mode) {
+  var box = document.getElementById(boxId);
+  if (!box) return;
+  var items = box.querySelectorAll('.rc-thread-item');
+  for (var i = 0; i < items.length; i++) {
+    var ours = items[i].getAttribute('data-who') === 'ours';
+    items[i].style.display = (mode === 'ours' && !ours) ? 'none' : '';
+  }
+  var btns = box.querySelectorAll('.rc-reply-toggle button');
+  for (var j = 0; j < btns.length; j++) btns[j].classList.toggle('on', (j === 0) === (mode === 'ours'));
+}
+function buildAppealDataBlockHtml(r, boxId, bizType) {
+  var _sb = '<span class="score-badge ';
+  if (r.totalScore === -1) _sb += 'score-na">无法质检';
+  else if (r.grade === '优秀') _sb += 'score-excellent">' + r.totalScore + ' 分（优秀）';
+  else if (r.grade === '达标') _sb += 'score-pass">' + r.totalScore + ' 分（达标）';
+  else _sb += 'score-fail">' + r.totalScore + ' 分（不达标）';
+  _sb += '</span>';
+  var _odr = qcFmtOdr(rcOdr(r));
+  var _amt = rcOrderAmount(r);
+  var _tag = bizType === 'AZ' ? '<span class="rc-title-tag t-az">AZ</span>' : '<span class="rc-title-tag t-neg">中差评</span>';
+  var html = '<div class="detail-section"><div class="rc-card">';
+  html += '<div class="rc-card-head"><h4 class="rc-title">申诉数据' + _tag + '</h4></div>';
+  html += '<div class="rc-card-body">';
+  html += '<div class="rc-base-row">'
+    + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
+    + '<div class="rc-base"><span class="rc-base-l">ODR</span><span class="rc-base-v">' + escHtml(_odr || '-') + '</span></div>'
+    + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
+    + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + (_amt !== '' ? escHtml(_amt) : '-') + '</span></div>'
+    + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
+    + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
+    + '</div>';
+  // 每个标题一行
+  var fields = [];
+  if (bizType === 'AZ') {
+    fields.push(['索赔状态', qcRawField(r, 'claimStatus')]);
+    fields.push(['是否影响订单缺陷率', qcRawField(r, 'odrImpact')]);
+    fields.push(['索赔日期', qcRawField(r, 'claimDate')]);
+    fields.push(['买家问题', qcRawField(r, 'buyerIssue')]);
+    fields.push(['买家备注', qcRawField(r, 'buyerNote')]);
+  } else {
+    fields.push(['评价时间', qcRawField(r, 'reviewTime')]);
+    fields.push(['评价内容', qcRawField(r, 'reviewContent')]);
+    fields.push(['评论评级', qcRawField(r, 'reviewRating')]);
+  }
+  html += '<div class="rc-field-list">';
+  for (var i = 0; i < fields.length; i++) {
+    html += '<div class="rc-field"><span class="rc-field-l">' + fields[i][0] + '</span><span class="rc-field-v">' + (fields[i][1] !== '' ? escHtml(fields[i][1]) : '-') + '</span></div>';
+  }
+  var _ap = qcRawField(r, 'appealContent') || String(r.reply || '');
+  html += '<div class="rc-field" style="flex-direction:column;gap:8px;"><span class="rc-field-l" style="flex:0 0 auto;">申诉内容</span>'
+        + '<div style="width:100%;">' + qcAppealThreadHtml(_ap, 'apThread_' + (boxId || 'x')) + '</div></div>';
+  html += '</div></div></div>';
+  if (r.totalScore !== -1 && r.sopPending) html += '<div style="margin-top:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">' + escHtml(bizType) + ' 专属 SOP 尚未上传，当前按通用六维度对「申诉内容」判分；SOP 上传后自动生效，无需重新导入。</div>';
+  return html + '</div>';
+}
 function buildReplyDataBlockHtml(r, boxId) {
+  // 【20261123e·需求3】AZ / 中差评：板块标题改为「申诉数据」，字段按类型渲染
+  var _bt0 = rcBizType(r);
+  if (_bt0 === 'AZ' || _bt0 === '中差评') return buildAppealDataBlockHtml(r, boxId, _bt0);
   var html = '<div class="detail-section">';
   // 回邮数据区顶部：账号 / 平台订单号 / 订单金额 / 客服 / 总分（数据与基本信息一致）
   var _sb = '<span class="score-badge ';
@@ -4524,13 +4801,17 @@ function buildReplyDataBlockHtml(r, boxId) {
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
-  // 【20261123b】按需求：在「是否需要检查流程操作」下方新增 退货 / AZ / 中差评 / 客户情绪 4 项（读取上传表同名列原值）
-  var _reg = [['是否需要检查流程操作', r.processCheck], ['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
-  html += '<div class="rc-reg-row">';
-  for (var _ri = 0; _ri < _reg.length; _ri++) {
-    html += '<div class="rc-reg"><span class="rc-reg-l">' + _reg[_ri][0] + '</span><span class="rc-reg-v">' + escHtml(_reg[_ri][1] || '') + '</span></div>';
+  // 【20261123e·需求5】回邮数据分两行：第一行固定 4 项登记字段，其余业务属性放第二行，两行间留白
+  var _regMain = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
+  var _regSub = [['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)]];
+  function _regRowHtml(list, cls) {
+    var h = '<div class="rc-reg-row ' + cls + '">';
+    for (var _i = 0; _i < list.length; _i++) {
+      h += '<div class="rc-reg"><span class="rc-reg-l">' + list[_i][0] + '</span><span class="rc-reg-v">' + escHtml(list[_i][1] || '') + '</span></div>';
+    }
+    return h + '</div>';
   }
-  html += '</div>';
+  html += _regRowHtml(_regMain, 'rc-reg-main') + _regRowHtml(_regSub, 'rc-reg-sub');
   html += '</div></div>';
   if (r.noAgentReply) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">本单' + (r.amazonOnlySession ? '回邮段落全部为亚马逊系统来信、' : '') + '没有客服回邮，已标记为「无法质检」并 <b>不纳入任何统计</b>（不计入质检量 / 达标率 / 不达标率 / 等级分布）。</div>';
   else if (r.amazonExcluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:4px;color:#9a6700;font-size:12px;">已识别并排除 ' + r.amazonExcluded + ' 段亚马逊系统来信（如销售伙伴支持团队），这些内容不参与客诉质检。</div>';
@@ -5107,6 +5388,8 @@ function qcRecordWeeklyStatBatch() {
   QC_WEEKLY_STATS.push({
     id: 'ws-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
     date: defDate,
+    // 【20261123e·需求2】统计日期支持「开始日期 ~ 结束日期」区间；初值单日（dateTo === date）
+    dateTo: defDate,
     count: n,
     avg: valid ? Math.round(scoreSum / valid * 10) / 10 : 0,
     pass: pass,
@@ -5117,11 +5400,13 @@ function qcRecordWeeklyStatBatch() {
   });
 }
 function qcRecordToolBatches() {
+  // 任意来源的批次（页面直传 b-*、工具推送 tool-*）若还没有统计记录，都按批次补一条；
+  // 这样页面重载 / 换了设备后统计记录不会丢，明细日期仍与批次一一对应。
   var batches = Object.create(null), known = Object.create(null);
   QC_WEEKLY_STATS.forEach(function(w) { if (w.batchId) known[w.batchId] = true; });
   results.forEach(function(r) {
     var k = r.batchId;
-    if (typeof k !== 'string' || k.indexOf('tool-') !== 0 || known[k]) return;
+    if (typeof k !== 'string' || !k || known[k]) return;
     var b = batches[k] || (batches[k] = { id: 'ws-' + k, batchId: k, date: '', count: 0, pass: 0, fail: 0, avg: 0, valid: 0 });
     var d = String(r.date || '').slice(0, 10);
     if (d > b.date) b.date = d;
@@ -5133,6 +5418,7 @@ function qcRecordToolBatches() {
     var b = batches[k];
     if (!b.count) return;
     b.date = b.date || qcTodayStr();
+    b.dateTo = b.dateTo || b.date;
     b.avg = b.valid ? Math.round(b.avg / b.valid * 10) / 10 : 0;
     delete b.valid;
     b.createdAt = new Date().toISOString();
@@ -5140,12 +5426,33 @@ function qcRecordToolBatches() {
   });
 }
 function qcApplyEditedBatchDates(rs, rd) {
-  var dates = Object.create(null), n = 0;
-  QC_WEEKLY_STATS.forEach(function(w) { if (w.batchId && w.editedAt && /^\d{4}-\d{2}-\d{2}$/.test(w.date)) dates[w.batchId] = w.date; });
-  [rs, rd].forEach(function(rows) { (rows || []).forEach(function(r) {
-    if (r && dates[r.batchId] && r.date !== dates[r.batchId]) { r.date = dates[r.batchId]; if (rows === rd) n++; }
-  }); });
+  // 【20261123e·需求2】批次绑定「统计日期区间」：明细日期列直接读取该批次的起止日期
+  var map = Object.create(null), n = 0;
+  QC_WEEKLY_STATS.forEach(function(w) {
+    if (!w.batchId) return;
+    var from = /^\d{4}-\d{2}-\d{2}$/.test(String(w.date || '')) ? w.date : '';
+    if (!from) return;
+    var to = /^\d{4}-\d{2}-\d{2}$/.test(String(w.dateTo || '')) ? w.dateTo : from;
+    if (to < from) to = from;
+    map[w.batchId] = { from: from, to: to, edited: !!w.editedAt };
+  });
+  [rs, rd].forEach(function(rows) {
+    (rows || []).forEach(function(r) {
+      if (!r || !map[r.batchId]) return;
+      var b = map[r.batchId];
+      if (r.date !== b.from) { r.date = b.from; if (rows === rd) n++; }
+      if (r.dateEnd !== b.to) r.dateEnd = b.to;
+    });
+  });
   return n;
+}
+// 明细/导出统一显示：同一天显示单日，跨天显示「起 ~ 止」
+function qcDateRangeText(r) {
+  var from = String((r && r.date) || '').slice(0, 10);
+  var to = String((r && r.dateEnd) || '').slice(0, 10);
+  if (!from) return '';
+  if (!to || to === from) return from;
+  return from + ' ~ ' + to;
 }
 function qcTodayStr() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
 // 按 id 合并统计记录（云端/缓存并线）；日期被管理员改过的记录以 editedAt 新者为准
@@ -5172,8 +5479,11 @@ function qcWeeklyAggByDate() {
     var w = QC_WEEKLY_STATS[i] || {};
     var d = String(w.date || '').slice(0, 10);
     if (!d) continue;
-    if (!by[d]) by[d] = { date: d, count: 0, pass: 0, fail: 0, avgSum: 0, avgW: 0, batches: 0 };
-    var g = by[d];
+    var dTo = String(w.dateTo || '').slice(0, 10) || d;
+    if (dTo < d) dTo = d;
+    var key = d + '|' + dTo;
+    if (!by[key]) by[key] = { key: key, date: d, dateTo: dTo, count: 0, pass: 0, fail: 0, avgSum: 0, avgW: 0, batches: 0 };
+    var g = by[key];
     var c = Number(w.count) || 0;
     g.count += c;
     g.pass += Number(w.pass) || 0;
@@ -5197,7 +5507,7 @@ function renderWeeklyKpi(data) {
     var fr = g.count ? Math.round(g.fail / g.count * 1000) / 10 : 0;
     var avg = g.avgW ? Math.round(g.avgSum / g.avgW * 10) / 10 : 0;
     html += '<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #eef2f7;flex-wrap:wrap;">'
-      + '<span style="font-weight:700;min-width:110px;color:#1e293b;">' + g.date.replace(/-/g, '/') + '</span>'
+      + '<span style="font-weight:700;min-width:190px;color:#1e293b;">' + (g.dateTo && g.dateTo !== g.date ? (g.date.replace(/-/g, '/') + ' ~ ' + g.dateTo.replace(/-/g, '/')) : g.date.replace(/-/g, '/')) + '</span>'
       + '<span style="color:#334155;">质检量 <b style="font-size:15px;">' + g.count + '</b> 条</span>'
       + '<span style="color:#334155;">平均分 <b style="font-size:15px;">' + avg + '</b></span>'
       + '<span style="color:#16a34a;">达标率 ' + pr + '%（达标 ' + g.pass + ' 条）</span>'
@@ -5249,36 +5559,50 @@ function renderWeeklyStatsAdmin() {
     + '<button class="btn btn-primary btn-sm" onclick="qcWsApplyFilter()">筛选</button>'
     + '<button class="btn btn-outline btn-sm" onclick="qcWsClearFilter()">清空</button>'
     + '<span style="font-size:12px;color:var(--gray-500);">' + (fromD || toD ? ('已筛选 ' + filteredWs.length + ' / 共 ' + sorted.length + ' 条记录') : ('共 ' + sorted.length + ' 条记录')) + '</span></div>';
-  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的日期；保存后相同日期的多条记录自动合并聚合计算</span></div><div class="card-body">' + filterBar + '<div class="table-wrap"><table class="summary-table"><thead><tr><th>统计日期（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
+  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的统计日期区间；保存后同步到数据看板与质检明细，区间相同的记录自动合并聚合</span></div><div class="card-body">' + filterBar + '<div class="table-wrap"><table class="summary-table"><thead><tr><th style="min-width:300px;">统计日期区间（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
   if (!filteredWs.length) {
     h += '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--gray-400);">该时间范围内暂无统计记录</td></tr>';
   }
   for (var i = 0; i < filteredWs.length; i++) {
     var w = filteredWs[i];
-    var iid = 'wsDate_' + i;
+    var fromId = 'wsDateFrom_' + i, toId = 'wsDateTo_' + i;
+    var _from = String(w.date || '').slice(0, 10);
+    var _to = String(w.dateTo || '').slice(0, 10) || _from;
     h += '<tr>'
-      + '<td><input type="date" id="' + iid + '" value="' + escHtml(String(w.date || '').slice(0, 10)) + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;"></td>'
+      + '<td style="white-space:nowrap;">'
+      + '<input type="date" id="' + fromId + '" value="' + escHtml(_from) + '" style="padding:4px 6px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
+      + '<span style="margin:0 5px;color:var(--gray-500);">~</span>'
+      + '<input type="date" id="' + toId + '" value="' + escHtml(_to) + '" style="padding:4px 6px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
+      + '</td>'
       + '<td>' + (Number(w.count) || 0) + '</td>'
       + '<td>' + (Math.round((Number(w.avg) || 0) * 10) / 10) + '</td>'
       + '<td style="color:#16a34a;">' + (Number(w.pass) || 0) + '</td>'
       + '<td style="color:#dc2626;">' + (Number(w.fail) || 0) + '</td>'
       + '<td style="color:var(--gray-500);font-size:12px;">' + escHtml(String(w.createdAt || '').replace('T', ' ').slice(0, 19)) + (w.editedAt ? '<br>改期 ' + escHtml(String(w.editedAt).replace('T', ' ').slice(0, 19)) : '') + '</td>'
-      + '<td><button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatDate(' + htmlAttrJsStr(w.id) + ',\'' + iid + '\')">保存日期</button></td>'
+      + '<td><button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatRange(' + htmlAttrJsStr(w.id) + ',\'' + fromId + '\',\'' + toId + '\')">保存日期</button></td>'
       + '</tr>';
   }
   h += '</tbody></table></div></div></div>';
   wrap.innerHTML = h;
 }
-function qcSaveWeeklyStatDate(id, inputId) {
+// 【20261123e·需求2】统计日期区间保存：开始 ~ 结束
+function qcSaveWeeklyStatRange(id, fromInputId, toInputId) {
   if (!requireAdmin('修改统计日期')) return;
-  var el = document.getElementById(inputId);
-  if (!el) return;
-  var v = String(el.value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { showToast('日期格式不正确，请选择有效日期', 'error'); return; }
+  var fromEl = document.getElementById(fromInputId);
+  var toEl = document.getElementById(toInputId);
+  if (!fromEl) return;
+  var from = String(fromEl.value || '').trim();
+  var to = toEl ? String(toEl.value || '').trim() : from;
+  var okDate = /^\d{4}-\d{2}-\d{2}$/;
+  if (!okDate.test(from)) { showToast('开始日期格式不正确，请选择有效日期', 'error'); return; }
+  if (!to) to = from;
+  if (!okDate.test(to)) { showToast('结束日期格式不正确，请选择有效日期', 'error'); return; }
+  if (to < from) { showToast('结束日期不能早于开始日期', 'error'); return; }
   var stat = null;
   for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
     if (QC_WEEKLY_STATS[i].id === id) {
-      QC_WEEKLY_STATS[i].date = v;
+      QC_WEEKLY_STATS[i].date = from;
+      QC_WEEKLY_STATS[i].dateTo = to;
       QC_WEEKLY_STATS[i].editedAt = new Date().toISOString();
       stat = QC_WEEKLY_STATS[i];
       break;
@@ -5286,15 +5610,17 @@ function qcSaveWeeklyStatDate(id, inputId) {
   }
   if (!stat) return;
   var nSync = qcApplyEditedBatchDates(results, rawData);
-  var syncNote = stat.batchId ? '；已更新本批次明细日期（本次变更 ' + nSync + ' 条）' : '；旧批次无绑定标识，仅修改统计日期';
+  var syncNote = stat.batchId ? '；已同步本批次 ' + nSync + ' 条明细的日期' : '；旧批次无绑定标识，仅修改统计日期';
   renderDetailTable();
   renderWeeklyStatsAdmin();
   renderDashboard();
   return cloudSaveState().then(function(saved) {
     if (!saved) { showToast('日期已在当前页面更新，但未确认云端保存' + syncNote, 'error'); return; }
-    showToast('统计日期已保存' + syncNote, 'success');
+    showToast('统计日期区间已保存（' + from + ' ~ ' + to + '）' + syncNote, 'success');
   }).catch(function() { showToast('日期已在当前页面更新，但云端保存失败，请恢复连接后重新保存', 'error'); });
 }
+// 兼容旧调用（单日 → 视为同一天的区间）
+function qcSaveWeeklyStatDate(id, inputId) { return qcSaveWeeklyStatRange(id, inputId, inputId); }
 function qcWeekRangeOf(dateStr) {
   var s = String(dateStr || '').trim();
   var d = new Date(s.replace(/-/g, '/'));
@@ -5358,7 +5684,67 @@ function renderDashboard() {
   wowDecorateGroupStats(dashboardData);
   renderSummaryTable(dashboardData, _dim);
   wowDecorateSummary(dashboardData, _dim);
+  try { renderEmotionStats(dashboardData); } catch (e) {}
   setTimeout(function() { renderCharts(dashboardData, _dim); }, 100);
+}
+
+// ============================================================
+// 【20261123e·需求6】客户情绪回邮数据统计
+// 口径：客户情绪列命中「愤怒 / 侵权 / 威胁」（中英文关键词）的回邮记录；
+// 列：回邮订单号、顾客情绪、客服、数量、总分；点订单号打开与明细一致的详情弹窗。
+// 数量 = 该客服名下的情绪命中条数（同客服同情绪累计），便于看谁的情绪类回邮最多。
+// ============================================================
+var QC_EMOTION_TAGS = [
+  { key: '愤怒', cls: 'e-angry', re: /(愤怒|生气|暴怒|恼火|angry|furious|rage|upset)/i },
+  { key: '侵权', cls: 'e-violate', re: /(侵权|违规|侵权投诉|infringe|infringement|violation|ipcomplaint)/i },
+  { key: '威胁', cls: 'e-threat', re: /(威胁|恐吓|投诉你|起诉|threat|threaten|lawsuit|sue)/i }
+];
+function qcEmotionTagsOf(text) {
+  var s = String(text || '');
+  if (!s.trim()) return [];
+  var out = [];
+  for (var i = 0; i < QC_EMOTION_TAGS.length; i++) if (QC_EMOTION_TAGS[i].re.test(s)) out.push(QC_EMOTION_TAGS[i]);
+  return out;
+}
+function renderEmotionStats(data) {
+  var card = document.getElementById('emotionStatCard'), wrap = document.getElementById('emotionStatWrap');
+  if (!card || !wrap) return;
+  var rows = [];
+  for (var i = 0; i < (data || []).length; i++) {
+    var r = data[i];
+    if (!r) continue;
+    var emo = rcCustEmotion(r);
+    var tags = qcEmotionTagsOf(emo);
+    if (!tags.length) continue;
+    rows.push({ r: r, emo: emo, tags: tags });
+  }
+  if (!rows.length) { card.style.display = 'none'; wrap.innerHTML = ''; return; }
+  // 该客服的情绪命中累计数
+  var byAgent = {}, byTag = {};
+  for (var a = 0; a < rows.length; a++) {
+    var an = canonicalAgentName(rows[a].r.agent) || '（未填写客服）';
+    byAgent[an] = (byAgent[an] || 0) + 1;
+    for (var t = 0; t < rows[a].tags.length; t++) { var tk = rows[a].tags[t].key; byTag[tk] = (byTag[tk] || 0) + 1; }
+  }
+  var sumTxt = QC_EMOTION_TAGS.map(function(x) { return x.key + ' ' + (byTag[x.key] || 0); }).join(' · ');
+  var html = '<div style="padding:8px 12px;font-size:12px;color:var(--gray-600);border-bottom:1px solid var(--gray-100);">命中 ' + rows.length + ' 条回邮（' + sumTxt + '）</div>';
+  html += '<table class="summary-table emotion-table"><thead><tr><th>回邮订单号</th><th>顾客情绪</th><th>客服</th><th>数量</th><th>总分</th></tr></thead><tbody>';
+  for (var k = 0; k < rows.length; k++) {
+    var rr = rows[k].r;
+    var an2 = canonicalAgentName(rr.agent) || '（未填写客服）';
+    var chips = rows[k].tags.map(function(x) { return '<span class="emotion-chip ' + x.cls + '">' + x.key + '</span>'; }).join(' ');
+    var scoreHtml = rr.totalScore === -1 ? '<span class="score-badge score-na">-</span>'
+      : '<span class="score-badge ' + (rr.grade === '优秀' ? 'score-excellent' : (rr.grade === '达标' ? 'score-pass' : 'score-fail')) + '">' + rr.totalScore + '</span>';
+    html += '<tr>'
+      + '<td class="text-left"><span class="cell-clickable" onclick="showDetail(' + rr._index + ')">' + escHtml(rr.order || '') + '</span></td>'
+      + '<td class="text-left">' + chips + (rows[k].emo ? ' <span style="color:var(--gray-500);font-size:11.5px;">' + escHtml(String(rows[k].emo).slice(0, 24)) + '</span>' : '') + '</td>'
+      + '<td>' + escHtml(an2) + '</td>'
+      + '<td>' + (byAgent[an2] || 1) + '</td>'
+      + '<td>' + scoreHtml + '</td></tr>';
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+  card.style.display = 'block';
 }
 
 function renderKPI(data, skippedUnassessed) {
