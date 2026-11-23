@@ -280,6 +280,11 @@ var QC_LAST_GOOD_RESULTS = [];
 // 追加上传时：前 N 条旧明细原样保留（含评分、明细、申诉），只质检新加入的条目
 var QC_APPEND_PRESERVE = false;
 var QC_APPEND_OLD_COUNT = 0;
+// 【2026-11-23 周度统计改造】本次导入批次在 results/rawData 中的区间 {start,count}；
+// 质检完成后按这一批生成一条独立的周度统计记录（不再固定取上周）。
+var QC_BATCH_META = null;
+// 周度统计记录库：每导入一批新增一条 {id,date,count,avg,pass,fail,createdAt}；管理员可改日期，同日期展示时自动聚合
+var QC_WEEKLY_STATS = [];
 var detailOrderExact = '';
 var charts = {};
 var HAS_XLSX = typeof XLSX !== 'undefined';
@@ -553,8 +558,8 @@ function qcRenderGenerationBadge() {
     el.title = '批次代号随每次上传/清空递增；永久删除名单在独立云端登记表中，任何设备都无法让已删数据复活';
   }
 }
-function createEmptyAppeal() { return { status: '无申诉', reason: '', submittedAt: '', reviewer: '', reviewReason: '', reviewedAt: '', attachments: [], modules: [], moduleDecisions: {}, moduleReviewReasons: {}, moduleScores: {}, referenceAdded: false, referenceKnowledgeId: '', referenceAddedAt: '', referenceType: '', referenceKind: '', referenceTitle: '', referenceSummary: '' }; }
-function normalizeAppeal(appeal) { var a = appeal || {}; var base = createEmptyAppeal(); for (var k in base) if (base.hasOwnProperty(k)) base[k] = a[k] !== undefined && a[k] !== null ? a[k] : base[k]; if (APPEAL_STATUSES.indexOf(base.status) < 0) base.status = '无申诉'; if (!Array.isArray(base.attachments)) base.attachments = []; if (!Array.isArray(base.modules)) base.modules = []; if (!base.moduleDecisions || typeof base.moduleDecisions !== 'object') base.moduleDecisions = {}; if (!base.moduleReviewReasons || typeof base.moduleReviewReasons !== 'object') base.moduleReviewReasons = {}; if (!base.moduleScores || typeof base.moduleScores !== 'object') base.moduleScores = {}; base.referenceAdded = !!base.referenceAdded; return base; }
+function createEmptyAppeal() { return { status: '无申诉', reason: '', submittedAt: '', reviewer: '', reviewReason: '', reviewedAt: '', attachments: [], modules: [], moduleDecisions: {}, moduleReviewReasons: {}, moduleScores: {}, referenceAdded: false, referenceKnowledgeId: '', referenceAddedAt: '', referenceType: '', referenceKind: '', referenceTitle: '', referenceSummary: '', withdrawCount: 0, withdrawnAt: '', withdrawHistory: [] }; }
+function normalizeAppeal(appeal) { var a = appeal || {}; var base = createEmptyAppeal(); for (var k in base) if (base.hasOwnProperty(k)) base[k] = a[k] !== undefined && a[k] !== null ? a[k] : base[k]; if (APPEAL_STATUSES.indexOf(base.status) < 0) base.status = '无申诉'; if (!Array.isArray(base.attachments)) base.attachments = []; if (!Array.isArray(base.modules)) base.modules = []; if (!base.moduleDecisions || typeof base.moduleDecisions !== 'object') base.moduleDecisions = {}; if (!base.moduleReviewReasons || typeof base.moduleReviewReasons !== 'object') base.moduleReviewReasons = {}; if (!base.moduleScores || typeof base.moduleScores !== 'object') base.moduleScores = {}; if (!Array.isArray(base.withdrawHistory)) base.withdrawHistory = []; base.withdrawCount = Number(base.withdrawCount) || 0; base.referenceAdded = !!base.referenceAdded; return base; }
 function getAppealPassScore() { for (var i = 0; i < GRADE_RULES.length; i++) if (GRADE_RULES[i].grade === '达标') return Number(GRADE_RULES[i].minScore) || 80; return 80; }
 function getAppealModules(result) { return DIM_NAMES.slice(); }
 function isAppealPassedModule(result, dim) { var detail = result && result.details && result.details[dim] || {}; return ['优秀', '达标', '通过'].indexOf(detail.grade) >= 0; }
@@ -575,6 +580,8 @@ function applyAppealApprovedGrade(result) {
     result.originalTotalScore = result.totalScore;
     result.originalGrade = result.grade;
     result.originalScores = JSON.parse(JSON.stringify(result.scores || {}));
+    // 2026-11-23 撤回支持：同时快照原始明细，撤回时完整还原（含维度等级与问题说明）
+    result.originalDetails = JSON.parse(JSON.stringify(result.details || {}));
   }
   var manual = result.appeal.moduleScores || {};
   for (var i = 0; i < approved.length; i++) {
@@ -683,7 +690,7 @@ function qcEncodeStateJson(obj) {
   }
   return json;
 }
-function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE }; }
+function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE, weeklyStats: (typeof QC_WEEKLY_STATS !== 'undefined' ? QC_WEEKLY_STATS : []) }; }
 function qcLoadSnapshotFallback() {
   // 2026-11-19：禁用「自动加载 2026-10-16 旧快照」。此前云端偶发读取失败时会自动灌入旧快照，
   // 造成「已经删掉的数据又冒出来」。现在只读失败仅提示，绝不自动替换用户数据。
@@ -728,6 +735,8 @@ function cloudLoadState() {
 function qcAppealStamp(r) {
   var a = (r && r.appeal) || {};
   var t = a.reviewedAt || a.submittedAt || '';
+  // 2026-11-23 撤回：撤回时间戳参与比较，保证「已撤回(退回待审核)」能覆盖其他设备上更旧的审核结果
+  if (a.withdrawnAt && String(a.withdrawnAt) > String(t)) t = String(a.withdrawnAt);
   return t ? String(t) : '';
 }
 // 申诉"进度等级"：无申诉(0) < 待审核(1) < 被拒/部分通过(2) < 申诉通过(3)
@@ -765,6 +774,8 @@ function qcMergeAppealInto(localR, cloudR) {
 }
 function qcMergeCloudNewRecords(cloudD) {
   if (!cloudD || !cloudD.results || !cloudD.rawData) return 0;
+  // 【2026-11-23 周度统计】云端统计记录并线（其他设备导入的新批次 / 改期结果）
+  try { qcMergeWeeklyStats(cloudD.weeklyStats); } catch (e) {}
   // 云端可能由后端工具直写（中文字段名/别名），先归一再合并，保证新增记录的金额/ODR 也能显示
   try { qcNormalizeAmountOdrFields(cloudD); } catch (e) {}
   var index = {}, i;
@@ -831,6 +842,7 @@ function qcAuditEventFrom(r, action) {
   if (!r) return null;
   var a = r.appeal || {};
   var stamp = a.reviewedAt || a.submittedAt || '';
+  if (a.withdrawnAt && String(a.withdrawnAt) > String(stamp)) stamp = String(a.withdrawnAt);
   var op = '';
   try {
     if (action === 'submit') { op = (typeof qcAppealMine === 'function' ? qcAppealMine() : '') || ''; }
@@ -1499,6 +1511,7 @@ function wouldBeUninspectable(reply) {
 
 function afterParse(data, mode) {
   if (!data || data.length < 2) { showToast('数据为空或格式不正确', 'error'); return; }
+  QC_BATCH_META = null;
   var headers = data[0].map(function(h) { return String(h || '').trim(); });
   var colMap = {};
   for (var hi = 0; hi < headers.length; hi++) {
@@ -1583,11 +1596,13 @@ function afterParse(data, mode) {
     try { if (reUploadKeys.length) qcReleaseDeletedKeys(reUploadKeys, '追加上传重新导入'); } catch (e) {}
     try { qcBumpGeneration('追加上传', newRawData.length); } catch (e) {}
     rawData = rawData.concat(newRawData);
+    QC_BATCH_META = { start: QC_APPEND_OLD_COUNT, count: newRawData.length };
     showToast('追加 ' + newRawData.length + ' 条数据（共 ' + rawData.length + ' 条）' + (dupCount ? '，跳过重复 ' + dupCount + ' 条' : '') + (reUploadKeys.length ? '，其中 ' + reUploadKeys.length + ' 条为重新上传，已自动解除永久删除限制' : '') + (skippedUninspectable ? '，导入时剔除无法质检 ' + skippedUninspectable + ' 条' : '') + '，开始质检...', 'success');
   } else {
     QC_APPEND_OLD_COUNT = 0;
     QC_APPEND_PRESERVE = false;
     rawData = newRawData;
+    QC_BATCH_META = { start: 0, count: newRawData.length };
     showToast('清空后成功解析 ' + rawData.length + ' 条数据' + (skippedUninspectable ? '（导入时剔除无法质检 ' + skippedUninspectable + ' 条）' : '') + '，开始质检...', 'success');
   }
   setTimeout(runQualityCheck, 300);
@@ -3330,6 +3345,8 @@ function onQualityCheckDone() {
   document.getElementById('dataInfo').style.display = 'block';
   document.getElementById('dataCount').textContent = results.length;
   document.getElementById('detailBadge').textContent = results.length;
+  // 【2026-11-23 周度统计改造】每导入一批质检数据，生成一条独立统计记录（只算本批）
+  try { qcRecordWeeklyStatBatch(); } catch (e) {}
   populateFilters();
   renderDetailTable();
   renderDashboard();
@@ -3348,6 +3365,16 @@ function onQualityCheckDone() {
 // ============================================================
 var multiSelState = { account: [], agent: [], grade: [] };
 var bulkTerms = [];
+// 【2026-11-23 需求2/3】概览条「客服前5 / 账号前5 / 重点关注」下拉弹窗：
+//   · 多选：点选项不收起弹窗，可继续勾选多条，表格实时联动；
+//   · 搜索：弹窗顶部搜索栏，支持单个关键词或英文逗号分隔的批量搜索。
+var ovPopOpen = { agent: false, account: false, focus: false };
+var OV_SEARCH = {
+  agent:   { text: '', active: false, hits: [] },
+  account: { text: '', active: false, hits: [] },
+  focus:   { text: '', active: false, hits: [] }
+};
+function ovSearchParseTerms(raw) { return String(raw || '').split(/[,，]/).map(function(s) { return String(s || '').trim(); }).filter(function(s) { return s.length > 0; }); }
 var MULTI_META = {
   account: { sel: 'detailFilterAccount', label: '账号' },
   agent:   { sel: 'detailFilterAgent',   label: '客服' },
@@ -3748,16 +3775,18 @@ function ovScrollToTable() {
   }, 40);
 }
 // 点客服 / 账号名 → 单选该值；再点取消
-function ovPickRank(key, value) {
-  var cur = getMultiValues(key);
-  var on = cur.length === 1 && cur[0] === value;
-  multiSelState[key] = on ? [] : [value];
-  var sel = document.getElementById(MULTI_META[key].sel);
-  if (sel) sel.value = '';
+// 【2026-11-23 需求3】多选切换：点选项 = 勾选/取消该维度的一条；不收起弹窗、不滚动页面，表格实时联动。
+// 兼容旧调用（只传两个参数时行为一致，只是不再单选互斥）。
+function ovPickRankMulti(key, value) {
+  var cur = getMultiValues(key).slice();
+  var i = cur.indexOf(value);
+  if (i >= 0) cur.splice(i, 1); else cur.push(value);
+  multiSelState[key] = cur;
+  clearHiddenSelect(key);
   renderMultiSel(key);
-  renderDetailTable();
-  ovScrollToTable();
+  renderDetailTable();   // 内部会重建概览条，弹窗按 ovPopOpen 保持开合
 }
+function ovPickRank(key, value) { ovPickRankMulti(key, value); ovScrollToTable(); }
 // 清掉某个维度的全部选择（多选时用）
 function ovClearKey(key) {
   multiSelState[key] = [];
@@ -3786,13 +3815,17 @@ function ovPickAssessed(v) {
   ovScrollToTable();
 }
 // 点重点关注行 → 用批量筛选锁定该单号
-function ovPickOrder(order) {
+// 【2026-11-23 需求3】改为多选：点卡片 = 勾选/取消该单号（写入批量筛选），可连续点选多条，表格实时联动。
+function ovPickOrderMulti(order) {
   if (!order) return;
   var t = document.getElementById('detailBulk');
-  if (t) t.value = order;
+  var cur = (t ? t.value : '').split(/[\n\r,，;；\t ]+/).map(function(x) { return x.trim(); }).filter(function(x) { return !!x; });
+  var i = cur.indexOf(order);
+  if (i >= 0) cur.splice(i, 1); else cur.push(order);
+  if (t) t.value = cur.join(',');
   applyBulkFilter();
-  ovScrollToTable();
 }
+function ovPickOrder(order) { ovPickOrderMulti(order); ovScrollToTable(); }
 function ovExpandFocus() {
   ovFocusOpen = !ovFocusOpen;
   if (lastOvFiltered) renderDetailOverview(lastOvFiltered);
@@ -3804,12 +3837,93 @@ function ovClearAll() {
   var t = document.getElementById('detailBulk'); if (t) t.value = '';
   var h = document.getElementById('bulkHint'); if (h) h.textContent = '';
   var s = document.getElementById('detailFilterAssessed'); if (s) s.value = '';
+  OV_SEARCH = { agent: { text: '', active: false, hits: [] }, account: { text: '', active: false, hits: [] }, focus: { text: '', active: false, hits: [] } };
+  ovPopOpen = { agent: false, account: false, focus: false };
   refreshAllMultiSel();
   renderDetailTable();
 }
+// 【2026-11-23 需求4】质检明细【重置】按钮：一键清空页面全部筛选条件，表格恢复未筛选原始全部数据
+function resetAllDetailFilters() {
+  multiSelState = { account: [], agent: [], grade: [] };
+  bulkTerms = [];
+  detailOrderExact = '';
+  var ids = ['detailFilterGroup', 'detailFilterAppeal', 'detailFilterAssessed', 'detailFilterDim', 'detailBulk'];
+  for (var i = 0; i < ids.length; i++) { var el = document.getElementById(ids[i]); if (el) el.value = ''; }
+  var h = document.getElementById('bulkHint'); if (h) h.textContent = '';
+  OV_SEARCH = { agent: { text: '', active: false, hits: [] }, account: { text: '', active: false, hits: [] }, focus: { text: '', active: false, hits: [] } };
+  ovPopOpen = { agent: false, account: false, focus: false };
+  refreshAllMultiSel();
+  renderDetailTable();
+  showToast('已重置全部筛选条件，表格已恢复全部数据', 'success');
+}
 var ovRankOpen = {};
+// 【2026-11-23 需求2】弹窗内搜索：客服前5 / 账号前5 —— 单个关键词或英文逗号分隔批量搜索；
+// 命中项写入该维度多选状态（表格同步筛选），弹窗保持打开并只显示命中项。
+function ovSearchRank(key) {
+  var input = document.getElementById('ovSearch_' + key);
+  var raw = input ? String(input.value || '') : '';
+  var terms = ovSearchParseTerms(raw);
+  if (!terms.length) { showToast('请输入搜索关键词（批量用英文逗号 , 分隔）', 'info'); return; }
+  var opts = multiOptions(key);
+  var hits = [];
+  for (var i = 0; i < opts.length; i++) {
+    var v = String(opts[i]), lv = v.toLowerCase();
+    for (var j = 0; j < terms.length; j++) {
+      var t = terms[j], lt = t.toLowerCase();
+      if (v === t || lv === lt || lv.indexOf(lt) >= 0) { if (hits.indexOf(v) < 0) hits.push(v); break; }
+    }
+  }
+  if (!hits.length) { showToast('未找到匹配项：' + terms.join(', '), 'error'); return; }
+  OV_SEARCH[key] = { text: raw, active: true, hits: hits };
+  multiSelState[key] = hits;
+  clearHiddenSelect(key);
+  renderMultiSel(key);
+  renderDetailTable();   // 重建概览条：弹窗保持打开、列表只显示命中项，表格同步筛选
+  showToast('已筛选出 ' + hits.length + ' 项' + (hits.length < terms.length ? '（部分关键词未命中）' : ''), 'success');
+}
+// 清空本维度搜索：搜索条件清除，列表恢复全部选项，表格还原该维度筛选状态
+function ovClearSearch(key) {
+  OV_SEARCH[key] = { text: '', active: false, hits: [] };
+  multiSelState[key] = [];
+  clearHiddenSelect(key);
+  renderMultiSel(key);
+  renderDetailTable();
+}
+// 重点关注弹窗内搜索：按单号/账号/客服/问题描述匹配，命中单号写入批量筛选（表格同步筛选）
+function ovSearchFocus() {
+  var input = document.getElementById('ovSearch_focus');
+  var raw = input ? String(input.value || '') : '';
+  var terms = ovSearchParseTerms(raw);
+  if (!terms.length) { showToast('请输入搜索关键词（批量用英文逗号 , 分隔）', 'info'); return; }
+  var list = ovFocusList(results);   // 全量池搜索，不受当前筛选影响
+  var hitOrders = [];
+  for (var i = 0; i < list.length; i++) {
+    var it = list[i], rr = it.r || {};
+    var hay = [rr.order, rr.account, rr.agent, it.why, it.tag].map(function(s) { return String(s == null ? '' : s).toLowerCase(); }).join('\n');
+    for (var j = 0; j < terms.length; j++) {
+      if (hay.indexOf(terms[j].toLowerCase()) >= 0) { if (rr.order && hitOrders.indexOf(rr.order) < 0) hitOrders.push(rr.order); break; }
+    }
+  }
+  if (!hitOrders.length) { showToast('未找到匹配的重点关注记录：' + terms.join(', '), 'error'); return; }
+  OV_SEARCH.focus = { text: raw, active: true, hits: hitOrders };
+  var t = document.getElementById('detailBulk');
+  if (t) t.value = hitOrders.join(',');
+  applyBulkFilter();   // 内部 renderDetailTable：弹窗保持打开、卡片只显示命中项
+  showToast('已定位 ' + hitOrders.length + ' 条重点关注记录', 'success');
+}
+function ovClearSearchFocus() {
+  OV_SEARCH.focus = { text: '', active: false, hits: [] };
+  clearBulkFilter();   // 清除重点关注维度的筛选条件（批量筛选），列表恢复全部
+}
 function ovToggleRank(key){ ovRankOpen[key] = !ovRankOpen[key]; if (typeof lastOvFiltered !== "undefined") renderDetailOverview(lastOvFiltered); }
-function ovTogglePop(popId){ var el = document.getElementById(popId); if(!el) return; el.style.display = (el.style.display === "none" || !el.style.display) ? "block" : "none"; }
+function ovTogglePop(popId){
+  var el = document.getElementById(popId); if(!el) return;
+  var open = (el.style.display === "none" || !el.style.display);
+  el.style.display = open ? "block" : "none";
+  // 2026-11-23：记住开合状态，表格重渲染后弹窗不再被强制收起
+  var key = String(popId).replace('ovPop_', '');
+  if (key === 'agent' || key === 'account' || key === 'focus') ovPopOpen[key] = open;
+}
 function renderDetailOverview(filtered) {
   var host = document.getElementById('detailOverview');
   if (!host) return;
@@ -3840,17 +3954,28 @@ function renderDetailOverview(filtered) {
     return { assessed: assessed, unassessed: unassessed, avg: assessed ? (letters / assessed).toFixed(1) : '0.0' };
   }
   function rankBox(key, title) {
-    var allArr = topN(key, 9999);
+    // 2026-11-23：弹窗列表用「全量选项池」——即使已按多选筛掉部分选项，其余选项仍留在
+    // 弹窗里可继续勾选（计数显示 0），否则第一次选择后弹窗缩水消失，无法继续多选。
+    var universe = multiOptions(key);
+    var allArr0 = topN(key, 9999);
+    var cntMap = {};
+    for (var u0 = 0; u0 < allArr0.length; u0++) cntMap[allArr0[u0].k] = allArr0[u0].n;
+    var allArr = allArr0.slice();
+    for (var u1 = 0; u1 < universe.length; u1++) if (cntMap[universe[u1]] === undefined) allArr.push({ k: universe[u1], n: 0 });
     var picked = getMultiValues(key);
-    var top = allArr.length ? allArr[0].n : 1;
-    function buildRows(list) {
+    var top = 1;
+    for (var u2 = 0; u2 < allArr.length; u2++) if (allArr[u2].n > top) top = allArr[u2].n;
+    var _sv = OV_SEARCH[key] || { text: '', active: false, hits: [] };
+    // 搜索激活时，弹窗列表只显示命中项
+    var popArr = _sv.active ? allArr.filter(function(x) { return _sv.hits.indexOf(x.k) >= 0; }) : allArr;
+    function buildRows(list, inPop) {
       var rows = '';
       for (var i = 0; i < list.length; i++) {
         var x = list[i];
         var w = Math.max(24, Math.round(x.n / top * 100));
-        var on = (picked.length === 1 && picked[0] === x.k) ? ' on' : '';
+        var on = picked.indexOf(x.k) >= 0 ? ' on' : '';
         var st = rankStat(key, x.k);
-        rows += '<div class="ov-rank r' + (i + 1) + on + '" title="只看 ' + escHtml(x.k) + ' 的数据（再点一次取消）" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(x.k) + ')">'
+        rows += '<div class="ov-rank r' + (i + 1) + on + '" title="' + (picked.indexOf(x.k) >= 0 ? '取消筛选 ' : '加入筛选 ') + escHtml(x.k) + '（可连续点选多条）" onclick="' + (inPop ? 'ovPickRankMulti' : 'ovPickRank') + '(\'' + key + '\',' + htmlAttrJsStr(x.k) + ')">'
               + '<span class="ov-fill" style="width:' + w + '%"></span>'
               + '<span class="ov-rk">' + (i + 1) + '</span>'
               + '<span class="ov-nm">' + escHtml(x.k) + '</span>'
@@ -3860,10 +3985,11 @@ function renderDetailOverview(filtered) {
       }
       return rows;
     }
-    var rowsInner = buildRows(allArr.slice(0, 5));
+    var rowsInner = buildRows(allArr.slice(0, 5), false);
     var rows = !rowsInner ? '<div class="ov-empty">暂无数据</div>' : '<div class="ov-rank-list">' + rowsInner + '</div>';
     var reset = '';
-    if (picked.length === 1) reset = '<span class="ov-reset" onclick="ovPickRank(\'' + key + '\',' + htmlAttrJsStr(picked[0]) + ')" title="取消该筛选">✕ ' + escHtml(picked[0]) + '</span>';
+    if (_sv.active) reset = '<span class="ov-reset" onclick="ovClearSearch(\'' + key + '\')" title="清除本维度搜索条件">✕ 清除搜索</span>';
+    else if (picked.length === 1) reset = '<span class="ov-reset" onclick="ovPickRankMulti(\'' + key + '\',' + htmlAttrJsStr(picked[0]) + ')" title="取消该筛选">✕ ' + escHtml(picked[0]) + '</span>';
     else if (picked.length > 1) reset = '<span class="ov-reset" onclick="ovClearKey(\'' + key + '\')" title="取消该筛选">✕ 已筛 ' + picked.length + ' 项</span>';
     var head = '<div class="ov-toprow"><span class="ov-label">' + title + '</span>' + reset
          + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>';
@@ -3871,11 +3997,16 @@ function renderDetailOverview(filtered) {
     if (allArr.length > 5) {
       var popId = 'ovPop_' + key;
       bar = '<div class="ov-expand-bar" onclick="ovTogglePop(\'' + popId + '\')">▼ 展开全部 ' + allArr.length + ' 人</div>';
-      pop = '<div class="ov-pop" id="' + popId + '" style="display:none">'
+      var popRows = buildRows(popArr, true);
+      if (!popRows) popRows = '<div class="ov-empty" style="padding:10px 0;">没有匹配「' + escHtml(_sv.text) + '」的记录</div>';
+      pop = '<div class="ov-pop" id="' + popId + '" style="display:' + (ovPopOpen[key] ? 'block' : 'none') + '">'
           + '<div class="ov-pop-head"><span class="ov-label">' + title + '</span>'
-          + '<span class="ov-allnum">全部 ' + allArr.length + ' 人</span>'
+          + '<span class="ov-allnum">' + (_sv.active ? ('匹配 ' + popArr.length + ' / 全部 ' + allArr.length + ' 人') : ('全部 ' + allArr.length + ' 人')) + '</span>'
           + '<div class="ov-cols"><span class="ov-c1">总数</span><span class="ov-c2">考核/不考核</span><span class="ov-c3">均去信</span></div></div>'
-          + '<div class="ov-pop-body">' + buildRows(allArr) + '</div>'
+          + '<div class="ov-search"><input type="text" id="ovSearch_' + key + '" class="ov-search-input" placeholder="单个关键词搜索，批量请使用英文逗号,分隔" value="' + escHtml(_sv.text) + '" onkeydown="if(event.key===\'Enter\'){event.preventDefault();ovSearchRank(\'' + key + '\');}">'
+          + '<button type="button" class="ov-search-btn" onclick="ovSearchRank(\'' + key + '\')">搜索</button>'
+          + '<button type="button" class="ov-search-btn ov-search-plain" onclick="ovClearSearch(\'' + key + '\')">清空</button></div>'
+          + '<div class="ov-pop-body">' + popRows + '</div>'
           + '<div class="ov-pop-foot"><span class="ov-pop-close" onclick="ovTogglePop(\'' + popId + '\')">▲ 收起</span></div></div>';
     }
     return '<div class="ov-box ov-popbox">' + head + rows + bar + pop + '</div>';
@@ -3911,11 +4042,13 @@ function renderDetailOverview(filtered) {
   var focus = ovFocusList(filtered);
   var OV_FOCUS_MAX = 4;
   var showN = Math.min(focus.length, OV_FOCUS_MAX);
+  var _fsv = OV_SEARCH.focus || { text: '', active: false, hits: [] };
   function buildFCards(list) {
     var h = '';
     for (var fi = 0; fi < list.length; fi++) {
       var it = list[fi], rr = it.r;
-      h += '<div class="ov-fcard' + (it.sev === 0 ? '' : ' amber') + '" title="点击定位到该单" onclick="ovPickOrder(' + htmlAttrJsStr(rr.order) + ')">'
+      var fOn = bulkTerms && bulkTerms.indexOf(rr.order) >= 0;
+      h += '<div class="ov-fcard' + (it.sev === 0 ? '' : ' amber') + (fOn ? ' ov-fcard-on' : '') + '" title="' + (fOn ? '取消筛选该单' : '点击筛选该单') + '（可连续点选多条）" onclick="ovPickOrderMulti(' + htmlAttrJsStr(rr.order) + ')">'
            + '<div class="ov-frow"><span class="ov-tag ' + (it.sev === 0 ? 't-red' : 't-amber') + '">' + escHtml(it.tag) + '</span>'
            + '<span class="ov-facc">' + escHtml(rr.account || '未填写账号') + '</span>'
            + '<span class="ov-ford">' + escHtml(rr.order || '') + '</span></div>'
@@ -3925,12 +4058,20 @@ function renderDetailOverview(filtered) {
   }
   var frows = buildFCards(focus.slice(0, showN));
   var fbar = '', fpop = '';
-  if (focus.length > OV_FOCUS_MAX) {
-    fbar = '<div class="ov-expand-bar" onclick="ovTogglePop(\'ovPop_focus\')">▼ 展开全部 ' + focus.length + ' 条</div>';
-    fpop = '<div class="ov-pop ov-pop-focus" id="ovPop_focus" style="display:none">'
+  // 2026-11-23：弹窗卡片列表用「全量池」（全部数据里的重点关注），不随当前筛选缩水，保证可继续多选
+  var focusUniverse = ovFocusList(results);
+  if (focusUniverse.length > OV_FOCUS_MAX) {
+    fbar = '<div class="ov-expand-bar" onclick="ovTogglePop(\'ovPop_focus\')">▼ 展开全部 ' + focusUniverse.length + ' 条</div>';
+    var popFocus = _fsv.active ? focusUniverse.filter(function(it) { return _fsv.hits.indexOf(it.r && it.r.order) >= 0; }) : focusUniverse;
+    var popFCards = buildFCards(popFocus);
+    if (!popFCards) popFCards = '<div class="ov-frest">没有匹配「' + escHtml(_fsv.text) + '」的重点关注记录</div>';
+    fpop = '<div class="ov-pop ov-pop-focus" id="ovPop_focus" style="display:' + (ovPopOpen.focus ? 'block' : 'none') + '">'
          + '<div class="ov-pop-head"><span class="ov-label ov-focus-title">⚠ 重点关注</span>'
-         + '<span class="ov-allnum">全部 ' + focus.length + ' 条</span></div>'
-         + '<div class="ov-pop-body">' + buildFCards(focus) + '</div>'
+         + '<span class="ov-allnum">' + (_fsv.active ? ('匹配 ' + popFocus.length + ' / 全部 ' + focusUniverse.length + ' 条') : ('全部 ' + focusUniverse.length + ' 条')) + '</span></div>'
+         + '<div class="ov-search"><input type="text" id="ovSearch_focus" class="ov-search-input" placeholder="单个关键词搜索，批量请使用英文逗号,分隔" value="' + escHtml(_fsv.text) + '" onkeydown="if(event.key===\'Enter\'){event.preventDefault();ovSearchFocus();}">'
+         + '<button type="button" class="ov-search-btn" onclick="ovSearchFocus()">搜索</button>'
+         + '<button type="button" class="ov-search-btn ov-search-plain" onclick="ovClearSearchFocus()">清空</button></div>'
+         + '<div class="ov-pop-body">' + popFCards + '</div>'
          + '<div class="ov-pop-foot"><span class="ov-pop-close" onclick="ovTogglePop(\'ovPop_focus\')">▲ 收起</span></div></div>';
   }
   if (!focus.length) frows += '<div class="ov-frest">本范围内无需重点关注的记录</div>';
@@ -4550,6 +4691,23 @@ function saveAppeal(index, action) {
   var files = filesEl ? filesEl.files : [];
   var selectedModules = action === 'submit' ? getCheckedValues('appealModuleList', 'appealModules') : getCheckedValues('appealReviewModuleList', 'appealReviewModules');
   if (!selectedModules.length) { showToast('请至少选择一个模块', 'error'); return; }
+  // 【2026-11-23 业务规则①】申诉被拒：不达标邮件不允许改成达标分数——提前拦截，不再等保存后弹窗报错。
+  // 组长需把分数改回不达标，或改选「申诉通过」后重新打分（通过不限制分数，允许多项不达标/部分达标/全部达标）。
+  if (action === 'reject') {
+    var _rvBox = document.getElementById('appealReviewModuleList');
+    var _rvInputs = _rvBox ? _rvBox.querySelectorAll('.appeal-score-input') : [];
+    var _badDims = [];
+    for (var _vi = 0; _vi < _rvInputs.length; _vi++) {
+      var _dimV = _rvInputs[_vi].getAttribute('data-dim');
+      var _valV = Number(_rvInputs[_vi].value); if (isNaN(_valV)) _valV = 0;
+      var _gV = qcDimGradeForScore(_dimV, _valV);
+      if (_gV === '达标' || _gV === '优秀') _badDims.push(_dimV + '（' + _valV + ' 分 / ' + _gV + '）');
+    }
+    if (_badDims.length) {
+      showToast('申诉被拒时，分数应保持不达标：' + _badDims.join('、') + '。请把这些模块改回不达标分数，或选择「申诉通过」后重新打分', 'error');
+      return;
+    }
+  }
   var scoreMap = action === 'submit' ? {} : qcAppealCollectScores();
   var beforeTotal = Number(r.totalScore);
   if (isNaN(beforeTotal)) beforeTotal = 0;
@@ -4839,7 +4997,152 @@ function dashboardValidTotal(item) { return item.totalScore >= 0 ? 1 : 0; }
 function dashboardScoreSum(item) { return item.totalScore >= 0 ? Number(item.totalScore) || 0 : 0; }
 function dashboardPassCount(item) { return (item.grade === '优秀' || item.grade === '达标' || item.grade === '参考案例') ? 1 : 0; } // 「无法质检」不再计为达标
 function dashboardFailCount(item) { return item.grade === '不达标' ? 1 : 0; }
-// ============ 总质检量 · 周度统计（按明细日期归周一~周日）2026-11-19 ============
+// ============ 总质检量 · 周度统计（2026-11-23 改造） ============
+// 新口径（废弃旧「默认取上周」逻辑）：
+//   1. 每导入一批质检数据 → 新增一条独立统计记录（只算本批）：
+//      质检量、质检平均分、达标率（达标条数）、不达标率（不达标条数）自动计算；
+//   2. 管理员可在「质检标准」页编辑每条记录的日期；多条记录日期相同 → 展示时自动合并聚合；
+//   3. 列表整体按日期排序展示。
+// 记录随主数据一起存云端（state main 的 weeklyStats 字段）与本地缓存，跨设备同步。
+function qcRecordWeeklyStatBatch() {
+  if (!QC_BATCH_META) return;
+  var meta = QC_BATCH_META;
+  QC_BATCH_META = null;
+  if (typeof results === 'undefined' || !results) return;
+  var rows = results.slice(meta.start || 0, (meta.start || 0) + (meta.count || 0));
+  if (!rows.length) return;
+  var n = 0, pass = 0, fail = 0, scoreSum = 0, valid = 0, maxDate = '';
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i] || {};
+    var d = String(r.date || '').trim();
+    if (d > maxDate) maxDate = d;
+    if (!isAssessedResult(r)) continue;
+    n++;
+    pass += dashboardPassCount(r);
+    fail += dashboardFailCount(r);
+    if (r.totalScore >= 0) { valid++; scoreSum += Number(r.totalScore) || 0; }
+  }
+  if (!n) return;
+  // 默认日期 = 本批明细里最晚的日期；没有日期列时用上传当天（不再默认取上周）
+  var defDate = maxDate ? String(maxDate).slice(0, 10) : qcTodayStr();
+  QC_WEEKLY_STATS.push({
+    id: 'ws-' + Date.now() + '-' + Math.floor(Math.random() * 10000),
+    date: defDate,
+    count: n,
+    avg: valid ? Math.round(scoreSum / valid * 10) / 10 : 0,
+    pass: pass,
+    fail: fail,
+    gen: (typeof QC_GEN !== 'undefined') ? QC_GEN : '',
+    createdAt: new Date().toISOString()
+  });
+}
+function qcTodayStr() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+// 按 id 合并统计记录（云端/缓存并线）；日期被管理员改过的记录以 editedAt 新者为准
+function qcMergeWeeklyStats(incoming) {
+  if (!Array.isArray(incoming) || !incoming.length) return 0;
+  var map = {}, i, added = 0;
+  for (i = 0; i < QC_WEEKLY_STATS.length; i++) { var it = QC_WEEKLY_STATS[i]; if (it && it.id) map[it.id] = it; }
+  for (i = 0; i < incoming.length; i++) {
+    var w = incoming[i];
+    if (!w || !w.id) continue;
+    var cur = map[w.id];
+    if (!cur) { QC_WEEKLY_STATS.push(w); map[w.id] = w; added++; }
+    else if (String(w.editedAt || '') > String(cur.editedAt || '')) {
+      for (var j = 0; j < QC_WEEKLY_STATS.length; j++) if (QC_WEEKLY_STATS[j].id === w.id) QC_WEEKLY_STATS[j] = w;
+      map[w.id] = w;
+    }
+  }
+  return added;
+}
+// 展示层聚合：同日期多条记录自动合并（量/达标/不达标累加，均分按量加权），返回按日期升序的数组
+function qcWeeklyAggByDate() {
+  var by = {};
+  for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
+    var w = QC_WEEKLY_STATS[i] || {};
+    var d = String(w.date || '').slice(0, 10);
+    if (!d) continue;
+    if (!by[d]) by[d] = { date: d, count: 0, pass: 0, fail: 0, avgSum: 0, avgW: 0, batches: 0 };
+    var g = by[d];
+    var c = Number(w.count) || 0;
+    g.count += c;
+    g.pass += Number(w.pass) || 0;
+    g.fail += Number(w.fail) || 0;
+    g.avgSum += (Number(w.avg) || 0) * c;
+    g.avgW += c;
+    g.batches++;
+  }
+  return Object.keys(by).sort().map(function(k) { return by[k]; });
+}
+function renderWeeklyKpi(data) {
+  var card = document.getElementById('weeklyKpiCard'), wrap = document.getElementById('weeklyKpiWrap');
+  if (!card || !wrap) return;
+  if (!QC_WEEKLY_STATS.length) { card.style.display = 'none'; return; }
+  var rows = qcWeeklyAggByDate();
+  if (!rows.length) { card.style.display = 'none'; return; }
+  var html = '';
+  for (var i = 0; i < rows.length; i++) {
+    var g = rows[i];
+    var pr = g.count ? Math.round(g.pass / g.count * 1000) / 10 : 0;
+    var fr = g.count ? Math.round(g.fail / g.count * 1000) / 10 : 0;
+    var avg = g.avgW ? Math.round(g.avgSum / g.avgW * 10) / 10 : 0;
+    html += '<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #eef2f7;flex-wrap:wrap;">'
+      + '<span style="font-weight:700;min-width:110px;color:#1e293b;">' + g.date.replace(/-/g, '/') + '</span>'
+      + '<span style="color:#334155;">质检量 <b style="font-size:15px;">' + g.count + '</b> 条</span>'
+      + '<span style="color:#334155;">平均分 <b style="font-size:15px;">' + avg + '</b></span>'
+      + '<span style="color:#16a34a;">达标率 ' + pr + '%（达标 ' + g.pass + ' 条）</span>'
+      + '<span style="color:#dc2626;">不达标率 ' + fr + '%（不达标 ' + g.fail + ' 条）</span>'
+      + (g.batches > 1 ? '<span style="color:#6b7280;font-size:12px;">（' + g.batches + ' 批次已合并）</span>' : '')
+      + '</div>';
+  }
+  var adminTip = isAdminMode() ? '<br>管理员可在「质检标准」页编辑每条记录的日期，相同日期自动合并聚合。' : '';
+  wrap.innerHTML = '<div class="card-header"><h3>总质检量 · 周度统计</h3><span style="font-size:12px;color:#6b7280;">按导入批次自动记录，每批一条独立统计；同日期自动合并聚合，按日期排序，共 ' + QC_WEEKLY_STATS.length + ' 条记录 / ' + rows.length + ' 个日期' + adminTip + '</span></div><div class="card-body" style="padding-top:6px;">' + html + '</div>';
+  card.style.display = 'block';
+}
+// 管理员：质检标准页内编辑每条统计记录的日期
+function renderWeeklyStatsAdmin() {
+  var wrap = document.getElementById('weeklyStatsAdminWrap');
+  if (!wrap) return;
+  if (!isAdminMode()) { wrap.innerHTML = ''; return; }
+  if (!QC_WEEKLY_STATS.length) {
+    wrap.innerHTML = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3></div><div class="card-body" style="color:var(--gray-500);font-size:13px;">暂无统计记录：每导入一批质检数据会自动生成一条独立记录（含质检量 / 平均分 / 达标率 / 不达标率）。导入后可在此修改每条记录的日期，相同日期的记录展示时自动合并聚合。</div></div>';
+    return;
+  }
+  var sorted = QC_WEEKLY_STATS.slice().sort(function(a, b) { return String(a.date) < String(b.date) ? -1 : 1; });
+  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的日期；保存后相同日期的多条记录自动合并聚合计算</span></div><div class="table-wrap"><table class="summary-table"><thead><tr><th>统计日期（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
+  for (var i = 0; i < sorted.length; i++) {
+    var w = sorted[i];
+    var iid = 'wsDate_' + i;
+    h += '<tr>'
+      + '<td><input type="date" id="' + iid + '" value="' + escHtml(String(w.date || '').slice(0, 10)) + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;"></td>'
+      + '<td>' + (Number(w.count) || 0) + '</td>'
+      + '<td>' + (Math.round((Number(w.avg) || 0) * 10) / 10) + '</td>'
+      + '<td style="color:#16a34a;">' + (Number(w.pass) || 0) + '</td>'
+      + '<td style="color:#dc2626;">' + (Number(w.fail) || 0) + '</td>'
+      + '<td style="color:var(--gray-500);font-size:12px;">' + escHtml(String(w.createdAt || '').replace('T', ' ').slice(0, 19)) + (w.editedAt ? '<br>改期 ' + escHtml(String(w.editedAt).replace('T', ' ').slice(0, 19)) : '') + '</td>'
+      + '<td><button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatDate(' + htmlAttrJsStr(w.id) + ',\'' + iid + '\')">保存日期</button></td>'
+      + '</tr>';
+  }
+  h += '</tbody></table></div></div>';
+  wrap.innerHTML = h;
+}
+function qcSaveWeeklyStatDate(id, inputId) {
+  if (!requireAdmin('修改统计日期')) return;
+  var el = document.getElementById(inputId);
+  if (!el) return;
+  var v = String(el.value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { showToast('日期格式不正确，请选择有效日期', 'error'); return; }
+  for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
+    if (QC_WEEKLY_STATS[i].id === id) {
+      QC_WEEKLY_STATS[i].date = v;
+      QC_WEEKLY_STATS[i].editedAt = new Date().toISOString();
+      break;
+    }
+  }
+  showToast('统计日期已保存；相同日期的记录展示时自动合并聚合', 'success');
+  renderWeeklyStatsAdmin();
+  renderDashboard();
+  cloudSaveState().catch(function() {});
+}
 function qcWeekRangeOf(dateStr) {
   var s = String(dateStr || '').trim();
   var d = new Date(s.replace(/-/g, '/'));
@@ -4867,44 +5170,6 @@ function qcUploadWeekRange(now) {
   function f(x) { return x.getFullYear() + '-' + ('0' + (x.getMonth() + 1)).slice(-2) + '-' + ('0' + x.getDate()).slice(-2); }
   return { key: f(lastMonday), start: f(lastMonday), end: f(lastSunday) };
 }
-function renderWeeklyKpi(data) {
-  var card = document.getElementById('weeklyKpiCard'), wrap = document.getElementById('weeklyKpiWrap');
-  if (!card || !wrap) return;
-  if (!data || !data.length) { card.style.display = 'none'; return; }
-  // 按每条明细的批次归属周 qcWeek 分组累积；老数据没有 qcWeek 时兜底按明细日期归周
-  var weeks = {}, order = [], grandTotal = 0;
-  for (var i = 0; i < data.length; i++) {
-    var it = data[i];
-    var t = dashboardTotal(it); if (!t) continue;
-    var key = it.qcWeek || (qcWeekRangeOf(it.date) || {}).key || '';
-    if (!key) key = '0000-00-00';
-    if (!weeks[key]) { weeks[key] = { key: key, n: 0, pass: 0, fail: 0 }; order.push(key); }
-    weeks[key].n += t;
-    weeks[key].pass += dashboardPassCount(it);
-    weeks[key].fail += dashboardFailCount(it);
-    grandTotal += t;
-  }
-  if (!grandTotal) { card.style.display = 'none'; return; }
-  order.sort();
-  var rows = '';
-  for (var w = order.length - 1; w >= 0; w--) {
-    var g = weeks[order[w]];
-    var rng = qcWeekRangeOf(g.key) || { start: g.key, end: '' };
-    var pct = Math.round(g.n / grandTotal * 1000) / 10;
-    rows += '<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid #eef2f7;flex-wrap:wrap;">'
-      + '<span style="font-weight:700;min-width:190px;color:#1e293b;">' + rng.start.replace(/-/g, '/') + ' - ' + rng.end.replace(/-/g, '/') + '</span>'
-      + '<span style="color:#334155;">质检量 <b style="font-size:15px;">' + g.n + '</b> 条（' + pct + '%）</span>'
-      + '<span style="color:#16a34a;">达标 ' + g.pass + '</span>'
-      + '<span style="color:#dc2626;">不达标 ' + g.fail + '</span>'
-      + '</div>';
-  }
-  var lastRng = qcWeekRangeOf(order[order.length - 1]) || { end: '' };
-  var ep = String(lastRng.end).split('-');
-  var title = '截至 ' + Number(ep[0]) + '年' + Number(ep[1]) + '月' + Number(ep[2]) + '日';
-  wrap.innerHTML = '<div class="card-header"><h3>总质检量 · 周度统计（' + title + '）</h3><span style="font-size:12px;color:#6b7280;">按上传批次归属周累积（周一至周日），历史批次不改动，合计 ' + grandTotal + ' 条</span></div><div class="card-body" style="padding-top:6px;">' + rows + '</div>';
-  card.style.display = 'block';
-}
-
 function renderDashboard() {
   // 【20261122f·数据源绑定守卫】结果集意外为空但明细有数据时，用最近一次有效结果渲染，看板绝不归零
   var _src = results;
@@ -6003,6 +6268,8 @@ function renderStandard() {
   if (notice) notice.innerHTML = canEdit
     ? '⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。'
     : '👁 只读：质检标准与等级阈值只有管理员可以修改。';
+  // 【2026-11-23 周度统计】管理员在此页编辑每条统计记录的日期
+  try { renderWeeklyStatsAdmin(); } catch (e) {}
 }
 // 「刷新数据」：管理员按当前质检标准重新质检全部明细（历史+新数据一并应用）—— 2026-11-19
 function qcRefreshData() {
@@ -6531,6 +6798,8 @@ function importAllData(data, source) {
   // 这就是「重导入后大量单据错误不达标、每次结果不同」的根因之一。空数组一律忽略，保留当前有效配置。
   if (data.standards && data.standards.length) { STANDARDS = data.standards; }
   if (data.gradeRules && data.gradeRules.length) { GRADE_RULES = data.gradeRules; }
+  // 【2026-11-23 周度统计】随主数据并线：按 id 合并统计记录，改过日期的以 editedAt 新者为准
+  try { qcMergeWeeklyStats(data.weeklyStats); } catch (e) {}
   // 【需求4·知识库不回退】
   // 云端权威来源：用云端知识库刷新内存，并写入本地权威副本。
   // 本地来源（缓存/URL快照）：不信任其携带的知识库，优先用本地权威副本恢复内存，杜绝回退内置旧版。
@@ -7835,6 +8104,7 @@ function qcRenderAppealInbox() {
       +   '<div class="ai-line1"><span class="ai-name">' + escHtml(r.agent || '-') + '</span>'
       +     '<span class="ai-meta">' + escHtml(grp || '未分组') + '</span>'
       +     appealStatusBadge(qcAppealStatus(r))
+      +     ((Number(a.withdrawCount) || 0) >= 1 ? '<span class="ai-meta" style="color:#b45309;font-weight:600;">已撤回</span>' : '')
       +     (unread ? '<span class="ai-unread-dot" title="未读"></span>' : '')
       +   '</div>'
       +   '<div class="ai-line1"><span class="ai-order">平台单号 ' + escHtml(r.order || '-') + '</span>'
@@ -7844,7 +8114,10 @@ function qcRenderAppealInbox() {
       +   (a.reviewReason ? '<div class="ai-reason"><b>复核说明：</b>' + escHtml(a.reviewReason) + '</div>' : '')
       +   (a.reviewer ? '<div class="ai-reason"><b>复核人：</b>' + escHtml(a.reviewer) + (a.reviewedAt ? ' · ' + escHtml(String(a.reviewedAt).replace('T', ' ').slice(0, 19)) : '') + '</div>' : '')
       + '</div>'
-      + '<div class="ai-ops"><button class="btn btn-outline btn-sm" onclick="qcInboxGoDetail(' + idx + ')">查看详情</button></div>'
+      + '<div class="ai-ops">'
+      + (qcAppealProcessed(a) && (Number(a.withdrawCount) || 0) < 1 && qcCanWithdrawAppeal(r)
+          ? '<button class="btn btn-outline btn-sm" style="color:#b45309;border-color:#f59e0b;" title="撤回后单据退回待审核，每条申诉仅 1 次撤回机会" onclick="qcWithdrawAppeal(' + idx + ')">撤回</button>' : '')
+      + '<button class="btn btn-outline btn-sm" onclick="qcInboxGoDetail(' + idx + ')">查看详情</button></div>'
       + '</div>';
   }
   listBox.innerHTML = h;
@@ -7856,6 +8129,56 @@ function qcInboxGoDetail(idx) {
     try { openAppealModal(idx); }
     catch (e) { try { showDetail(idx); } catch (e2) {} }
   }, 60);
+}
+
+// ---------- 撤回（2026-11-23）----------
+// 业务规则：每条已处理申诉（申诉通过 / 部分通过 / 申诉被拒）拥有 1 次撤回机会；
+// 撤回后单据流转回【待审核】，分数/等级/明细完整还原为审核前状态；
+// 撤回操作仅组长（本组）与管理员可用，普通质检人员不可见不可操作；
+// 撤回次数消耗完毕后不再显示撤回按钮。
+function qcAppealProcessed(a) { return a && (a.status === '申诉通过' || a.status === '部分通过' || a.status === '申诉被拒'); }
+function qcCanWithdrawAppeal(r) {
+  if (typeof AUTH === 'undefined' || !AUTH || !r) return false;
+  if (AUTH.role === 'admin') return true;
+  if (AUTH.role !== 'leader') return false;
+  var grp = '';
+  try { grp = getGroupByAgent(r.agent) || ''; } catch (e) {}
+  var mine = AUTH.group || (typeof qcLeaderGroup === 'function' ? qcLeaderGroup(AUTH.name) : '') || '';
+  return !!grp && !!mine && grp === mine;
+}
+function qcWithdrawAppeal(idx) {
+  var r = results[idx];
+  if (!r) { showToast('未找到该质检记录', 'error'); return; }
+  normalizeResultAppeal(r);
+  var a = r.appeal;
+  if (!qcAppealProcessed(a)) { showToast('只有已处理（通过/被拒）的申诉可以撤回', 'error'); return; }
+  if ((Number(a.withdrawCount) || 0) >= 1) { showToast('该申诉的撤回机会已用完（每条申诉仅 1 次）', 'error'); return; }
+  if (!qcCanWithdrawAppeal(r)) { showToast('撤回只有组长（本组）和管理员可以操作', 'error'); return; }
+  if (!confirm('确认撤回这条申诉的审核结果吗？\n\n撤回后：审核结论清除，单据退回【待审核】，分数/等级还原为审核前的原始结果。\n每条申诉只有 1 次撤回机会，撤回后不可再次撤回。')) return;
+  // 还原评分：优先用完整快照（分数/明细/等级/总分）
+  if (r.appealAdjusted && r.originalScores) {
+    r.scores = JSON.parse(JSON.stringify(r.originalScores));
+    if (r.originalDetails) r.details = JSON.parse(JSON.stringify(r.originalDetails));
+    if (r.originalTotalScore !== undefined) r.totalScore = r.originalTotalScore;
+    if (r.originalGrade !== undefined) r.grade = r.originalGrade;
+  }
+  r.appealAdjusted = false;
+  r.appealApprovedModules = [];
+  // 审核痕迹清空，退回待审核；撤回历史留档
+  a.withdrawHistory = (a.withdrawHistory || []).concat([{ status: a.status, reviewer: a.reviewer || '', reviewedAt: a.reviewedAt || '', withdrawnAt: new Date().toISOString(), withdrawnBy: (typeof qcAppealMine === 'function' ? qcAppealMine() : '') }]);
+  a.status = '待审核';
+  a.reviewer = ''; a.reviewReason = ''; a.reviewedAt = '';
+  a.moduleDecisions = {}; a.moduleScores = {}; a.moduleReviewReasons = {};
+  a.withdrawCount = (Number(a.withdrawCount) || 0) + 1;
+  a.withdrawnAt = new Date().toISOString();
+  try { renderDetailTable(); } catch (e0) {}
+  try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e1) {}
+  try { qcRefreshAppealBadges(); } catch (e2) {}
+  var box = document.getElementById('appealInboxModal');
+  if (box && box.classList.contains('show')) { APPEAL_BADGE_TAB = 'pending'; try { qcRenderAppealInbox(); } catch (e3) {} }
+  showToast('已撤回：该申诉退回【待审核】，分数已还原为审核前结果', 'success');
+  try { qcAuditAppend(r, 'withdraw'); } catch (e4) {}
+  cloudSaveState().catch(function () {});
 }
 
 // ---------- 跨设备：打开消息中心时拉一次云端最新申诉状态 ----------
