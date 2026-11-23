@@ -413,7 +413,8 @@ function qcRealignData(data) {
     var src = rawByKey[k] || {};
     // 固定字段顺序构造，保证任意次数重建后对象键顺序完全一致（幂等）
     var FIELDS = ['account', 'agent', 'order', 'date', 'customer', 'reply', 'qcWeek',
-      'processCheck', 'refundReg', 'issueFeedback', 'replenishment', 'orderAmount', 'fbmDefectRate'];
+      'processCheck', 'refundReg', 'issueFeedback', 'replenishment', 'orderAmount', 'fbmDefectRate',
+      'bizType', 'returnInfo', 'azInfo', 'negReview', 'custEmotion', 'batchId'];
     var rebuilt = {};
     for (var fi = 0; fi < FIELDS.length; fi++) {
       var f = FIELDS[fi];
@@ -950,6 +951,7 @@ function cloudSaveState() {
     qcLoadDeleteRegistry()
   ]);
   QC_WRITE_PROMISE = pre.then(function() {
+    qcApplyEditedBatchDates(results, rawData);
     var payloadObj = cloudStatePayload();
     // 任意端字段归一：写回云端前把中英文/别名字段统一为标准字段，保证所有设备读到的都是同一套字段
     try { qcNormalizeAmountOdrFields(payloadObj); } catch (e) {}
@@ -1532,6 +1534,12 @@ function afterParse(data, mode) {
     else if (matchCol(h, lh, ['是否有退款登记', '退款登记', '是否退款', 'refundreg', 'refundregistration'])) colMap.refundReg = hi;
     else if (matchCol(h, lh, ['是否有问题反馈', '问题反馈', '是否反馈', 'issuefeedback', 'feedback'])) colMap.issueFeedback = hi;
     else if (matchCol(h, lh, ['是否有补件', '是否补件', '补件', '是否补发', '补发', 'replenishment', 'reissue'])) colMap.replenishment = hi;
+    // 【20261123b】业务类型（必须精确匹配，避免"类型"子串误命中其它列）+ 4 项业务属性
+    else if (h === '类型' || h === '业务类型' || h === '邮件类型' || lh === '类型' || lh === '业务类型' || lh === 'biztype' || lh === 'recordtype' || lh === 'datatype') colMap.bizType = hi;
+    else if (h === '退货' || h === '退货信息' || h === '退货登记' || lh === '退货' || lh === '退货信息' || lh === 'returninfo') colMap.returnInfo = hi;
+    else if (h === 'AZ' || lh === 'az' || h === 'azInfo') colMap.azInfo = hi;
+    else if (h === '中差评' || h.indexOf('中差评') >= 0 || h === '差评' || lh === 'negativefeedback' || lh === 'negativereview') colMap.negReview = hi;
+    else if (h === '客户情绪' || h.indexOf('客户情绪') >= 0 || lh === 'customeremotion' || lh === 'custemotion') colMap.custEmotion = hi;
   }
   var missing = [];
   if (colMap.account === undefined) missing.push('账号');
@@ -1564,7 +1572,12 @@ function afterParse(data, mode) {
       issueFeedback: colMap.issueFeedback !== undefined ? String(row[colMap.issueFeedback] || '').trim() : '',
       replenishment: colMap.replenishment !== undefined ? String(row[colMap.replenishment] || '').trim() : '',
       orderAmount: colMap.orderAmount !== undefined ? String(row[colMap.orderAmount] || '').trim() : '',
-      fbmDefectRate: colMap.fbmDefectRate !== undefined ? String(row[colMap.fbmDefectRate] || '').trim() : '' });
+      fbmDefectRate: colMap.fbmDefectRate !== undefined ? String(row[colMap.fbmDefectRate] || '').trim() : '',
+      bizType: colMap.bizType !== undefined ? String(row[colMap.bizType] || '').trim() : '',
+      returnInfo: colMap.returnInfo !== undefined ? String(row[colMap.returnInfo] || '').trim() : '',
+      azInfo: colMap.azInfo !== undefined ? String(row[colMap.azInfo] || '').trim() : '',
+      negReview: colMap.negReview !== undefined ? String(row[colMap.negReview] || '').trim() : '',
+      custEmotion: colMap.custEmotion !== undefined ? String(row[colMap.custEmotion] || '').trim() : '' });
   }
   if (newRawData.length === 0) { showToast('未解析到有效数据行' + (skippedUninspectable ? '（' + skippedUninspectable + ' 条因无法质检在导入时剔除）' : ''), 'error'); return; }
   // 追加模式（默认）：已有数据绝不改动；完全相同单号重复上传时自动跳过，避免重复计数。
@@ -1596,13 +1609,18 @@ function afterParse(data, mode) {
     try { if (reUploadKeys.length) qcReleaseDeletedKeys(reUploadKeys, '追加上传重新导入'); } catch (e) {}
     try { qcBumpGeneration('追加上传', newRawData.length); } catch (e) {}
     rawData = rawData.concat(newRawData);
-    QC_BATCH_META = { start: QC_APPEND_OLD_COUNT, count: newRawData.length };
+    // 【20261123b】批次绑定：本批每条明细记录 batchId，与周度统计记录双向联动（改统计日期 → 同步明细日期列）
+    var _batchId = 'b-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
+    for (var _bi2 = 0; _bi2 < newRawData.length; _bi2++) { try { newRawData[_bi2].batchId = _batchId; } catch (e) {} }
+    QC_BATCH_META = { id: _batchId, start: QC_APPEND_OLD_COUNT, count: newRawData.length };
     showToast('追加 ' + newRawData.length + ' 条数据（共 ' + rawData.length + ' 条）' + (dupCount ? '，跳过重复 ' + dupCount + ' 条' : '') + (reUploadKeys.length ? '，其中 ' + reUploadKeys.length + ' 条为重新上传，已自动解除永久删除限制' : '') + (skippedUninspectable ? '，导入时剔除无法质检 ' + skippedUninspectable + ' 条' : '') + '，开始质检...', 'success');
   } else {
     QC_APPEND_OLD_COUNT = 0;
     QC_APPEND_PRESERVE = false;
     rawData = newRawData;
-    QC_BATCH_META = { start: 0, count: newRawData.length };
+    var _batchId2 = 'b-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
+    for (var _bi3 = 0; _bi3 < newRawData.length; _bi3++) { try { newRawData[_bi3].batchId = _batchId2; } catch (e) {} }
+    QC_BATCH_META = { id: _batchId2, start: 0, count: newRawData.length };
     showToast('清空后成功解析 ' + rawData.length + ' 条数据' + (skippedUninspectable ? '（导入时剔除无法质检 ' + skippedUninspectable + ' 条）' : '') + '，开始质检...', 'success');
   }
   setTimeout(runQualityCheck, 300);
@@ -1671,6 +1689,13 @@ function runQualityCheck() {
       result.replenishment = rawData[i].replenishment || '';
       result.orderAmount = qcAmtOf(rawData[i]);
       result.fbmDefectRate = qcOdrOf(rawData[i]);
+      // 【20261123b】业务类型（枚举：邮件/AZ/中差评，缺失默认"邮件"）+ 4 项业务属性 + 批次绑定
+      result.bizType = qcBizTypeOf(rawData[i]);
+      result.returnInfo = rawData[i].returnInfo || qcReadAnyField(rawData[i], QC_RET_SET) || '';
+      result.azInfo = rawData[i].azInfo || qcReadAnyField(rawData[i], QC_AZ_SET) || '';
+      result.negReview = rawData[i].negReview || qcReadAnyField(rawData[i], QC_NEG_SET) || '';
+      result.custEmotion = rawData[i].custEmotion || qcReadAnyField(rawData[i], QC_EMO_SET) || '';
+      result.batchId = rawData[i].batchId || '';
       result.recordKey = getRecordKey(result);
       // 2026-11-21g：把本次回邮内容同步到 result 并按内容指纹判定申诉继承。
       var _curReply = (typeof rawData[i].reply === 'string') ? rawData[i].reply : '';
@@ -3346,7 +3371,7 @@ function onQualityCheckDone() {
   document.getElementById('dataCount').textContent = results.length;
   document.getElementById('detailBadge').textContent = results.length;
   // 【2026-11-23 周度统计改造】每导入一批质检数据，生成一条独立统计记录（只算本批）
-  try { qcRecordWeeklyStatBatch(); } catch (e) {}
+  try { qcRecordWeeklyStatBatch(); qcRecordToolBatches(); qcApplyEditedBatchDates(results, rawData); } catch (e) {}
   populateFilters();
   renderDetailTable();
   renderDashboard();
@@ -4146,6 +4171,36 @@ var QC_ODR_ALIASES = ['fbmDefectRate', 'orderDefectRate', 'defectRate', 'odr', '
 function qcFieldNorm(s) { return String(s === undefined || s === null ? '' : s).toLowerCase().replace(/[\s_\-()（）\[\]%]/g, ''); }
 function qcAliasSet(aliases) { var m = {}, i; for (i = 0; i < aliases.length; i++) m[qcFieldNorm(aliases[i])] = true; return m; }
 var QC_AMT_SET = qcAliasSet(QC_AMT_ALIASES), QC_ODR_SET = qcAliasSet(QC_ODR_ALIASES);
+// 【20261123b】业务类型 + 4 项业务属性（退货/AZ/中差评/客户情绪）别名集：
+// 与金额/ODR 同一套机制——无论哪个端上传，按任意别名识别并双向补齐。
+var QC_TYPE_ALIASES = ['bizType', 'recordType', 'dataType', '业务类型', '邮件类型', '类型'];
+var QC_RET_ALIASES = ['returnInfo', 'return', '退货', '退货信息', '退货登记'];
+var QC_AZ_ALIASES = ['azInfo', 'az'];
+var QC_NEG_ALIASES = ['negReview', 'negativeFeedback', 'negativeReview', '中差评', '差评'];
+var QC_EMO_ALIASES = ['custEmotion', 'customerEmotion', '客户情绪', '情绪'];
+var QC_TYPE_SET = qcAliasSet(QC_TYPE_ALIASES), QC_RET_SET = qcAliasSet(QC_RET_ALIASES),
+    QC_AZ_SET = qcAliasSet(QC_AZ_ALIASES), QC_NEG_SET = qcAliasSet(QC_NEG_ALIASES),
+    QC_EMO_SET = qcAliasSet(QC_EMO_ALIASES);
+// 业务类型归一：仅三种枚举——AZ→AZ、中差评(含"差评"/negative)→中差评、其余(缺失/空/邮件等)→邮件
+function qcNormBizType(v) {
+  var s = String(v === undefined || v === null ? '' : v).trim().toLowerCase();
+  if (s === 'az') return 'AZ';
+  if (s === '中差评' || s === '差评' || s === 'negative' || s === 'negativereview' || s === 'negativefeedback') return '中差评';
+  return '邮件';
+}
+// 从记录（优先 results 行，兜底 rawData 行）按别名读取并归一
+function qcBizTypeOf(o) { return qcNormBizType(qcReadAnyField(o, QC_TYPE_SET)); }
+function qcAliasRaw(o, set, stdKey) {
+  if (!o) return '';
+  var v = qcReadAnyField(o, set);
+  if (v !== '') return v;
+  return String(o[stdKey] === undefined || o[stdKey] === null ? '' : o[stdKey]).trim();
+}
+function rcBizType(r) { if (!r) return '邮件'; var v = qcBizTypeOf(r); if (v !== '邮件') return v; var v2 = qcBizTypeOf(qcRawFor(r)); return v2; }
+function rcReturnInfo(r) { return qcAliasRaw(r, QC_RET_SET, 'returnInfo') || qcAliasRaw(qcRawFor(r), QC_RET_SET, 'returnInfo'); }
+function rcAzInfo(r) { return qcAliasRaw(r, QC_AZ_SET, 'azInfo') || qcAliasRaw(qcRawFor(r), QC_AZ_SET, 'azInfo'); }
+function rcNegReview(r) { return qcAliasRaw(r, QC_NEG_SET, 'negReview') || qcAliasRaw(qcRawFor(r), QC_NEG_SET, 'negReview'); }
+function rcCustEmotion(r) { return qcAliasRaw(r, QC_EMO_SET, 'custEmotion') || qcAliasRaw(qcRawFor(r), QC_EMO_SET, 'custEmotion'); }
 // 从任意对象里按别名读取金额/ODR（忽略大小写、空格、下划线、括号、百分号）
 function qcReadAnyField(o, set) {
   if (!o || typeof o !== 'object') return '';
@@ -4164,8 +4219,9 @@ function qcOdrOf(o) { return qcReadAnyField(o, QC_ODR_SET); }
 function qcRawFor(r) {
   if (!r || typeof rawData === 'undefined' || !rawData || !rawData.length) return null;
   var i = (r._index !== undefined && r._index !== null) ? r._index : -1;
-  if (i >= 0 && rawData[i] && (!r.order || !rawData[i].order || rawData[i].order === r.order)) return rawData[i];
-  if (r.order) { for (var j = 0; j < rawData.length; j++) if (rawData[j] && rawData[j].order === r.order) return rawData[j]; }
+  var key = getStableRecordKey(r);
+  if (i >= 0 && rawData[i] && getStableRecordKey(rawData[i]) === key) return rawData[i];
+  if (r.order) { for (var j = 0; j < rawData.length; j++) if (rawData[j] && getStableRecordKey(rawData[j]) === key) return rawData[j]; }
   return null;
 }
 function rcOrderAmount(r) { if (!r) return ''; return qcAmtOf(r) || qcAmtOf(qcRawFor(r)); }
@@ -4187,25 +4243,41 @@ function qcNormalizeAmountOdrFields(d) {
   if (!d || typeof d !== 'object') return d;
   var rd = d.rawData, rs = d.results;
   if (!Array.isArray(rd) || !Array.isArray(rs)) return d;
-  var byOrder = {}, i;
-  for (i = 0; i < rd.length; i++) if (rd[i] && rd[i].order) { if (!byOrder[rd[i].order]) byOrder[rd[i].order] = rd[i]; }
+  var byKey = Object.create(null), i;
+  for (i = 0; i < rd.length; i++) if (rd[i] && rd[i].order) {
+    var key = getStableRecordKey(rd[i]);
+    if (!byKey[key]) byKey[key] = rd[i];
+  }
+  var extra = [['bizType', QC_TYPE_SET], ['returnInfo', QC_RET_SET], ['azInfo', QC_AZ_SET], ['negReview', QC_NEG_SET], ['custEmotion', QC_EMO_SET]];
   function lift(o) {
     if (!o) return;
     if (!o.orderAmount) { var a = qcAmtOf(o); if (a) o.orderAmount = a; }
     if (!o.fbmDefectRate) { var v = qcOdrOf(o); if (v) o.fbmDefectRate = v; }
+    for (var t = 0; t < extra.length; t++) {
+      var x = extra[t], val = qcAliasRaw(o, x[1], x[0]);
+      if (val !== '') o[x[0]] = val;
+    }
   }
   function mergeBoth(a, b) {
     if (!a || !b) return;
     if (!a.orderAmount) a.orderAmount = qcAmtOf(b);
     if (!b.orderAmount) b.orderAmount = qcAmtOf(a);
-    if (!a.fbmDefectRate) a.fbmDefectRate = qcOdrOf(b);
-    if (!b.fbmDefectRate) b.fbmDefectRate = qcOdrOf(a);
+    if (qcOdrOf(a) === '') a.fbmDefectRate = qcOdrOf(b);
+    if (qcOdrOf(b) === '') b.fbmDefectRate = qcOdrOf(a);
+    extra.forEach(function(x) {
+      var av = qcAliasRaw(a, x[1], x[0]), bv = qcAliasRaw(b, x[1], x[0]);
+      if (av === '' && bv !== '') a[x[0]] = bv;
+      if (bv === '' && av !== '') b[x[0]] = av;
+    });
+    if (!a.batchId && b.batchId) a.batchId = b.batchId;
+    if (!b.batchId && a.batchId) b.batchId = a.batchId;
   }
   for (i = 0; i < rs.length; i++) {
     var r = rs[i]; if (!r) continue;
     lift(r);
     var idx = (r._index !== undefined && r._index !== null) ? r._index : i;
-    var rw = (rd[idx] && (!r.order || !rd[idx].order || rd[idx].order === r.order)) ? rd[idx] : byOrder[r.order];
+    var rk = getStableRecordKey(r);
+    var rw = (rd[idx] && getStableRecordKey(rd[idx]) === rk) ? rd[idx] : byKey[rk];
     if (rw) { lift(rw); mergeBoth(r, rw); }
   }
   return d;
@@ -4232,9 +4304,9 @@ function renderDetailTable() {
     if (detailOrderExact && r.order !== detailOrderExact) continue;
     filtered.push(r);
   }
-  // 列顺序（20261120d）：ODR 紧跟「账号」之后，订单金额紧跟「平台单号」之后。
-  // 序号|组别|日期|账号|ODR|客服|平台单号|订单金额|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
-  var html = '<thead><tr><th>序号</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率（对应上传列「FBM订单缺陷率」）">ODR</th><th>客服</th><th>平台单号</th><th title="订单金额（对应上传列「订单金额」，上传数据原值）">订单金额</th>';
+  // 列顺序（20261123b）：类型紧跟「序号」，ODR 紧跟「账号」之后，订单金额紧跟「平台单号」之后。
+  // 序号|类型|组别|日期|账号|ODR|客服|平台单号|订单金额|[维度]|总分|等级|申诉状态|操作|去信数|占比|是否考核
+  var html = '<thead><tr><th>序号</th><th class="cell-center">类型</th><th>组别</th><th>日期</th><th>账号</th><th class="cell-center" title="FBM 订单缺陷率（对应上传列「FBM订单缺陷率」）">ODR</th><th>客服</th><th>平台单号</th><th title="订单金额（对应上传列「订单金额」，上传数据原值）">订单金额</th>';
   for (var d = 0; d < DIM_NAMES.length; d++) html += '<th>' + DIM_NAMES[d] + '</th>';
   html += '<th>总分</th><th>等级</th><th>申诉状态</th><th>操作</th>'
        + '<th title="本单里「客服」字段那位发出的信封数（按回邮署名归属）">去信数</th>'
@@ -4242,12 +4314,16 @@ function renderDetailTable() {
        + '<th title="占比 ≥ 50% 参与考核，只有「是」的单计入数据看板">是否考核</th></tr></thead><tbody>';
   var sendStat = buildSendStat(); // 只用于单元格 tooltip（该客服跨单累计）
   if (filtered.length === 0) {
-    html += '<tr><td colspan="' + (8 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
+    html += '<tr><td colspan="' + (9 + DIM_NAMES.length + 7) + '" style="padding:40px;text-align:center;color:var(--gray-400);">暂无数据</td></tr>';
   } else {
     for (var j = 0; j < filtered.length; j++) {
       var r = filtered[j];
       var _odr = qcFmtOdr(rcOdr(r)), _amt = rcOrderAmount(r);
-      html += '<tr><td>' + (j + 1) + '</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
+      var _bt = rcBizType(r);
+      var _btCls = _bt === 'AZ' ? 'biz-az' : (_bt === '中差评' ? 'biz-neg' : 'biz-mail');
+      html += '<tr><td>' + (j + 1) + '</td>'
+            + '<td class="cell-center"><span class="biz-badge ' + _btCls + '">' + escHtml(_bt) + '</span></td>'
+            + '<td>' + escHtml(getGroupByAgent(r.agent)) + '</td><td class="cell-nowrap">' + escHtml(r.date) + '</td>'
             + '<td class="cell-nowrap">' + escHtml(r.account) + '</td>'
             + '<td class="cell-center">' + (_odr !== '' ? escHtml(_odr) : '-') + '</td>'
             + '<td class="cell-nowrap">' + escHtml(canonicalAgentName(r.agent)) + '</td>'
@@ -4439,14 +4515,17 @@ function buildReplyDataBlockHtml(r, boxId) {
   html += '<div class="rc-card">';
   html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
   html += '<div class="rc-card-body">';
+  var _replyOdr = qcFmtOdr(rcOdr(r));
   html += '<div class="rc-base-row">'
         + '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
+        + '<div class="rc-base"><span class="rc-base-l">ODR</span><span class="rc-base-v">' + escHtml(_replyOdr || '-') + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
         + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + (function(){ var _a = rcOrderAmount(r); return _a !== '' ? escHtml(_a) : '-'; })() + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
-  var _reg = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
+  // 【20261123b】按需求：在「是否需要检查流程操作」下方新增 退货 / AZ / 中差评 / 客户情绪 4 项（读取上传表同名列原值）
+  var _reg = [['是否需要检查流程操作', r.processCheck], ['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
   html += '<div class="rc-reg-row">';
   for (var _ri = 0; _ri < _reg.length; _ri++) {
     html += '<div class="rc-reg"><span class="rc-reg-l">' + _reg[_ri][0] + '</span><span class="rc-reg-v">' + escHtml(_reg[_ri][1] || '') + '</span></div>';
@@ -5033,8 +5112,40 @@ function qcRecordWeeklyStatBatch() {
     pass: pass,
     fail: fail,
     gen: (typeof QC_GEN !== 'undefined') ? QC_GEN : '',
+    batchId: meta.id || '',
     createdAt: new Date().toISOString()
   });
+}
+function qcRecordToolBatches() {
+  var batches = Object.create(null), known = Object.create(null);
+  QC_WEEKLY_STATS.forEach(function(w) { if (w.batchId) known[w.batchId] = true; });
+  results.forEach(function(r) {
+    var k = r.batchId;
+    if (typeof k !== 'string' || k.indexOf('tool-') !== 0 || known[k]) return;
+    var b = batches[k] || (batches[k] = { id: 'ws-' + k, batchId: k, date: '', count: 0, pass: 0, fail: 0, avg: 0, valid: 0 });
+    var d = String(r.date || '').slice(0, 10);
+    if (d > b.date) b.date = d;
+    if (!isAssessedResult(r)) return;
+    b.count++; b.pass += dashboardPassCount(r); b.fail += dashboardFailCount(r);
+    if (r.totalScore >= 0) { b.valid++; b.avg += Number(r.totalScore) || 0; }
+  });
+  Object.keys(batches).forEach(function(k) {
+    var b = batches[k];
+    if (!b.count) return;
+    b.date = b.date || qcTodayStr();
+    b.avg = b.valid ? Math.round(b.avg / b.valid * 10) / 10 : 0;
+    delete b.valid;
+    b.createdAt = new Date().toISOString();
+    QC_WEEKLY_STATS.push(b);
+  });
+}
+function qcApplyEditedBatchDates(rs, rd) {
+  var dates = Object.create(null), n = 0;
+  QC_WEEKLY_STATS.forEach(function(w) { if (w.batchId && w.editedAt && /^\d{4}-\d{2}-\d{2}$/.test(w.date)) dates[w.batchId] = w.date; });
+  [rs, rd].forEach(function(rows) { (rows || []).forEach(function(r) {
+    if (r && dates[r.batchId] && r.date !== dates[r.batchId]) { r.date = dates[r.batchId]; if (rows === rd) n++; }
+  }); });
+  return n;
 }
 function qcTodayStr() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
 // 按 id 合并统计记录（云端/缓存并线）；日期被管理员改过的记录以 editedAt 新者为准
@@ -5099,6 +5210,18 @@ function renderWeeklyKpi(data) {
   card.style.display = 'block';
 }
 // 管理员：质检标准页内编辑每条统计记录的日期
+// 【20261123b】支持开始/结束时间范围筛选统计记录
+var QC_WS_FILTER = { from: '', to: '' };
+function qcWsApplyFilter() {
+  var f = document.getElementById('wsFilterFrom'), t = document.getElementById('wsFilterTo');
+  QC_WS_FILTER.from = f ? String(f.value || '').trim() : '';
+  QC_WS_FILTER.to = t ? String(t.value || '').trim() : '';
+  renderWeeklyStatsAdmin();
+}
+function qcWsClearFilter() {
+  QC_WS_FILTER.from = ''; QC_WS_FILTER.to = '';
+  renderWeeklyStatsAdmin();
+}
 function renderWeeklyStatsAdmin() {
   var wrap = document.getElementById('weeklyStatsAdminWrap');
   if (!wrap) return;
@@ -5108,9 +5231,30 @@ function renderWeeklyStatsAdmin() {
     return;
   }
   var sorted = QC_WEEKLY_STATS.slice().sort(function(a, b) { return String(a.date) < String(b.date) ? -1 : 1; });
-  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的日期；保存后相同日期的多条记录自动合并聚合计算</span></div><div class="table-wrap"><table class="summary-table"><thead><tr><th>统计日期（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
-  for (var i = 0; i < sorted.length; i++) {
-    var w = sorted[i];
+  // 时间范围筛选（按统计日期）
+  var fromD = String(QC_WS_FILTER.from || ''), toD = String(QC_WS_FILTER.to || '');
+  var filteredWs = sorted;
+  if (fromD || toD) {
+    filteredWs = sorted.filter(function(w) {
+      var d = String(w.date || '').slice(0, 10);
+      if (fromD && d < fromD) return false;
+      if (toD && d > toD) return false;
+      return true;
+    });
+  }
+  var filterBar = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;padding:10px 14px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:8px;">'
+    + '<span style="font-size:13px;font-weight:600;color:var(--gray-700);">时间范围筛选：</span>'
+    + '<label style="font-size:12.5px;color:var(--gray-600);">开始时间</label><input type="date" id="wsFilterFrom" value="' + escHtml(fromD) + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
+    + '<label style="font-size:12.5px;color:var(--gray-600);">结束时间</label><input type="date" id="wsFilterTo" value="' + escHtml(toD) + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
+    + '<button class="btn btn-primary btn-sm" onclick="qcWsApplyFilter()">筛选</button>'
+    + '<button class="btn btn-outline btn-sm" onclick="qcWsClearFilter()">清空</button>'
+    + '<span style="font-size:12px;color:var(--gray-500);">' + (fromD || toD ? ('已筛选 ' + filteredWs.length + ' / 共 ' + sorted.length + ' 条记录') : ('共 ' + sorted.length + ' 条记录')) + '</span></div>';
+  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的日期；保存后相同日期的多条记录自动合并聚合计算</span></div><div class="card-body">' + filterBar + '<div class="table-wrap"><table class="summary-table"><thead><tr><th>统计日期（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
+  if (!filteredWs.length) {
+    h += '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--gray-400);">该时间范围内暂无统计记录</td></tr>';
+  }
+  for (var i = 0; i < filteredWs.length; i++) {
+    var w = filteredWs[i];
     var iid = 'wsDate_' + i;
     h += '<tr>'
       + '<td><input type="date" id="' + iid + '" value="' + escHtml(String(w.date || '').slice(0, 10)) + '" style="padding:4px 8px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;"></td>'
@@ -5122,7 +5266,7 @@ function renderWeeklyStatsAdmin() {
       + '<td><button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatDate(' + htmlAttrJsStr(w.id) + ',\'' + iid + '\')">保存日期</button></td>'
       + '</tr>';
   }
-  h += '</tbody></table></div></div>';
+  h += '</tbody></table></div></div></div>';
   wrap.innerHTML = h;
 }
 function qcSaveWeeklyStatDate(id, inputId) {
@@ -5131,17 +5275,25 @@ function qcSaveWeeklyStatDate(id, inputId) {
   if (!el) return;
   var v = String(el.value || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { showToast('日期格式不正确，请选择有效日期', 'error'); return; }
+  var stat = null;
   for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
     if (QC_WEEKLY_STATS[i].id === id) {
       QC_WEEKLY_STATS[i].date = v;
       QC_WEEKLY_STATS[i].editedAt = new Date().toISOString();
+      stat = QC_WEEKLY_STATS[i];
       break;
     }
   }
-  showToast('统计日期已保存；相同日期的记录展示时自动合并聚合', 'success');
+  if (!stat) return;
+  var nSync = qcApplyEditedBatchDates(results, rawData);
+  var syncNote = stat.batchId ? '；已更新本批次明细日期（本次变更 ' + nSync + ' 条）' : '；旧批次无绑定标识，仅修改统计日期';
+  renderDetailTable();
   renderWeeklyStatsAdmin();
   renderDashboard();
-  cloudSaveState().catch(function() {});
+  return cloudSaveState().then(function(saved) {
+    if (!saved) { showToast('日期已在当前页面更新，但未确认云端保存' + syncNote, 'error'); return; }
+    showToast('统计日期已保存' + syncNote, 'success');
+  }).catch(function() { showToast('日期已在当前页面更新，但云端保存失败，请恢复连接后重新保存', 'error'); });
 }
 function qcWeekRangeOf(dateStr) {
   var s = String(dateStr || '').trim();
@@ -6568,14 +6720,14 @@ function clearAllData() { if (!requireAdmin('清空数据')) return;
 // ============================================================
 function exportDetail(type) {
   if (results.length === 0) { showToast('无数据可导出', 'error'); return; }
-  var headers = ['序号', '组别', '日期', '账号', 'ODR', '客服', '平台单号', '订单金额'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
+  var headers = ['序号', '类型', '组别', '日期', '账号', 'ODR', '客服', '平台单号', '订单金额'].concat(DIM_NAMES).concat(['是否需要检查流程操作', '退货', 'AZ', '中差评', '客户情绪', '是否有退款登记', '是否有问题反馈', '是否有补件', '总分', '等级', '问题说明', '申诉状态', '申诉理由', '审核理由', '附件数量', '附件名称', '去信数', '占比', '是否考核']);
   var rows = [headers];
   for (var i = 0; i < results.length; i++) {
     var r = results[i];
-    var row = [i + 1, getGroupByAgent(r.agent), r.date, r.account, qcFmtOdr(rcOdr(r)), canonicalAgentName(r.agent), r.order, rcOrderAmount(r)];
+    var row = [i + 1, rcBizType(r), getGroupByAgent(r.agent), r.date, r.account, qcFmtOdr(rcOdr(r)), canonicalAgentName(r.agent), r.order, rcOrderAmount(r)];
     for (var d = 0; d < DIM_NAMES.length; d++) { var s = r.scores[DIM_NAMES[d]]; row.push(s === -1 ? '-' : s); }
     var appeal = normalizeAppeal(r.appeal);
-    row.push(r.processCheck || '', r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
+    row.push(r.processCheck || '', rcReturnInfo(r), rcAzInfo(r), rcNegReview(r), rcCustEmotion(r), r.refundReg || '', r.issueFeedback || '', r.replenishment || '');
     row.push(r.totalScore === -1 ? '-' : r.totalScore, r.grade, (r.issues || []).join('；'), appeal.status, appeal.reason, appeal.reviewReason, appeal.attachments.length, appeal.attachments.map(function(a) { return a.name || ''; }).join('；'));
     var _eos = orderSendStat(r);
     row.push(_eos.count, _eos.pct, sessionParticipation(r).assessed ? '是' : '否');
@@ -6799,7 +6951,7 @@ function importAllData(data, source) {
   if (data.standards && data.standards.length) { STANDARDS = data.standards; }
   if (data.gradeRules && data.gradeRules.length) { GRADE_RULES = data.gradeRules; }
   // 【2026-11-23 周度统计】随主数据并线：按 id 合并统计记录，改过日期的以 editedAt 新者为准
-  try { qcMergeWeeklyStats(data.weeklyStats); } catch (e) {}
+  try { qcMergeWeeklyStats(data.weeklyStats); qcApplyEditedBatchDates(results, rawData); } catch (e) {}
   // 【需求4·知识库不回退】
   // 云端权威来源：用云端知识库刷新内存，并写入本地权威副本。
   // 本地来源（缓存/URL快照）：不信任其携带的知识库，优先用本地权威副本恢复内存，杜绝回退内置旧版。

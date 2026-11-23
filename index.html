@@ -87,6 +87,62 @@ table.summary-table .cell-clickable:hover { filter: brightness(0.9); }
 .score-na { background: var(--gray-100); color: var(--gray-500); }
 .appeal-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600; white-space:nowrap; }
 .appeal-none { background:var(--gray-100); color:var(--gray-500); }
+/* =====【20261123b】业务类型徽章（类型列：邮件/AZ/中差评）===== */
+.biz-badge { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; white-space:nowrap; }
+.biz-mail { background:#e8f1ff; color:#1e5cc8; }
+.biz-az { background:#fff2df; color:#a05a00; }
+.biz-neg { background:#fdecf0; color:#c2274a; }
+/* =====【20261123b】质检明细表格列宽规范化：序号|类型|组别|日期|账号|ODR|客服|平台单号|订单金额|[维度...]|总分|等级|申诉状态|操作|去信数|占比|是否考核 ===== */
+#detailTable th { white-space:nowrap; word-break:keep-all; }
+#detailTable th:nth-child(1) { width:44px; text-align:center; }
+#detailTable th:nth-child(2) { width:64px; }
+#detailTable th:nth-child(3) { width:56px; white-space:nowrap; }
+#detailTable th:nth-child(4) { width:88px; }
+#detailTable th:nth-child(5) { width:150px; }
+#detailTable th:nth-child(6) { width:72px; }
+#detailTable th:nth-child(7) { width:80px; }
+#detailTable th:nth-child(8) { width:140px; }
+#detailTable th:nth-child(9) { width:84px; }
+#detailTable td:nth-child(1) { text-align:center; color:var(--gray-400); font-size:12px; }
+#detailTable td:nth-child(2) { text-align:center; }
+#detailTable td:nth-child(4) { white-space:nowrap; }
+#detailTable td:nth-child(5) { word-break:break-all; min-width:110px; }
+#detailTable td:nth-child(8) { word-break:break-all; min-width:110px; }
+/* =====【20261123b】全局响应式自适应（小屏 / 中屏 / 大屏 / 投屏）===== */
+html, body { max-width:100%; overflow-x:hidden; }
+img, table, select, input, textarea, button { max-width:100%; }
+.filter-bar { max-width:100%; }
+.bulk-box { flex-wrap:wrap; }
+.bulk-box textarea { max-width:100%; }
+.modal-overlay { padding:12px; }
+@media (max-width: 1100px) {
+  .header { height:auto; padding:10px 16px; flex-wrap:wrap; gap:8px; }
+  .tab-nav { top:0; position:static; overflow-x:auto; scrollbar-width:thin; }
+  .header-actions { flex-wrap:wrap; justify-content:flex-start; }
+  #tab-detail .filter-line { flex-wrap:wrap; }
+  #tab-detail .fblock { flex-wrap:wrap; }
+  .filter-item select { min-width:0; max-width:180px; }
+  .modal { width:96%; max-width:96vw; }
+  .modal-body { padding:16px; }
+  .rc-base-row { flex-wrap:wrap; }
+  .rc-reg-row { flex-wrap:wrap; }
+  .tab-content { padding:12px; }
+}
+@media (min-width: 1600px) {
+  body { font-size:15px; }
+  table.data-table { font-size:14px; }
+  table.summary-table { font-size:12px; }
+  .kpi-value { font-size:22px; }
+}
+@media (min-width: 2200px) {
+  body { font-size:16px; }
+  table.data-table { font-size:15px; }
+  table.summary-table { font-size:13px; }
+  table.data-table th { padding:12px 16px; }
+  table.data-table td { padding:12px 16px; }
+  .kpi-value { font-size:26px; }
+  .modal { max-width:1100px; }
+}
 .appeal-pending { background:var(--warning-bg); color:var(--warning); }
 .appeal-approved { background:var(--success-bg); color:var(--success); }
 .appeal-rejected { background:var(--danger-bg); color:var(--danger); }
@@ -1401,6 +1457,25 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 <div class="modal-overlay" id="knowledgeModal"><div class="modal modal-sm"><div class="modal-header"><h3 id="knowledgeModalTitle">新增知识</h3><button class="modal-close" onclick="closeKnowledgeModal()">&times;</button></div><div class="modal-body"><input type="hidden" id="knowledgeEditId"><input type="hidden" id="knowledgeEditType"><div id="knowledgeDuplicateHint" style="display:none;margin-bottom:14px;padding:12px 14px;background:var(--warning-bg);border:1px solid #fdba74;border-radius:8px;color:var(--warning);font-size:13px;line-height:1.6;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">标题（必填）</label><input type="text" id="knowledgeTitle" placeholder="例如：退款场景主动说明到账时间" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识类型</label><select id="knowledgeKind" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"><option value="can-do">这个做法可以（正向知识）</option><option value="missed">应该质检但容易漏检（漏检知识）</option></select></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">适用维度（可多选，不选则默认「综合」）</label><div id="knowledgeDimensionBox" style="display:flex;flex-wrap:wrap;gap:8px 16px;padding:10px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;background:#fff;"><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="方案合理性" onchange="onKnowledgeDimensionChange()"><span>方案合理性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="流程&amp;操作完整性" onchange="onKnowledgeDimensionChange()"><span>流程&amp;操作完整性</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务技巧" onchange="onKnowledgeDimensionChange()"><span>服务技巧</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="服务态度" onchange="onKnowledgeDimensionChange()"><span>服务态度</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="语言语法表达" onchange="onKnowledgeDimensionChange()"><span>语言语法表达</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="平台禁忌" onchange="onKnowledgeDimensionChange()"><span>平台禁忌</span></label><label class="kb-dim-item" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" value="综合" onchange="onKnowledgeDimensionChange()"><span>综合（全部维度）</span></label></div><input type="hidden" id="knowledgeDimension" value="综合"><div style="margin-top:6px;font-size:12px;color:var(--gray-500);">可勾选多个维度；勾选「综合」表示该知识适用于全部维度。</div></div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;"><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">知识来源</label><div class="radio-group" style="margin:0 0 10px;"><label class="radio-item"><input type="radio" name="knowledgeSource" value="text" checked onchange="onKnowledgeSourceChange()"><span>文本</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="file" onchange="onKnowledgeSourceChange()"><span>本地文档</span></label><label class="radio-item"><input type="radio" name="knowledgeSource" value="url" onchange="onKnowledgeSourceChange()"><span>网页链接</span></label></div><div id="knowledgeFileWrap" style="display:none;margin-bottom:12px;"><div class="upload-zone" style="padding:22px 16px;cursor:pointer;" onclick="document.getElementById('knowledgeFile').click()"><div class="upload-icon" style="font-size:30px;margin-bottom:6px;">📎</div><div class="upload-title" style="font-size:15px;">点击选择文档（SOP / 规范 / 截图等）</div><div class="upload-desc">支持 PDF / Word / Excel / 图片 / TXT，单个不超过 20MB</div></div><div id="knowledgeFileStatus" style="display:none;margin-top:8px;padding:8px 10px;background:var(--gray-50);border:1px solid var(--gray-200);border-radius:6px;font-size:13px;align-items:center;gap:8px;"><span id="knowledgeFileName" style="flex:1;"></span><button type="button" class="btn-link danger" onclick="clearKnowledgeFile()">移除</button></div><input type="file" id="knowledgeFile" style="display:none" onchange="onKnowledgeFileSelect(event)"></div><div id="knowledgeUrlWrap" style="display:none;margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">网页链接（SOP / 文档地址）</label><input type="url" id="knowledgeUrl" placeholder="https://… 例如内部 Wiki 的 SOP 页面" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></div><div style="margin-bottom:16px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">内容 / 判断依据（文本类必填，文档 / 链接类可填备注）</label><textarea id="knowledgeContent" placeholder="描述什么情况、应该如何判断、正确或错误的处理方式" style="width:100%;min-height:120px;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;resize:vertical;"></textarea><div style="margin:4px 0 4px;font-size:12px;color:var(--gray-500);">❐ 系统将根据「标题 + 正文」自动提取判分依据，无需手动填写关键词；上传的知识即邮件质检的标准与资料，质检时据此自动判分。</div></div><div id="knowledgeHitPreview" style="margin:2px 0 10px;font-size:12px;color:var(--gray-600);"></div><div style="text-align:right;"><button class="btn btn-outline btn-sm" onclick="closeKnowledgeModal()" style="margin-right:8px;">取消</button><button class="btn btn-primary btn-sm" onclick="saveKnowledgeItem()">保存并重跑质检</button></div></div></div></div>
 <div class="progress-overlay" id="progressOverlay"><div class="progress-box"><div class="spinner"></div><div class="progress-text" id="progressText">正在质检...</div><div class="progress-detail" id="progressDetail"></div><div class="progress-bar-wrap"><div class="progress-bar-fill" id="progressBarFill" style="width:0%"></div></div></div></div>
 <div class="toast" id="toast"></div>
-<script src="app20261117h.js?v=20261123a"></script>
+<style>
+#detailTable { max-width:none; }
+#detailTable th { min-width:64px; }
+#detailTable th:first-child { min-width:40px; }
+#detailTable th:nth-child(5), #detailTable th:nth-child(8) { min-width:126px; }
+#detailTable th:nth-last-child(4) { min-width:104px; }
+#tab-detail .filter-bar, #tab-detail .filter-line, #tab-detail .fblock, #tab-detail .export-row,
+.header-actions, .card-header, .rc-base-row, .rc-reg-row { flex-wrap:wrap; gap:8px; }
+#tab-detail .fblock { max-width:100%; }
+#tab-detail .fdivider { display:none; }
+.tab-nav { overflow-x:auto; }
+.tab-item { flex-shrink:0; white-space:nowrap; }
+.rc-base, .rc-reg { min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.modal { max-height:calc(100dvh - 24px); }
+@media (max-width:1440px) {
+  .header { position:relative; height:auto; padding:8px 16px; flex-wrap:wrap; gap:8px; }
+  .tab-nav { top:0; }
+}
+</style>
+<script src="app20261117h.js?v=20261123c"></script>
 </body>
 </html>
