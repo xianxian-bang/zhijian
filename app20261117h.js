@@ -902,17 +902,28 @@ function qcAuditAppend(r, action) {
 }
 // 从审计日志恢复：把比本地 main 更新的申诉事件应用回 results，并把修正后的 main 写回云端。
 // 任何设备打开页面 / 定时同步时都会调用，保证「别的电脑申诉/审核的数据」不丢失。
+// 【20261123g·出口流量优化】申诉审计日志行：以前每 8 秒无条件下载整行。
+// 审计日志会随申诉累积变长，长期开着页面同样会持续吃流量。
+// 现在先读几十字节的 updated_at，未变化直接跳过，不再下载整行内容。
+var QC_AUDIT_UPD_KEY = 'qc_audit_updated_at_v1';
 function qcAuditRestoreFromCloud() {
   if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(0);
   var now = Date.now();
   if (QC_AUDIT_BUSY || now - QC_AUDIT_LAST_SYNC < 8000) return Promise.resolve(0);
   QC_AUDIT_BUSY = true; QC_AUDIT_LAST_SYNC = now;
-  return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', APPEAL_AUDIT_ROW).limit(1)
-    .then(function (res) {
-      var row = res && res.data && res.data.length ? res.data[0] : null;
-      if (!row || !row.state_json) { QC_AUDIT_BUSY = false; return 0; }
-      var log = null; try { log = JSON.parse(row.state_json); } catch (e) {}
-      if (!log || !log.events || !log.events.length) { QC_AUDIT_BUSY = false; return 0; }
+  var knownAudit = null; try { knownAudit = localStorage.getItem(QC_AUDIT_UPD_KEY); } catch (e) {}
+  return cloudDb.from('qc_dashboard_state').select('updated_at').eq('state_key', APPEAL_AUDIT_ROW).limit(1)
+    .then(function (probe) {
+      var pr = probe && probe.data && probe.data.length ? probe.data[0] : null;
+      var pu = pr ? (pr.updated_at || '') : '';
+      if (pu && knownAudit && pu === knownAudit) { QC_AUDIT_BUSY = false; return 0; }  // 未变化：零下载
+      return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', APPEAL_AUDIT_ROW).limit(1)
+        .then(function (res) {
+          if (pu) { try { localStorage.setItem(QC_AUDIT_UPD_KEY, pu); } catch (e) {} }
+          var row = res && res.data && res.data.length ? res.data[0] : null;
+          if (!row || !row.state_json) { QC_AUDIT_BUSY = false; return 0; }
+          var log = null; try { log = JSON.parse(row.state_json); } catch (e) {}
+          if (!log || !log.events || !log.events.length) { QC_AUDIT_BUSY = false; return 0; }
       // 每个订单只取时间最新的一条事件
       var latest = {}, i;
       for (i = 0; i < log.events.length; i++) {
@@ -944,8 +955,42 @@ function qcAuditRestoreFromCloud() {
       }
       QC_AUDIT_BUSY = false;
       return changed;
+        })
+        .catch(function () { QC_AUDIT_BUSY = false; return 0; });
     })
     .catch(function () { QC_AUDIT_BUSY = false; return 0; });
+}
+// 【20261123g·出口流量优化】写回前不再无条件下载整包 main（约 2.6MB）。
+// 旧逻辑：每次保存都先 GET main 全量 → 只为"并入他人改动"。团队每传一批就要多耗 2.6MB 出口流量，
+// 是 5GB/月免费额度被快速吃满的主要原因之一。
+// 新逻辑：先查几十字节的 updated_at 探针——
+//   · 与本地已知版本一致 → 云端没有新改动，跳过整包下载（省 2.6MB/次）
+//   · 不一致 / 探针失败 / 云端为空 → 才全量下载并合并（保证不丢他人数据）
+var QC_LAST_SEEN_UPD = null;
+function qcMergeBeforeWrite() {
+  var known = QC_LAST_SEEN_UPD;
+  if (!known) { try { known = localStorage.getItem(QC_MAIN_UPD_KEY); } catch (e) { known = null; } }
+  return qcProbeMainUpd(true).catch(function() { return 'UNKNOWN'; }).then(function(upd) {
+    if (upd && upd !== 'EMPTY' && upd !== 'UNKNOWN' && known && upd === known) {
+      // 云端版本未变：无需下载整包，直接用本地数据写回
+      try { QC_LAST_SEEN_UPD = upd; } catch (e) {}
+      return { skipped: true };
+    }
+    return qcFetchMainRow(true).then(function(res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (row && row.state_json) {
+        try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {}
+        try { if (row.updated_at) QC_LAST_SEEN_UPD = row.updated_at; } catch (e) {}
+      }
+      return { merged: true };
+    });
+  }).catch(function() {
+    // 探针或合并失败不影响写入（宁可多下载一次，也不能让用户存不进去）
+    return qcFetchMainRow(true).then(function(res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (row && row.state_json) { try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {} }
+    }).catch(function() { return null; });
+  });
 }
 function cloudSaveState() {
   if (!cloudDb) return Promise.reject(new Error('云端数据库尚未初始化'));
@@ -953,11 +998,7 @@ function cloudSaveState() {
   if (QC_WRITE_PROMISE) { try { setCloudStatus('正在同步，请稍候…', 'var(--warning)'); } catch (e) {} return QC_WRITE_PROMISE; }
   // 写回前并行做两件事：① 并入云端最新记录（他人上传/申诉）② 拉取最新永久删除名单
   var pre = Promise.all([
-    qcFetchMainRow(true)
-      .then(function(res) {
-        var row = res && res.data && res.data.length ? res.data[0] : null;
-        if (row && row.state_json) { try { qcMergeCloudNewRecords(qcDecodeStateJson(row.state_json)); } catch (e) {} }
-      }).catch(function() { return null; }),
+    qcMergeBeforeWrite(),
     qcLoadDeleteRegistry()
   ]);
   QC_WRITE_PROMISE = pre.then(function() {
@@ -1002,7 +1043,7 @@ function cloudSaveState() {
     return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
       if (res.error) throw res.error;
       // 【20261122d】保存成功后记录云端新 updated_at：本地缓存此时=云端最新，下次启动探针可直接跳过全量下载
-      try { var nu = res && res.data && res.data[0] && res.data[0].updated_at; if (nu) { localStorage.setItem(QC_MAIN_UPD_KEY, nu); } else { localStorage.removeItem(QC_MAIN_UPD_KEY); } } catch (e) {}
+      try { var nu = res && res.data && res.data[0] && res.data[0].updated_at; if (nu) { localStorage.setItem(QC_MAIN_UPD_KEY, nu); QC_LAST_SEEN_UPD = nu; } else { localStorage.removeItem(QC_MAIN_UPD_KEY); } } catch (e) {}
       try { localStorage.setItem(QC_LAST_WRITE_HASH_KEY, wHash); } catch (e) {}
       setCloudStatus('已同步云端', 'var(--success)');
       QC_WRITE_PROMISE = null;
@@ -1103,18 +1144,23 @@ function qcToastOnce(msg, type) {
     if (typeof showToast === 'function') showToast(msg, type || 'success');
   } catch (e) {}
 }
-function qcProbeMainUpd() {
+// 【20261123g】探针改为「短时效缓存」：5 秒内复用同一次请求（避免并发重复探测），
+// 超过 5 秒重新查询。此前 Promise 永不失效，导致后续所有探测都返回旧值，
+// 申诉同步 / 写前合并会误判"云端没变化"。传 true 可强制立即重查。
+var QC_BOOT_PROBE_AT = 0;
+function qcProbeMainUpd(force) {
   if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(null);
-  if (!QC_BOOT_PROBE_PROMISE) {
-    QC_BOOT_PROBE_PROMISE = cloudDb.from('qc_dashboard_state').select('updated_at').eq('state_key', 'main').limit(1)
-      .then(function(res) {
-        // 【20261123f】探针同样要区分硬错误：402 时不能当普通空结果继续走全量下载
-        if (res && res.error) { qcMarkCloudRestricted(res.error); throw res.error; }
-        var row = res.data && res.data.length ? res.data[0] : null;
-        return row ? (row.updated_at || null) : 'EMPTY'; // 'EMPTY' = 云端 main 已被删除，必须走全量逻辑处理空库
-      })
-      .catch(function(err) { QC_BOOT_PROBE_PROMISE = null; qcMarkCloudRestricted(err); throw err; });
-  }
+  var now = Date.now();
+  if (!force && QC_BOOT_PROBE_PROMISE && (now - QC_BOOT_PROBE_AT) < 5000) return QC_BOOT_PROBE_PROMISE;
+  QC_BOOT_PROBE_AT = now;
+  QC_BOOT_PROBE_PROMISE = cloudDb.from('qc_dashboard_state').select('updated_at').eq('state_key', 'main').limit(1)
+    .then(function(res) {
+      // 【20261123f】探针同样要区分硬错误：402 时不能当普通空结果继续走全量下载
+      if (res && res.error) { qcMarkCloudRestricted(res.error); throw res.error; }
+      var row = res.data && res.data.length ? res.data[0] : null;
+      return row ? (row.updated_at || null) : 'EMPTY'; // 'EMPTY' = 云端 main 已被删除，必须走全量逻辑处理空库
+    })
+    .catch(function(err) { QC_BOOT_PROBE_PROMISE = null; QC_BOOT_PROBE_AT = 0; qcMarkCloudRestricted(err); throw err; });
   return QC_BOOT_PROBE_PROMISE;
 }
 // 从云端拉取 main，若与当前数据不同则整体刷新（明细 + 回邮 + 看板一起）
@@ -8798,30 +8844,42 @@ function qcSyncAppealsFromCloud() {
   if (APPEAL_SYNC_BUSY || now - APPEAL_SYNC_AT < 9000) return;
   APPEAL_SYNC_AT = now;
   APPEAL_SYNC_BUSY = true;
-  cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', 'main').limit(1)
-    .then(function (res) {
-      var row = res && res.data && res.data.length ? res.data[0] : null;
-      if (!row || !row.state_json) return;
-      var d = qcDecodeStateJson(row.state_json);
-      if (!d || !d.results || typeof results === 'undefined' || !results) return;
-      var map = {}, i;
-      for (i = 0; i < d.results.length; i++) map[qcAppealStableKey(d.results[i])] = d.results[i];
-      var changed = false;
-      for (i = 0; i < results.length; i++) {
-        var r = results[i], cr = map[qcAppealStableKey(r)];
-        if (!cr) continue;
-        // 用统一的时间戳比较合并他人申诉/审核结果（含评分/等级/明细），
-        // 不再只比对状态文字——同状态的复核改分、更新的审核时间也能同步过来
-        try { if (qcMergeAppealInto(r, cr)) { changed = true; } } catch (e) {
-          var os = qcAppealStatus(r), ns = (cr.appeal && cr.appeal.status) || '无申诉';
-          if (os !== ns) { r.appeal = cr.appeal; changed = true; }
-        }
-      }
-      if (changed) { try { renderDetailTable(); } catch (e) {} qcRefreshAppealBadges(); }
-      var box = document.getElementById('appealInboxModal');
-      if (box && box.classList.contains('show')) qcRenderAppealInbox();
+  // 【20261123g·出口流量根因修复】此前这里每 9 秒把整包 main（约 2.6MB）完整下载一遍，
+  // 只为比对申诉状态 —— 单台电脑每天 8 小时就产生约 8GB 出口流量，
+  // Supabase 免费版 5GB/月 几分钟到一两天就会被吃穿（这是本次云端被停用的真正主因）。
+  // 现在先查几十字节的 updated_at 探针：云端主数据没变就直接返回，不再下载整包。
+  var known = QC_LAST_SEEN_UPD;
+  if (!known) { try { known = localStorage.getItem(QC_MAIN_UPD_KEY); } catch (e) { known = null; } }
+  qcProbeMainUpd(true).catch(function() { return 'UNKNOWN'; }).then(function(upd) {
+    if (upd && upd !== 'EMPTY' && upd !== 'UNKNOWN' && known && upd === known) {
       APPEAL_SYNC_BUSY = false;
-    }).catch(function () { APPEAL_SYNC_BUSY = false; });
+      return true;   // 云端未变化：零下载
+    }
+    return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', 'main').limit(1)
+      .then(function (res) {
+        var row = res && res.data && res.data.length ? res.data[0] : null;
+        if (!row || !row.state_json) return;
+        var d = qcDecodeStateJson(row.state_json);
+        if (!d || !d.results || typeof results === 'undefined' || !results) return;
+        var map = {}, i;
+        for (i = 0; i < d.results.length; i++) map[qcAppealStableKey(d.results[i])] = d.results[i];
+        var changed = false;
+        for (i = 0; i < results.length; i++) {
+          var r = results[i], cr = map[qcAppealStableKey(r)];
+          if (!cr) continue;
+          // 用统一的时间戳比较合并他人申诉/审核结果（含评分/等级/明细），
+          // 不再只比对状态文字——同状态的复核改分、更新的审核时间也能同步过来
+          try { if (qcMergeAppealInto(r, cr)) { changed = true; } } catch (e) {
+            var os = qcAppealStatus(r), ns = (cr.appeal && cr.appeal.status) || '无申诉';
+            if (os !== ns) { r.appeal = cr.appeal; changed = true; }
+          }
+        }
+        if (changed) { try { renderDetailTable(); } catch (e) {} qcRefreshAppealBadges(); }
+        var box = document.getElementById('appealInboxModal');
+        if (box && box.classList.contains('show')) qcRenderAppealInbox();
+        APPEAL_SYNC_BUSY = false;
+      });
+  }).catch(function () { APPEAL_SYNC_BUSY = false; });
 }
 
 // ---------- 登录 / 会话恢复 / 权限切换后立即按新身份重算角标 ----------
@@ -8862,12 +8920,15 @@ function qcSyncAppealsFromCloud() {
     // 【20261122b·需求2】后台轮询不再拉取云端 main 主数据（此前每 4s 整包覆盖一次，
     // 云端若是旧批次就会把本地新数据顶掉，这是"数据来回跳动/突然变成其他数据"的直接根因）。
     // 主数据刷新只由：打开页面 / 手动「🔄 强制同步」/ 导入保存后 三个入口触发。
-    // 申诉与角标走独立云端行（qc_appeal_*），带合并逻辑，保持原有 4s 同步不受影响。
+    // 申诉与角标走独立云端行（qc_appeal_*），带合并逻辑，保持同步。
+    // 【20261123g·出口流量优化】① 页面在后台时不轮询（切走标签页零流量）；
+    // ② 轮询间隔 4s → 20s（申诉不是秒级场景，20s 完全够用，流量降 5 倍）。
     setInterval(function () {
+      try { if (document.hidden) return; } catch (e) {}
       try { qcRefreshAppealBadges(); } catch (e) {}
       try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
       try { if (cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
-    }, 4000);
+    }, 20000);
     // 【20261122f】看板归零看门狗（正常时零开销）：明细有数据但结果集意外清空 → 自动回滚最近有效结果并重绘
     setInterval(function () {
       try {
