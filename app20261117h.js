@@ -454,6 +454,8 @@ function qcLoadDeleteRegistry() {
   if (!cloudDb) return Promise.resolve(null);
   return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', DELETE_REGISTRY_ROW).limit(1)
     .then(function(res) {
+      // 【20261123f】402 等平台限制错误统一标记，避免后续逻辑把它当成「空登记表」继续跑
+      if (res && res.error) { qcMarkCloudRestricted(res.error); throw res.error; }
       var row = res && res.data && res.data.length ? res.data[0] : null;
       var reg = row && row.state_json ? qcNormalizeRegistry(qcDecodeStateJson(row.state_json) || {}) : qcNormalizeRegistry(null);
       qcRegistryApply(reg);
@@ -716,7 +718,8 @@ function cloudLoadState() {
       }
       return qcFetchMainRow(false).then(function(res) {
       if (!res) return;
-      if (res.error) throw res.error;
+      // 【20261123f】402 等平台限制错误：先标记并抛出，由下方 catch 统一给出准确文案
+      if (res.error) { qcMarkCloudRestricted(res.error); throw res.error; }
       var row = res.data && res.data.length ? res.data[0] : null;
       if (row && row.state_json) {
         try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
@@ -729,6 +732,11 @@ function cloudLoadState() {
       });
     });
   }).catch(function(err) {
+    // 【20261123f】区分「平台限制（402 出口超额）」与普通读取失败：前者说明真实原因且不诱导反复刷新
+    if (qcMarkCloudRestricted(err)) {
+      try { setCloudStatus('云端服务已超额停用（需管理员处理）· 当前显示本机缓存', 'var(--danger)'); } catch (e) {}
+      return;
+    }
     setCloudStatus('云端读取失败', 'var(--danger)');
     qcLoadSnapshotFallback();
   });
@@ -1002,6 +1010,11 @@ function cloudSaveState() {
     });
   }).catch(function(err){
     QC_WRITE_PROMISE = null;
+    // 【20261123f】写入被平台限制（402 出口超额等）：给出可直接执行的说明，不要只说"保存失败"
+    if (qcMarkCloudRestricted(err)) {
+      try { showToast('上传已在本机生效，但云端已停用（出口流量超额），暂时无法同步给其他人；恢复后点「强制同步」即可上传。', 'error'); } catch (e) {}
+      throw err;
+    }
     showToast('云端保存失败：' + ((err && (err.message || err.details || err.hint)) || '接口返回异常'), 'error');
     throw err;
   });
@@ -1027,6 +1040,34 @@ var QC_BOOTSTRAP_SYNCED = false;
 // 【20261122c·单例 main 下载】main 行约 2.6MB，此前启动被 cloudLoadState 与
 // qcFetchLatestAndRefresh 并发重复下载，两个大响应互相抢带宽 → 首个也要 80~100 秒，
 // 第二个直接卡死，看板在前 100 秒全显示 0。这里把「读 main」统一为单例 Promise：
+// 【20261123f】识别「云端服务被平台限制」这类**不可重试**的硬错误（Supabase 出口流量超额等）。
+// 特征：402 / 响应正文含 exceed_egress_quota、restricted、spend cap 等。
+// 以前所有错误一律当「网络抖动」自动重试 → 无限重试且文案误导，用户永远看不到真实原因。
+var QC_CLOUD_RESTRICTED = false;
+function qcIsCloudRestricted(err) {
+  if (!err) return false;
+  // HTTP 402 在 Supabase 语境下只有一种含义：项目被平台限制（出口流量超额 / 超出 spend cap）。
+  // 这是「不可重试」的硬错误，必须先于一切网络抖动判断拦下来。
+  try {
+    var st = Number(err.status || err.statusCode || 0);
+    if (st === 402) return true;
+  } catch (e) {}
+  var s = '';
+  try { s = [err.message, err.details, err.hint, err.code, err.status, err.statusText, String(err)].join(' '); } catch (e) { s = String(err); }
+  s = String(s || '');
+  return /exceed_egress_quota|exceed_egress|Service for this project is restricted|spend cap|restricted due to/i.test(s)
+    || (/\b402\b/.test(s) && /restrict|quota|egress|payment required/i.test(s));
+}
+function qcMarkCloudRestricted(err) {
+  if (QC_CLOUD_RESTRICTED) return true;
+  if (!qcIsCloudRestricted(err)) return false;
+  QC_CLOUD_RESTRICTED = true;
+  try { setCloudStatus('云端服务已超额停用（需管理员处理），当前显示本机缓存数据', 'var(--danger)'); } catch (e) {}
+  try {
+    showToast('云端已停用：Supabase 出口流量超额，项目被平台限制读写。数据未丢失，恢复后自动同步；当前显示本机缓存。', 'error');
+  } catch (e) {}
+  return true;
+}
 // 12 秒窗口内所有调用复用同一次网络请求，彻底消除重复下载。
 var QC_MAINROW_PROMISE = null, QC_MAINROW_AT = 0, QC_MAINROW_TTL = 12000;
 function qcFetchMainRow(force) {
@@ -1035,8 +1076,16 @@ function qcFetchMainRow(force) {
   if (!force && QC_MAINROW_PROMISE && (now - QC_MAINROW_AT) < QC_MAINROW_TTL) return QC_MAINROW_PROMISE;
   QC_MAINROW_AT = now;
   var q = cloudDb.from('qc_dashboard_state').select('state_key,state_json,updated_at').eq('state_key', 'main').limit(1)
-    .then(function(res) { QC_CLOUD_LAST_OK = Date.now(); return res; })
-    .catch(function(err) { QC_MAINROW_PROMISE = null; QC_MAINROW_AT = 0; throw err; });
+    .then(function(res) {
+      // 【20261123f】只有「真的拿到了数据且没有 error」才算一次成功读取。
+      // 之前无论如何都记成功 → 402 被误判为「刚连上又抖动」，导致无限重试且文案永远说"短暂波动"。
+      if (!res || res.error) { qcMarkCloudRestricted(res && res.error); return res; }
+      QC_CLOUD_LAST_OK = Date.now();
+      // 【20261123f】成功读到即解除「云端被限制」标记：管理员恢复额度后无需刷新页面即可继续使用
+      if (QC_CLOUD_RESTRICTED) { QC_CLOUD_RESTRICTED = false; try { setCloudStatus('云端已恢复连接', 'var(--success)'); } catch (e) {} }
+      return res;
+    })
+    .catch(function(err) { QC_MAINROW_PROMISE = null; QC_MAINROW_AT = 0; qcMarkCloudRestricted(err); throw err; });
   QC_MAINROW_PROMISE = q;
   return q;
 }
@@ -1059,11 +1108,12 @@ function qcProbeMainUpd() {
   if (!QC_BOOT_PROBE_PROMISE) {
     QC_BOOT_PROBE_PROMISE = cloudDb.from('qc_dashboard_state').select('updated_at').eq('state_key', 'main').limit(1)
       .then(function(res) {
-        if (res.error) throw res.error;
+        // 【20261123f】探针同样要区分硬错误：402 时不能当普通空结果继续走全量下载
+        if (res && res.error) { qcMarkCloudRestricted(res.error); throw res.error; }
         var row = res.data && res.data.length ? res.data[0] : null;
         return row ? (row.updated_at || null) : 'EMPTY'; // 'EMPTY' = 云端 main 已被删除，必须走全量逻辑处理空库
       })
-      .catch(function(err) { QC_BOOT_PROBE_PROMISE = null; throw err; });
+      .catch(function(err) { QC_BOOT_PROBE_PROMISE = null; qcMarkCloudRestricted(err); throw err; });
   }
   return QC_BOOT_PROBE_PROMISE;
 }
@@ -1125,6 +1175,11 @@ function qcFetchLatestAndRefresh(force) {
         // data=[]（合法的空库）必须连续两次确认为空才敢清空，避免单次抖动把线上数据当空库。
         var errObj = res && res.error;
         var hasDataField = !!(res && Object.prototype.hasOwnProperty.call(res, 'data'));
+        // 【20261123f】云端被平台限制（402 出口超额等）属于不可重试的硬错误：立即停止重试并说明真实原因
+        if (errObj && qcMarkCloudRestricted(errObj)) {
+          if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
+          return false;
+        }
         var isNetworkError = !!errObj || !hasDataField;
         if (!isNetworkError && res && Array.isArray(res.data)) {
           // data=[] 视为「疑似空库」：先不清空，交给下一轮再确认一次
@@ -1150,6 +1205,10 @@ function qcFetchLatestAndRefresh(force) {
         // 网络失败回退缓存：用本地缓存渲染，保证知识库/组织架构不丢失（缓存中含完整配置）
         if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
         if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 6000); }
+        else {
+          // 【20261123f】重试已用尽：给出明确终态提示，不要继续显示"正在重试…"让用户无限等待
+          try { setCloudStatus('云端读取失败（已保留本机数据）· 点「强制同步」重试', 'var(--danger)'); } catch (e) {}
+        }
         return false;
       }
       try { if (row.updated_at) localStorage.setItem(QC_MAIN_UPD_KEY, row.updated_at); } catch (e) {}
@@ -1187,10 +1246,16 @@ function qcFetchLatestAndRefresh(force) {
     }).catch(function(err){
       // 网络失败：绝不能静默——状态栏红字提示 + 8秒后自动重试，最多重试2次
       QC_FRESH_SYNC_BUSY = false;
+      // 【20261123f】云端被限制（402 等）不再重试，直接说明原因并保留缓存
+      if (qcMarkCloudRestricted(err)) {
+        if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
+        return false;
+      }
       var recentlyOk2 = (Date.now() - QC_CLOUD_LAST_OK) < 120000;
       try { setCloudStatus(recentlyOk2 ? '云端短暂波动，正在自动重试…' : '⚠ 暂时无法连接云端（已保留上次数据），正在自动重试…', recentlyOk2 ? 'var(--warning)' : 'var(--danger)'); } catch (e) {}
       if (attempt === 0) { try { if (typeof qcLoadCacheFast === 'function') qcLoadCacheFast(); } catch (e) {} }
       if (attempt < 2) { setTimeout(function(){ try { qcFetchLatestAndRefresh(true, attempt + 1); } catch (e) {} }, 6000); }
+      else { try { setCloudStatus('云端读取失败（已保留本机数据）· 点「强制同步」重试', 'var(--danger)'); } catch (e) {} }
       return false;
     });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
@@ -1218,6 +1283,12 @@ function qcForceResync() {
       }
     } catch (e) {}
     try { qcRefreshAppealBadges(); } catch (e) {}
+    // 【20261123f】云端被限制时，"同步完成"是假象：明确告知用户读到的是本机数据
+    if (QC_CLOUD_RESTRICTED) {
+      showToast('无法同步：云端服务已超额停用（出口流量超额）。当前显示的是本机缓存 ' + total + ' 条，恢复后重新同步即可。', 'error');
+      try { setCloudStatus('云端已停用（出口超额）· 当前为本机缓存 ' + total + ' 条', 'var(--danger)'); } catch (e) {}
+      return false;
+    }
     var msg = '同步完成：共 ' + total + ' 条数据，其中 ' + appealAll + ' 条申诉' + (ok ? '（已用云端最新数据刷新）' : '（云端数据无变化）');
     showToast(msg, 'success');
     try { setCloudStatus('已强制同步 · ' + total + ' 条 · 申诉 ' + appealAll, 'var(--success)'); } catch (e) {}
