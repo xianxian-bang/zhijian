@@ -53,6 +53,18 @@ var DEFAULT_KNOWLEDGE_BASE = [
   { id: 'kb-knowledge-2', type: 'knowledge', kind: 'missed', title: '承诺时限后必须检查是否完成', dimension: '流程&操作完整性', keywords: ['within', '3 days', '72 hour', '承诺', '三天'], content: '客服承诺在某个时限内退款、更新或回复时，必须存在明确的跟进动作，否则属于流程漏检。' }
 ];
 var KNOWLEDGE_BASE = JSON.parse(JSON.stringify(DEFAULT_KNOWLEDGE_BASE));
+// 【20261125a·需求1】知识库文件夹树：{id,name,parentId,createdAt,editedAt}；知识条目用 item.folderId 归属
+var KNOWLEDGE_FOLDERS = [];
+// 知识库版本快照：云端只存元数据（体积小），本机 localStorage 另存最近若干份完整快照
+var KB_VERSIONS = [];
+var KB_OPEN_FOLDERS = Object.create(null);   // 展开状态（仅本机会话）
+var KB_SELECTED = Object.create(null);       // 多选状态（仅本机会话）
+// 【20261125b·需求A】知识删除墓碑：id → 删除时间。没有墓碑就无法区分「删掉了」和「这台机器还没同步到」，
+// 云端旧副本一合并就会把删掉的知识顶回来（本次「删掉的复活」根因）。
+var KB_DELETED = Object.create(null);
+var QC_KB_DELETED_KEY = 'qc_kb_deleted_v1';
+var QC_KB_AUTH_KEY = 'qc_kb_authoritative_v1';
+var QC_KB_ROW_KEY = 'qc_kb';                 // 知识库独立小行：只写知识，不动 4MB 主数据行
 
 // ============ 平台禁忌敏感词（2026-11-17 语境化执行）============
 // 词表来源：质检知识库中「维度含平台禁忌 且 上传了表格文件」的知识条目（当前：敏感词 / 禁用词11月17.xlsx）。
@@ -285,6 +297,23 @@ var QC_APPEND_OLD_COUNT = 0;
 var QC_BATCH_META = null;
 // 周度统计记录库：每导入一批新增一条 {id,date,count,avg,pass,fail,createdAt}；管理员可改日期，同日期展示时自动聚合
 var QC_WEEKLY_STATS = [];
+// 【20261124e·需求1】统计记录删除墓碑：管理员手动删除的记录 id/batchId 永久记住（随主数据存云端），
+// 防止 qcRecordToolBatches 按批次补录 / 其他设备缓存并线时把已删记录带回来
+var QC_WS_DELETED = [];
+function qcWsMergeDeleted(arr) {
+  if (!Array.isArray(arr)) return 0;
+  var added = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var k = String(arr[i] || '');
+    if (!k) continue;
+    if (QC_WS_DELETED.indexOf(k) === -1) { QC_WS_DELETED.push(k); added++; }
+  }
+  return added;
+}
+function qcWsIsDeletedStat(w) {
+  if (!w) return false;
+  return (w.id && QC_WS_DELETED.indexOf(w.id) !== -1) || (w.batchId && QC_WS_DELETED.indexOf(w.batchId) !== -1);
+}
 var detailOrderExact = '';
 var charts = {};
 var HAS_XLSX = typeof XLSX !== 'undefined';
@@ -294,9 +323,9 @@ var HAS_LZ = typeof LZString !== 'undefined';
 // ============================================================
 // 腾讯云 CloudBase PG：固定网址云端数据（公开访问）
 // ============================================================
-var CLOUDBASE_ENV_ID = 'xianxian-d0goezgzacd6eeacb';
-var CLOUDBASE_REGION = 'ap-shanghai';
-var CLOUDBASE_ACCESS_KEY = 'eyJhbGciOiJSUzI1NiIsImtpZCI6ImJhNzY3MmU4LTU0ZWUtNGZkMS04NmEyLTZmYWNjM2Y0NjNiYyJ9.eyJpc3MiOiJodHRwczovL3hpYW54aWFuLWQwZ29lemd6YWNkNmVlYWNiLmFwLXNoYW5naWFpLnRjYi1hcGkudGVuY2VudGNsb3VkYXBpLmNvbSIsInN1YiI6ImFub24iLCJhdWQiOiJ4aWFueGlhbi1kMGdvZXpnemFjZDZlZWFjYiIsImV4cCI6NDA5MDEyNDc1MSwiaWF0IjoxNzg2NDQxNTUxLCJub25jZSI6IlJrSXVLU2Y0UzlLS2d0LUV0ZlNWd2ciLCJhdF9oYXNoIjoiUmtJdUtTZjRTOUtLZ3QtRXRmU1Z3ZyIsIm5hbWUiOiJBbm9ueW1vdXMiLCJzY29wZSI6ImFub255bW91cyIsInByb2plY3RfaWQiOiJ4aWFueGlhbi1kMGdvZXp6YWNkNmVlYWNiIiwibWV0YSI6eyJwbGF0Zm9ybSI6IlB1Ymxpc2hhYmxlS2V5In0sInJvbGUiOiJhbm9uIiwiaXNfYW5vbnltb3VzIjp0cnVlLCJhcHBfbWV0YWRhdGEiOnsicHJvdmlkZXIiOiJhbm9ueW1vdXMiLCJwcm92aWRlcnMiOlsiYW5vbnltb3VzIl19LCJ1c2VyX21ldGFkYXRhIjp7Im5hbWUiOiJBbm9ueW1vdXMifSwidXNlcl90eXBlIjoiIiwiY2xpZW50X3R5cGUiOiJjbGllbnRfdXNlciIsImlzX3N5c3RlbV9hZG1pbiI6ZmFsc2V9.lcVvH1RQNVU-Ja_AxaHTtRzN7P4gBKZlGbcUzXzje-qJO1Bcr_AKyDvRfmIjkH6l1zu-J4eua6GNlOmInIRTwECfQzlXyeAno3XAZwLTj1uWu4o_SOxSGYV_754W_7Ieuq4Y9eZi6rlJ1btWLxu2USpLL2ZMqlLRK41RdPulkmeuj0FzFsnVPsuqJICQosAyXOjjmkmHRqw72v80j_5le64_sZc5Pjg0UX3sD29NNJ3_ymABYhs1HtfMs0JJQHzicX6LBb1ZehF9KjE4QyXOvtr6exq5dj1ODaP5XEssmRmk917_4Gsup8Dk6WYRXmd8sWCnl6tsgK3ukjA28GknOg';
+var CLOUDBASE_ENV_ID = ''; // [20261127] 已切 Supabase，旧 CloudBase 凭据不再使用
+var CLOUDBASE_REGION = ''; // [20261127] 已切 Supabase
+var CLOUDBASE_ACCESS_KEY = ''; // [20261127] 已切 Supabase，旧密钥已移除
 var cloudApp = null, cloudDb = null, cloudReady = false;
 function setCloudStatus(text, color) { var el = document.getElementById('cloudStatus'); if (el) { el.textContent = text; el.style.color = color || 'var(--gray-500)'; } }
 function requireCloudAdmin() { return true; }
@@ -668,7 +697,7 @@ function addAppealReferenceKnowledge(result) {
   result.appeal.referenceSummary = item.content;
   return item;
 }
-function normalizeResultAppeal(result) { if (!result) return result; result.recordKey = result.recordKey || getRecordKey(result); result.appeal = normalizeAppeal(result.appeal); applyAppealApprovedGrade(result); return result; }
+function normalizeResultAppeal(result) { if (!result) return result; result.recordKey = result.recordKey || getRecordKey(result); result.appeal = normalizeAppeal(result.appeal); applyAppealApprovedGrade(result); if (result.aiAdopt) { try { applyAiAdopt(result, result.aiAdopt); } catch (e) {} } return result; }
 function getAppealStatus(result) { return normalizeAppeal(result && result.appeal).status; }
 function appealStatusClass(status) { return status === '待审核' ? 'appeal-pending' : (status === '部分通过' || status === '申诉通过' ? 'appeal-approved' : (status === '申诉被拒' ? 'appeal-rejected' : 'appeal-none')); }
 function appealStatusBadge(status) { return '<span class="appeal-badge ' + appealStatusClass(status) + '">' + escHtml(status || '无申诉') + '</span>'; }
@@ -695,7 +724,7 @@ function qcEncodeStateJson(obj) {
   }
   return json;
 }
-function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE, weeklyStats: (typeof QC_WEEKLY_STATS !== 'undefined' ? QC_WEEKLY_STATS : []) }; }
+function cloudStatePayload() { var slimResults = results.map(function(r){ var c={}; for(var k in r){ if(k!=='reply' && k!=='_part') c[k]=r[k]; } return c; }); return { schemaVersion: '3.2', qcLogicVersion: QC_LOGIC_VERSION, standardsFingerprint: standardsFingerprint(), rawData: rawData, results: slimResults, orgData: ORG_DATA, standards: STANDARDS, gradeRules: GRADE_RULES, knowledgeBase: KNOWLEDGE_BASE, weeklyStats: (typeof QC_WEEKLY_STATS !== 'undefined' ? QC_WEEKLY_STATS : []), weeklyDeleted: (typeof QC_WS_DELETED !== 'undefined' ? QC_WS_DELETED : []), kbDeleted: (typeof KB_DELETED !== 'undefined' ? KB_DELETED : {}), kbFolders: (typeof KNOWLEDGE_FOLDERS !== 'undefined' ? KNOWLEDGE_FOLDERS : []), kbVersions: (typeof KB_VERSIONS !== 'undefined' ? KB_VERSIONS.slice(-60) : []) }; }
 function qcLoadSnapshotFallback() {
   // 2026-11-19：禁用「自动加载 2026-10-16 旧快照」。此前云端偶发读取失败时会自动灌入旧快照，
   // 造成「已经删掉的数据又冒出来」。现在只读失败仅提示，绝不自动替换用户数据。
@@ -786,7 +815,11 @@ function qcMergeAppealInto(localR, cloudR) {
 function qcMergeCloudNewRecords(cloudD) {
   if (!cloudD || !cloudD.results || !cloudD.rawData) return 0;
   // 【2026-11-23 周度统计】云端统计记录并线（其他设备导入的新批次 / 改期结果）
+  // 【20261124e】先并线删除墓碑，再合并统计记录，已删记录不会被带回来
+  try { qcWsMergeDeleted(cloudD.weeklyDeleted); } catch (e) {}
   try { qcMergeWeeklyStats(cloudD.weeklyStats); } catch (e) {}
+  // 【20261125a·需求1】知识库文件夹树 + 版本记录并线
+  try { qcMergeKbFolders(cloudD.kbFolders); qcMergeKbVersions(cloudD.kbVersions); } catch (e) {}
   // 云端可能由后端工具直写（中文字段名/别名），先归一再合并，保证新增记录的金额/ODR 也能显示
   try { qcNormalizeAmountOdrFields(cloudD); } catch (e) {}
   var index = {}, i;
@@ -951,7 +984,15 @@ function qcAuditRestoreFromCloud() {
         try { qcRefreshAppealBadges(); } catch (e) {}
         try { showToast('已从云端申诉审计日志恢复 ' + changed + ' 条申诉/审核结果', 'info'); } catch (e) {}
         // 把恢复后的 main 写回，让所有设备看到一致状态
-        try { cloudSaveState(); } catch (e) {}
+        try {
+      var _sv = cloudSaveState();
+      if (_sv && _sv.catch) _sv.catch(function (err) {
+        var _m = String((err && err.message) || err);
+        if (qcIsCloudRestricted(err) || /InsufficientBalance|RESOURCE_EXHAUSTED|restricted/i.test(_m)) {
+          try { showToast('本单已判完并保存在本机，但云端停用无法同步。请点「导出数据」备份，云端恢复后再导入。', 'error'); } catch (e2) {}
+        }
+      });
+    } catch (e) {}
       }
       QC_AUDIT_BUSY = false;
       return changed;
@@ -1096,6 +1137,29 @@ function qcIsCloudRestricted(err) {
   var s = '';
   try { s = [err.message, err.details, err.hint, err.code, err.status, err.statusText, String(err)].join(' '); } catch (e) { s = String(err); }
   s = String(s || '');
+  
+// ===== 【R34】云端不可用时的离线兜底提示 =====
+// 云端（云函数/数据库）被平台停用时，判分结果只在本机内存+localStorage 缓存里，
+// 刷新页面仍在，但换设备/清缓存会丢。这里明确提示并给出"导出数据"保命路径。
+function qcOfflineBanner() {
+  try {
+    var box = document.getElementById('qcOfflineBanner');
+    if (!box) return;
+    if (!QC_CLOUD_RESTRICTED) { box.style.display = 'none'; return; }
+    var key = 'qc_offline_banner_closed_v1';
+    var closed = ''; try { closed = localStorage.getItem(key) || ''; } catch (e) {}
+    var today = new Date().toISOString().slice(0, 10);
+    if (closed === today) { box.style.display = 'none'; return; }
+    box.style.display = '';
+  } catch (e) {}
+}
+function qcOfflineBannerClose() {
+  try { localStorage.setItem('qc_offline_banner_closed_v1', new Date().toISOString().slice(0, 10)); } catch (e) {}
+  var box = document.getElementById('qcOfflineBanner');
+  if (box) box.style.display = 'none';
+}
+// 【R33】CloudBase 专用：体验版资源点用尽后云函数被平台停用（SCF）或网关资源耗尽（PG/Auth）
+  if (/InsufficientBalance|FUNCTIONS_INVOCATION_FAILED|Function is Unavailable|resource[\s_]?exhausted/i.test(s)) return true;
   return /exceed_egress_quota|exceed_egress|Service for this project is restricted|spend cap|restricted due to/i.test(s)
     || (/\b402\b/.test(s) && /restrict|quota|egress|payment required/i.test(s));
 }
@@ -1103,9 +1167,10 @@ function qcMarkCloudRestricted(err) {
   if (QC_CLOUD_RESTRICTED) return true;
   if (!qcIsCloudRestricted(err)) return false;
   QC_CLOUD_RESTRICTED = true;
-  try { setCloudStatus('云端服务已超额停用（需管理员处理），当前显示本机缓存数据', 'var(--danger)'); } catch (e) {}
+  try { setCloudStatus('云端资源已耗尽/停用（需管理员处理），当前显示本机缓存数据', 'var(--danger)'); } catch (e) {}
+  try { if (typeof qcOfflineBanner === 'function') qcOfflineBanner(); } catch (e) {}
   try {
-    showToast('云端已停用：Supabase 出口流量超额，项目被平台限制读写。数据未丢失，恢复后自动同步；当前显示本机缓存。', 'error');
+    showToast('云端已停用：环境资源点/出口额度已用尽，云函数与数据库被平台限制。数据未丢失，恢复后自动同步；当前显示本机缓存。', 'error');
   } catch (e) {}
   return true;
 }
@@ -1306,9 +1371,119 @@ function qcFetchLatestAndRefresh(force) {
     });
   } catch (e) { QC_FRESH_SYNC_BUSY = false; return Promise.resolve(false); }
 }
+// ============================================================
+// 【20261124·需求1】强制同步：每天「总计」最多 3 次（不分账号、不分设备）
+//  - 计数存两份：localStorage（本机，立即生效）+ 云端小行 qc_force_clicks（跨设备合并取大值）
+//  - 云端读取失败/超时 → 只按本机计数放行，绝不因为计数读不到而卡死功能
+//  - 每天 0 点按日期自动归零（不用定时器，比较日期即可）
+// ============================================================
+var QC_FORCE_LIMIT = 3;
+var QC_FORCE_ROW = 'qc_force_clicks';
+var QC_FORCE_CLICK_KEY = 'qc_force_click_v1';
+function qcForceLocalClicks() {
+  try {
+    var o = JSON.parse(localStorage.getItem(QC_FORCE_CLICK_KEY) || 'null');
+    if (!o || o.date !== qcAppealTodayStr()) return 0;
+    var n = parseInt(o.n, 10); return n > 0 ? n : 0;
+  } catch (e) { return 0; }
+}
+function qcForceSetLocalClicks(n) {
+  try { localStorage.setItem(QC_FORCE_CLICK_KEY, JSON.stringify({ date: qcAppealTodayStr(), n: n })); } catch (e) {}
+}
+// 读云端今日已用次数（小行，几十字节；失败一律按 0 处理，不阻塞）
+function qcForceCloudClicks() {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return Promise.resolve(0);
+  var p = cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', QC_FORCE_ROW).limit(1)
+    .then(function (res) {
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (!row || !row.state_json) return 0;
+      var o = null; try { o = JSON.parse(row.state_json); } catch (e) { return 0; }
+      if (!o || o.date !== qcAppealTodayStr()) return 0;
+      var n = parseInt(o.n, 10); return n > 0 ? n : 0;
+    }).catch(function () { return 0; });
+  return Promise.race([p, new Promise(function (r) { setTimeout(function () { r(0); }, 2000); })]);
+}
+function qcForcePushCloudClicks(n) {
+  if (typeof cloudDb === 'undefined' || !cloudDb) return;
+  try {
+    cloudDb.from('qc_dashboard_state').upsert({
+      state_key: QC_FORCE_ROW,
+      state_json: JSON.stringify({ date: qcAppealTodayStr(), n: n, at: new Date().toISOString() }),
+      updated_by: 'force-sync'
+    }, { onConflict: 'state_key' }).then(function () {}, function () {});
+  } catch (e) {}
+}
+// 刷新按钮文案 / 置灰状态（每次登录、每次点击、每次开页面都调用；纯本地零流量）
+function qcRefreshForceSyncBtn() {
+  var b = document.getElementById('forceSyncBtn'); if (!b) return;
+  var used = qcForceLocalClicks();
+  var left = Math.max(0, QC_FORCE_LIMIT - used);
+  b.textContent = '🔄 强制同步' + (left < QC_FORCE_LIMIT ? '（今日剩 ' + left + ' 次）' : '');
+  if (left <= 0) {
+    b.disabled = true; b.style.opacity = '0.55'; b.style.cursor = 'not-allowed';
+    b.title = '今日 3 次强制同步已用完（总量限制，不分账号与设备），明天 0 点后自动恢复';
+  } else {
+    b.disabled = false; b.style.opacity = ''; b.style.cursor = '';
+    b.title = '仅管理员可用 · 每天总计 3 次（今日剩 ' + left + ' 次）：清除本机旧缓存，强制用云端最新数据刷新（含他人申诉/审核）';
+  }
+}
+// 预占一次额度：本机立即 +1，云端取大值后同步（两台设备同时点最多可能多放行 1 次，可接受）
+function qcForceReserveClick() {
+  var local = qcForceLocalClicks();
+  if (local >= QC_FORCE_LIMIT) return Promise.resolve(false);
+  return qcForceCloudClicks().then(function (cloud) {
+    var base = Math.max(local, cloud || 0);
+    if (base >= QC_FORCE_LIMIT) { qcForceSetLocalClicks(base); qcRefreshForceSyncBtn(); return false; }
+    var n = base + 1;
+    qcForceSetLocalClicks(n);
+    qcForcePushCloudClicks(n);
+    qcRefreshForceSyncBtn();
+    return true;
+  });
+}
+// 登录后刷新按钮 + 跨设备合并今日已用次数（60 秒内只读一次云端，避免重复请求）
+var QC_FORCE_LIMIT_SYNC_AT = 0;
+function qcForceLimitRefresh() {
+  try { qcRefreshForceSyncBtn(); } catch (e) {}
+  if (Date.now() - QC_FORCE_LIMIT_SYNC_AT < 60000) return;
+  QC_FORCE_LIMIT_SYNC_AT = Date.now();
+  try {
+    if (typeof AUTH === 'undefined' || !AUTH || AUTH.role !== 'admin') return;
+    qcForceCloudClicks().then(function (cloud) {
+      if ((cloud || 0) > qcForceLocalClicks()) { qcForceSetLocalClicks(cloud); qcRefreshForceSyncBtn(); }
+    });
+  } catch (e) {}
+}
 // 一键强制同步（诊断/自救按钮）：彻底清掉本机旧缓存与 URL 旧快照，重置首次同步标志，
 // 无条件用云端 main 全量刷新 UI，并把申诉条数直接显示出来，便于确认"是否真的同步到了最新"。
 function qcForceResync() {
+  try {
+    if (typeof AUTH !== 'undefined' && AUTH && AUTH.role !== 'admin') {
+      showToast('仅管理员可执行强制同步', 'error');
+      return Promise.resolve(false);
+    }
+  } catch (e) {}
+  if (qcForceLocalClicks() >= QC_FORCE_LIMIT) {
+    try { showToast('今日 3 次强制同步已用完，明天 0 点后自动恢复（该额度为全系统总量，不分账号与设备）', 'error'); } catch (e) {}
+    qcRefreshForceSyncBtn();
+    return Promise.resolve(false);
+  }
+  return qcForceReserveClick().then(function (allowed) {
+    if (!allowed) {
+      try { showToast('今日 3 次强制同步已用完，明天 0 点后自动恢复（该额度为全系统总量，不分账号与设备）', 'error'); } catch (e) {}
+      return false;
+    }
+    return qcForceResyncExec();
+  });
+}
+function qcForceResyncExec() {
+  // 【20261124·需求1】强制同步仅管理员可用（按钮已对非管理员隐藏，这里再兜一层，防止控制台直接调用）
+  try {
+    if (typeof AUTH !== 'undefined' && AUTH && AUTH.role !== 'admin') {
+      showToast('仅管理员可执行强制同步', 'error');
+      return Promise.resolve(false);
+    }
+  } catch (e) {}
   try { localStorage.removeItem(QC_CACHE_KEY); localStorage.removeItem(QC_CACHE_HASH_KEY); } catch (e) {}
   try { localStorage.removeItem('qc_dashboard_cache_v1'); localStorage.removeItem('qc_dashboard_cache_hash_v1'); } catch (e) {}
   try { if (window.location.hash && window.location.hash.indexOf('#d=') === 0) clearDataFromUrl(); } catch (e) {}
@@ -1338,6 +1513,8 @@ function qcForceResync() {
     var msg = '同步完成：共 ' + total + ' 条数据，其中 ' + appealAll + ' 条申诉' + (ok ? '（已用云端最新数据刷新）' : '（云端数据无变化）');
     showToast(msg, 'success');
     try { setCloudStatus('已强制同步 · ' + total + ' 条 · 申诉 ' + appealAll, 'var(--success)'); } catch (e) {}
+    // 强制同步已把 main 整包拉下来，等于今天的申诉同步也做完了：记下当天，避免 9 点闸门再下载一次
+    try { qcAppealMarkSyncedToday(); } catch (e) {}
     return ok;
   });
 }
@@ -1671,8 +1848,19 @@ function afterParse(data, mode) {
     else if (h === '中差评' || h.indexOf('中差评') >= 0 || h === '差评' || lh === 'negativefeedback' || lh === 'negativereview') colMap.negReview = hi;
     else if (h === '客户情绪' || h.indexOf('客户情绪') >= 0 || lh === 'customeremotion' || lh === 'custemotion') colMap.custEmotion = hi;
   }
+  // 【20261124·需求4】属性补充表判定所需信息，需早于必填列校验
+  var _ATTR_COLS = [
+    ['returnInfo', '退货'], ['azInfo', 'AZ'], ['negReview', '中差评'], ['custEmotion', '客户情绪'],
+    ['processCheck', '是否需要检查流程操作'], ['refundReg', '是否有退款登记'],
+    ['issueFeedback', '是否有问题反馈'], ['replenishment', '是否有补件'],
+    ['orderAmount', '订单金额'], ['fbmDefectRate', 'FBM订单缺陷率']
+  ];
+  var _attrPresent = _ATTR_COLS.some(function(p) { return colMap[p[0]] !== undefined; });
+  var _attrMergeCandidate = _attrPresent && colMap.order !== undefined;
+
   var missing = [];
-  if (colMap.account === undefined) missing.push('账号');
+  // 属性补充表以「平台单号」为主键回溯已有明细，不需要账号列
+  if (colMap.account === undefined && !_attrMergeCandidate) missing.push('账号');
   if (colMap.agent === undefined) missing.push('客服');
   if (colMap.order === undefined) missing.push('平台单号');
   // 【20261123e·需求3/4】AZ / 中差评 表格没有「回邮数据」列，只要求有「申诉内容 / 评价内容」；
@@ -1684,6 +1872,85 @@ function afterParse(data, mode) {
     showToast('缺少必填列：' + missing.join('、') + '。检测到的列：' + headers.join(', '), 'error');
     return;
   }
+
+  // ============================================================
+  // 【20261124·需求4】属性补充表：按「平台订单号」把退货 / AZ / 中差评 / 客户情绪
+  // 等列的值合并进已导入的明细，不新增行、不重跑质检。
+  // 判定：存在上述任一属性列，且「回邮数据」缺失或绝大多数行不是可质检的邮件内容。
+  // ============================================================
+  var _replyMostlyBad = false;
+  if (colMap.reply !== undefined) {
+    var _chk = 0, _bad = 0;
+    for (var _s = 1; _s < data.length && _chk < 30; _s++) {
+      var _r0 = data[_s] || [];
+      var _rp = String(_r0[colMap.reply] || '').trim();
+      if (!_rp) continue;
+      _chk++;
+      // 真实回邮内容通常含发送标记或邮箱；属性表这一列往往只是客户名
+      var _looksMail = /发送成功|发送失败|已撤回|@/.test(_rp) || _rp.length >= 40;
+      if (!_looksMail) _bad++;
+    }
+    _replyMostlyBad = (_chk > 0 && (_bad / _chk) >= 0.8);
+  }
+  var _isAttrMerge = _attrPresent && colMap.order !== undefined &&
+                     (typeof rawData !== 'undefined' && rawData && rawData.length) &&
+                     // AZ / 中差评 表格本身就没有「回邮数据」列，必须排除，否则会被误判成属性表
+                     (colMap.appealContent === undefined && colMap.reviewContent === undefined) &&
+                     (colMap.account === undefined || colMap.reply === undefined || _replyMostlyBad);
+
+  if (_isAttrMerge) {
+    var _byOrder = {};
+    for (var _q = 0; _q < rawData.length; _q++) {
+      if (rawData[_q] && rawData[_q].order) _byOrder[String(rawData[_q].order).trim()] = _q;
+    }
+    var _matched = 0, _missOrder = [], _changed = 0;
+    for (var _i = 1; _i < data.length; _i++) {
+      var _row = data[_i];
+      if (!_row || !_row.length) continue;
+      var _ord = String(_row[colMap.order] || '').trim();
+      if (!_ord) continue;
+      var _pos = _byOrder[_ord];
+      if (_pos === undefined) { if (_missOrder.length < 8) _missOrder.push(_ord); continue; }
+      _matched++;
+      for (var _c = 0; _c < _ATTR_COLS.length; _c++) {
+        var _f = _ATTR_COLS[_c][0];
+        if (colMap[_f] === undefined) continue;
+        var _v = String(_row[colMap[_f]] || '').trim();
+        if (_v === '') continue;
+        if (String(rawData[_pos][_f] || '') !== _v) { rawData[_pos][_f] = _v; _changed++; }
+      }
+    }
+    // 同步到已质检结果（详情页优先读结果行）
+    if (typeof results !== 'undefined' && results && results.length) {
+      var _byOrd2 = {};
+      for (var _k2 = 0; _k2 < results.length; _k2++) {
+        if (results[_k2] && results[_k2].order) _byOrd2[String(results[_k2].order).trim()] = results[_k2];
+      }
+      for (var _o in _byOrder) {
+        var _src = rawData[_byOrder[_o]];
+        var _dst = _byOrd2[_o];
+        if (!_src || !_dst) continue;
+        for (var _c2 = 0; _c2 < _ATTR_COLS.length; _c2++) {
+          var _f2 = _ATTR_COLS[_c2][0];
+          if (_src[_f2] !== undefined && _src[_f2] !== '') _dst[_f2] = _src[_f2];
+        }
+      }
+    }
+    if (!_matched) {
+      showToast('未匹配到任何订单：请确认「平台单号」与已导入数据一致（前几个未匹配：' + _missOrder.join('、') + '）', 'error');
+      return;
+    }
+    try { renderDetailTable(); } catch (e) {}
+    try { renderDashboard(); } catch (e) {}
+    cloudSaveState().then(function() {
+      showToast('已按订单号补充属性：匹配 ' + _matched + ' 条，更新 ' + _changed + ' 个字段' +
+        (_missOrder.length ? ('；' + _missOrder.length + '+ 条未匹配（如 ' + _missOrder.slice(0, 3).join('、') + '）') : ''), 'success');
+    }).catch(function() {
+      showToast('属性已在本机生效，但云端同步失败（请稍后在页面点「强制同步」重试）', 'error');
+    });
+    return;
+  }
+
   var newRawData = [];
   var skippedUninspectable = 0;
   // 本批次归属周：上传动作发生时固定为「当时的上一周」，写入每条新明细，历史批次不受影响
@@ -1795,7 +2062,7 @@ function runQualityCheck() {
   var previousAppeals = {}, previousAppealsStable = {};
   for (var p = 0; p < results.length; p++) {
     var previous = normalizeResultAppeal(results[p]);
-    var _snap = { appeal: previous.appeal, fp: qcReplyFp(previous.reply) };
+    var _snap = { appeal: previous.appeal, fp: qcReplyFp(previous.reply), aiAdopt: previous.aiAdopt || null, aiFinalized: previous.aiFinalized ? true : false, aiResult: previous.aiFinalized ? JSON.parse(JSON.stringify(previous)) : null };
     previousAppeals[previous.recordKey] = _snap;
     previousAppealsStable[getStableRecordKey(previous)] = _snap;
   }
@@ -1825,11 +2092,19 @@ function runQualityCheck() {
         if (_old) { var _c = JSON.parse(JSON.stringify(_old)); _c._index = i; _nextResults.push(_c); keptCount++; continue; }
       }
       var result = null;
+      // 【R20/20261127】AI 主判分模式：已定型永久锁定，回邮被改也沿用快照(不重判/不调大模型)；只有全新数据才标待判分
+      var _aiSnap = previousAppeals[getRecordKey(rawData[i])] || previousAppealsStable[getStableRecordKey(rawData[i])] || null;
+      if (qcAiPrimaryEnabled() && _aiSnap && _aiSnap.aiFinalized) {
+        result = JSON.parse(JSON.stringify(_aiSnap.aiResult));
+      } else if (qcAiPrimaryEnabled()) {
+        result = qcAiPendingResult(rawData[i]);
+      } else {
       try { result = inspectOne(rawData[i]); } catch (_qcErr) {
         // 【20261122f】单条质检异常不再中断重建链：降级为「无法质检」占位并继续
         result = { grade: '无法质检', totalScore: -1, scores: {}, details: {} };
         try { if (typeof console !== 'undefined') console.warn('[QC] 单条质检异常已降级:', i, String(_qcErr && _qcErr.message || _qcErr).slice(0, 80)); } catch (e2) {}
       }
+      } // end R20 AI/rule branch
       result._index = i;
       // 透传批次归属周（上传时固定写入，历史批次不改动）
       result.qcWeek = rawData[i].qcWeek || '';
@@ -1866,6 +2141,7 @@ function runQualityCheck() {
       // 只有「历史快照存在」且「回邮内容指纹完全一致」才继承申诉；内容变了视为全新订单，全新质检。
       var _prevAppeal = (_snap && _snap.fp === _curFp) ? _snap.appeal : null;
       result.appeal = _prevAppeal ? normalizeAppeal(_prevAppeal) : createEmptyAppeal();
+      result.aiAdopt = (_snap && _snap.fp === _curFp) ? (_snap.aiAdopt || null) : null;
       normalizeResultAppeal(result);
       _nextResults.push(result);
     }
@@ -1886,15 +2162,73 @@ function runQualityCheck() {
   processBatch();
 }
 
-function getKnowledgeMatches(text, dimension) {
+// 【20261124·需求3】质检知识的「适用类型」隔离：
+//   邮件类型只应用「邮件」知识；AZ 只应用「AZ SOP」；中差评只应用「中差评 SOP」。
+//   AZ / 中差评 的 SOP 不会影响邮件质检，反之亦然。
+function knowledgeBizOf(item) {
+  var b = item && item.biz;
+  if (b === 'AZ') return 'AZ';
+  if (b === '中差评') return '中差评';
+  return '邮件';           // 历史知识没有该字段 → 一律视为邮件知识
+}
+function qcNormBizScope(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (/^(AZ|az)$/.test(s) || s === 'AZ') return 'AZ';
+  if (s === '中差评' || s === '差评' || s === 'negative') return '中差评';
+  return '邮件';
+}
+function getKnowledgeMatches(text, dimension, bizType) {
   var matches = [];
+  var bt = qcNormBizScope(bizType);
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
     var item = KNOWLEDGE_BASE[i];
     if (item.kind === 'reference-case') continue;
+    // 【20261125d】SOP 主文档只作依据展示，不参与关键词命中判分（其判定清单已拆成独立 sopRule 负向规则）
+    if (item.sopDoc) continue;
+    if (knowledgeBizOf(item) !== bt) continue;       // 类型不匹配：完全不参与该类型的质检
     if (!knowledgeDimensionMatches(item, dimension)) continue;
     if (knowledgeItemMatch(text, item)) matches.push(item);
   }
   return matches;
+}
+// 【20261125d】邮件 SOP 适用依据：按文本命中场景包关键词，列出本次质检参照的 SOP 文档（仅展示，不影响判分）
+var QC_SOP_SCENE_HINTS = {
+  S01: ['asin', '型号', '款式', '兼容', 'compatible', 'same model', '这款'],
+  S02: ['尺寸', '材质', '颜色', '规格', '参数', 'dimension', 'material', 'size', 'color'],
+  S03: ['库存', '有货', '到货', '多久到', 'in stock', 'stock', 'when will'],
+  S04: ['发票', '批量', 'b2b', 'invoice', 'bulk', '运营协助'],
+  S05: ['改地址', '改单', '修改订单', '收件人', 'change address', 'update order'],
+  S06: ['包裹', '在途', '断更', '没收到', '未收到', '待取件', 'where is my', 'stuck', 'tracking', 'delivery', 'package'],
+  S07: ['催发货', '还没发货', '什么时候发', 'not shipped', 'when will you ship', 'processing'],
+  S08: ['取消订单', '取消', 'cancel order', 'cancel my'],
+  S09: ['怎么用', '安装', '配对', '说明书', 'how to', 'instructions', 'manual'],
+  S10: ['退款', '折扣', 'refund', 'discount', 'money back'],
+  S11: ['破损', '坏了', '损坏', '危险品', 'broken', 'damaged', 'defective'],
+  S12: ['描述不符', '缺件', '错发', '少配件', 'missing', 'not as described', 'wrong item'],
+  S13: ['不想要', '买错', '多买', 'return', 'changed my mind'],
+  S14: ['退回物流', '已寄回', '退货追踪', 'return shipping', 'sent back'],
+  S15: ['退货', '描述问题', 'return reason'],
+  S16: ['退货', '质量问题', 'defect return'],
+  S17: ['a-to-z', 'az', 'claim', '差评', '中差评', 'review', '投诉'],
+  S18: ['如何', '请', 'please', 'thank', 'crm']
+};
+function qcSopApplicableDocs(text) {
+  var hay = String(text || '').toLowerCase();
+  var docs = [];
+  for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
+    var k = KNOWLEDGE_BASE[i];
+    if (!k || !k.sopDoc || knowledgeBizOf(k) !== '邮件') continue;
+    var code = k.sopCode || '';
+    if (/^0\./.test(code)) { docs.push(k); continue; }   // 总则：始终适用
+    var hints = QC_SOP_SCENE_HINTS[code] || [];
+    var hit = false;
+    for (var h = 0; h < hints.length; h++) if (hay.indexOf(String(hints[h]).toLowerCase()) >= 0) { hit = true; break; }
+    if (hit) docs.push(k);
+  }
+  // S18 通用沟通准则：始终适用
+  for (var j = 0; j < docs.length; j++) if (docs[j].sopCode === 'S18') return docs;
+  for (var m = 0; m < KNOWLEDGE_BASE.length; m++) if (KNOWLEDGE_BASE[m].sopDoc && KNOWLEDGE_BASE[m].sopCode === 'S18') { docs.push(KNOWLEDGE_BASE[m]); break; }
+  return docs;
 }
 function getReferenceCaseFingerprint(text) { return normalizeKnowledgeText(text); }
 function getReferenceCaseMatches(text) {
@@ -1910,8 +2244,11 @@ function isReferenceCaseResult(result) { return !!(result && (result.referenceCa
 function applyKnowledgeToResult(result, agentText, customerText) {
   // 「无法质检」的单子不做知识库叠加，避免给 -1 分的维度写入保底分
   if (result && result.grade === '无法质检') { result.knowledgeSummary = { goodHits: 0, badHits: 0 }; result.knowledgeEvidence = []; return result; }
+  // 【20261124·需求3】按业务类型隔离知识：邮件 / AZ / 中差评 各用各的 SOP
+  var _kbBiz = qcNormBizScope((result && (result.bizType || result.socType)) || '邮件');
   var allText = String(agentText || '') + '\n' + String(customerText || '');
-  var referenceHits = getReferenceCaseMatches(allText, result.recordKey);
+  // 参考案例来自邮件申诉沉淀，只对邮件类型生效
+  var referenceHits = (_kbBiz === '邮件') ? getReferenceCaseMatches(allText, result.recordKey) : [];
   if (referenceHits.length) {
     result.referenceCase = true;
     result.referenceCaseEvidence = referenceHits.map(function(k) { return { id: k.id, title: k.title, content: k.content }; });
@@ -1925,8 +2262,10 @@ function applyKnowledgeToResult(result, agentText, customerText) {
   var badHits = 0;
   for (var i = 0; i < DIM_NAMES.length; i++) {
     var dim = DIM_NAMES[i];
+    // 【20261125a·需求2】平台禁忌（敏感词）只对邮件类型生效：AZ / 中差评 不叠加该维度知识
+    if (dim === '平台禁忌' && _kbBiz !== '邮件') continue;
     var dimMax = getDimMax(dim);
-    var matches = getKnowledgeMatches(allText, dim);
+    var matches = getKnowledgeMatches(allText, dim, _kbBiz);
     for (var j = 0; j < matches.length; j++) {
       var k = matches[j];
       var isNegative = (k.type === 'case-bad' || k.kind === 'missed');
@@ -1990,36 +2329,42 @@ function inspectOne(item) {
   var agentText = extracted.agentText;
   var customerText = extracted.customerText || customer;
   var amazonCount = extracted.amazonCount || 0;
+  var robotCount = extracted.robotCount || 0;
+  // 【20261125a·需求5】robot 块已从质检文本中剔除；后续流程校验 / 禁忌上下文也用剔除后的回邮
+  var replyForCheck = qcReplyWithoutRobot(reply);
   // 亚马逊系统来信处理（2026-10-14 调整）：
   // 过去「排除亚马逊系统来信后没有可质检内容」会整条判为「无法质检」；
   // 现改为把亚马逊系统来信一并纳入质检范围正常打分，仅在没有其他可质检内容时才启用该回退，
   // 因此正常客服回邮仍按原逻辑排除系统来信，不受影响。
-  var _bl = reply.split('收起'), blockTotal = 0;
+  var _bl = replyForCheck.split('收起'), blockTotal = 0;
   for (var _bi = 0; _bi < _bl.length; _bi++) if (String(_bl[_bi]).trim()) blockTotal++;
   var allAmazonSession = amazonCount > 0 && amazonCount >= blockTotal;
-  var hasAgentReply = /\[(发送成功|发送失败|已撤回)\]/.test(reply);
+  var hasAgentReply = /\[(发送成功|发送失败|已撤回)\]/.test(replyForCheck);
   var amazonExcludedCount = amazonCount, amazonIncludedCount = 0;
   // 2026-10-15：会话里没有任何客服回邮段落 → 判「无法质检」，且不纳入任何统计。
   // 覆盖「回邮段落全部为亚马逊系统来信」的情形（全为系统来信时必然没有客服回邮）；
   // 只要存在一封客服回邮，就按正常流程质检。
   if (allAmazonSession || (!hasAgentReply && reply.indexOf('收起') >= 0)) {
+    var _noReplyIssue = allAmazonSession
+      ? '回邮段落全部为亚马逊系统来信且没有客服回邮，无法进行质检'
+      : (robotCount > 0 ? '回邮中仅包含 robot 机器人自动回复，已跳过质检（不计入质检样本）' : '回邮中没有客服回邮段落，无法进行质检');
     return applyKnowledgeToResult({ account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
       reply: reply, customer: customer,
       scores: { '语言语法表达': -1, '方案合理性': -1, '流程&操作完整性': -1, '服务技巧': -1, '服务态度': -1, '平台禁忌': -1 },
       totalScore: -1, grade: '无法质检',
-      issues: [allAmazonSession ? '回邮段落全部为亚马逊系统来信且没有客服回邮，无法进行质检' : '回邮中没有客服回邮段落，无法进行质检'],
-      details: {}, noAgentReply: true, amazonOnlySession: allAmazonSession }, agentText, customerText);
+      issues: [_noReplyIssue],
+      details: {}, noAgentReply: true, amazonOnlySession: allAmazonSession, robotSkipped: robotCount > 0 }, agentText, customerText);
   }
   if (amazonCount > 0 && !agentText.trim()) {
     var withAmazon = extractAgentReplies(reply, true);
-    agentText = withAmazon.agentText || extracted.nonAmazonText || reply || '';
+    agentText = withAmazon.agentText || extracted.nonAmazonText || replyForCheck || '';
     if (!customerText) customerText = withAmazon.customerText || '';
     amazonExcludedCount = 0;
     amazonIncludedCount = amazonCount;
   }
   var scores = {}, issues = [], details = {};
 
-  var pr = checkProhibition(agentText, reply);
+  var pr = checkProhibition(agentText, replyForCheck);
   scores['平台禁忌'] = pr.score;
   details['平台禁忌'] = pr;
   if (pr.issues.length > 0) issues.push.apply(issues, pr.issues);
@@ -2045,7 +2390,7 @@ function inspectOne(item) {
 
   // 流程&操作完整性：结合回邮数据与「是否有退款登记 / 是否有问题反馈 / 是否有补件」三列登记信息判分
   var pc = checkProcess(agentText, {
-    reply: reply,
+    reply: replyForCheck,
     customerText: customerText,
     refundReg: item.refundReg,
     issueFeedback: item.issueFeedback,
@@ -2077,6 +2422,15 @@ function inspectOne(item) {
 // （QC_TYPE_SOP 中按 type 取维度规则），其余统计 / 申诉 / 看板逻辑不受影响。
 // ============================================================
 var QC_TYPE_SOP = { AZ: null, '中差评': null };   // 预留：SOP 上传后写入 {dims:[], keywords:{}, ...}
+function qcHasBizKnowledge(bizType) {
+  var bt = qcNormBizScope(bizType);
+  for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
+    var k = KNOWLEDGE_BASE[i];
+    if (k.kind === 'reference-case') continue;
+    if (knowledgeBizOf(k) === bt) return true;
+  }
+  return false;
+}
 function inspectNonMail(item, bizType) {
   var appeal = String(item.appealContent || '').trim();
   var buyer = String(bizType === 'AZ' ? (item.buyerIssue || '') : (item.reviewContent || '')).trim();
@@ -2087,15 +2441,10 @@ function inspectNonMail(item, bizType) {
   var scores = {}, issues = [], details = {};
   var sop = QC_TYPE_SOP[bizType] || null;
   try {
-    var pr = checkProhibition(agentText, agentText + ' ' + customerText);
-    scores['平台禁忌'] = pr.score; details['平台禁忌'] = pr;
-    if (pr.issues.length > 0) issues.push.apply(issues, pr.issues);
-    if (pr.score === 0 && pr.issues.length > 0) {
-      var rdims = ['语言语法表达', '方案合理性', '流程&操作完整性', '服务技巧', '服务态度'];
-      for (var rd = 0; rd < rdims.length; rd++) { scores[rdims[rd]] = 0; details[rdims[rd]] = { score: 0, grade: '不达标', issues: ['红线违规，整单0分'] }; }
-      return { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
-        reply: agentText, customer: customerText, scores: scores, totalScore: 0, grade: '不达标', issues: issues, details: details, redlineViolation: true };
-    }
+    // 【20261125a·需求2】平台禁忌敏感词只对「邮件」类型执行：
+    // AZ / 中差评 不做任何敏感词扫描、不判红线、不参与平台禁忌维度（记 -1，不适用）。
+    scores['平台禁忌'] = -1;
+    details['平台禁忌'] = { score: -1, grade: '不适用', issues: [], note: '平台禁忌敏感词仅对邮件类型执行，本类型不参与判定' };
     var lr = checkLanguage(agentText, customerText);
     scores['语言语法表达'] = lr.score; details['语言语法表达'] = lr;
     if (lr.issues.length > 0) for (var i1 = 0; i1 < lr.issues.length; i1++) issues.push('[语言语法表达] ' + lr.issues[i1]);
@@ -2122,12 +2471,41 @@ function inspectNonMail(item, bizType) {
   var fr = { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
     reply: agentText, customer: customerText, scores: scores, totalScore: total,
     grade: total < 0 ? '无法质检' : determineGrade(total), issues: issues, details: details,
-    socType: bizType, sopPending: !sop };
+    bizType: bizType, socType: bizType, sopPending: !qcHasBizKnowledge(bizType) };
   return applyKnowledgeToResult(fr, agentText, customerText);
 }
 
-function isAmazonBlock(block) {
+// ============================================================
+// 【20261125a·需求5】robot 机器人回邮过滤
+// 规则：回邮块「发件人/来源」标记为 robot（robot / bot / 机器人 / 自动回复 等）时，
+// 整块隐藏、跳过全部质检逻辑：不计入质检样本、不产出缺陷、不参与任何维度与流程交叉校验。
+// 同一会话里其余客服人工回复照常完整质检。
+// ============================================================
+var QC_ROBOT_HEAD_RE = /(^|[^a-z0-9])(robot|chatbot|auto[\s-]?reply|auto[\s-]?response|机器人|自动回复|智能回复)([^a-z0-9]|$)/i;
+function qcBlockHead(block) {
+  return (String(block == null ? '' : block).split(/\d{4}-\d{2}-\d{2}/)[0] || '').trim();
+}
+function qcBlockIsRobot(block) {
   if (!block) return false;
+  var head = qcBlockHead(block);
+  if (!head) return false;
+  // 只看发件人/来源前缀：正文里提到 robot 不算（避免误杀正常客服回邮）
+  return QC_ROBOT_HEAD_RE.test(head);
+}
+function qcCountRobotBlocks(text) {
+  if (!text || text === '无联客记录') return 0;
+  var blocks = String(text).split('收起'), n = 0;
+  for (var i = 0; i < blocks.length; i++) if (qcBlockIsRobot(blocks[i])) n++;
+  return n;
+}
+// 去掉 robot 块后的回邮文本（用于流程交叉校验 / 平台禁忌上下文，防止 robot 内容影响判分）
+function qcReplyWithoutRobot(text) {
+  if (!text || text === '无联客记录') return text;
+  var blocks = String(text).split('收起'), out = [];
+  for (var i = 0; i < blocks.length; i++) if (!qcBlockIsRobot(blocks[i])) out.push(blocks[i]);
+  return out.join('收起').trim();
+}
+function isAmazonBlock(block) {  if (!block) return false;
   // 卖家自己的回邮（含发送状态标记）绝不算亚马逊系统来信，避免正常客服回邮（常提及 Amazon account/order）被整封误排除
   if (/\[发送成功\]|\[发送失败\]|\[已撤回\]/.test(block)) return false;
   // 发件人前缀（第一个日期之前的内容），用于判断发件人是否为亚马逊
@@ -2143,11 +2521,13 @@ function isAmazonBlock(block) {
 // includeAmazon=true：把亚马逊系统来信也纳入提取范围（用于「整封均为亚马逊系统来信」时回退为正常质检）
 function extractAgentReplies(text, includeAmazon) {
   var agentText = '', customerText = '', nonAmazonText = '';
-  var amazonCount = 0;
-  if (!text || text === '无联客记录') return { agentText: '', customerText: '', nonAmazonText: '', amazonCount: 0 };
+  var amazonCount = 0, robotCount = 0;
+  if (!text || text === '无联客记录') return { agentText: '', customerText: '', nonAmazonText: '', amazonCount: 0, robotCount: 0 };
   var blocks = text.split('收起');
   for (var i = 0; i < blocks.length; i++) {
     var block = blocks[i];
+    // 【20261125a·需求5】robot 自动回复：整块跳过（不计样本、不判分、不参与上下文）
+    if (qcBlockIsRobot(block)) { robotCount++; continue; }
     if (isAmazonBlock(block)) { amazonCount++; if (!includeAmazon) continue; } // 亚马逊系统来信（如销售伙伴支持团队）默认不参与客诉质检
     nonAmazonText += block + '\n';
     var sm = block.match(/\[(发送成功|发送失败|已撤回)\]([\s\S]*?)(?=\d{4}-\d{2}-\d{2}|$)/);
@@ -2156,7 +2536,7 @@ function extractAgentReplies(text, includeAmazon) {
     if (cm) customerText += cm[1].trim() + '\n';
   }
   if (!agentText && text.indexOf('收起') < 0 && (amazonCount === 0 || includeAmazon)) agentText = text; // 无会话结构的纯回邮兜底（includeAmazon 时含亚马逊系统来信）
-  return { agentText: agentText.trim(), customerText: customerText.trim(), nonAmazonText: nonAmazonText.trim(), amazonCount: amazonCount };
+  return { agentText: agentText.trim(), customerText: customerText.trim(), nonAmazonText: nonAmazonText.trim(), amazonCount: amazonCount, robotCount: robotCount };
 }
 
 function getReasonSentences(text) {
@@ -2270,6 +2650,8 @@ function getEmailEvidenceList(text, dim, issues, limit, includeAmazon) {
     if (!em.body) continue; // 未纳入质检的亚马逊系统来信 body 为空，自然跳过
     var sents = getReasonSentences(em.body);
     var best = '', bestScore = -1, fallback = '', matched = false;
+    var _bl = String(em.body).toLowerCase(), cnt = 0;
+    for (var _tj = 0; _tj < terms.length; _tj++) { if (terms[_tj] && _bl.indexOf(String(terms[_tj]).toLowerCase()) >= 0) cnt++; }
     for (var i = 0; i < sents.length; i++) {
       var s = sents[i];
       if (isMetaLine(s)) continue;
@@ -2284,14 +2666,58 @@ function getEmailEvidenceList(text, dim, issues, limit, includeAmazon) {
     if (!best) best = fallback;
     // 已纳入质检的亚马逊系统来信常为系统/界面文本，正文可能被界面文案过滤清空；此时直接引用原文，避免显示「未定位到具体邮件」
     if (!best && includeAmazon) best = String(em.body).replace(/\s+/g, ' ').trim().substring(0, 240);
-    if (best) hits.push({ email: em, sentence: String(best).substring(0, 240), matched: matched });
+    if (best) hits.push({ email: em, sentence: String(best).substring(0, 240), matched: matched, hitCount: cnt });
   }
   // 优先「客服回邮」邮件的证据，其次才是客户来信（保证「实际回邮」引用的是客服自己写的内容）
   var agentHits = hits.filter(function(h) { return h.email.role === '客服回邮'; });
   var pool = agentHits.length ? agentHits : hits;
   var matchedHits = pool.filter(function(h) { return h.matched; });
-  var ordered = (matchedHits.length ? matchedHits : pool).slice(0, limit || 3);
+  var _pick = matchedHits.length ? matchedHits : pool;
+  // 【R30】命中词最多的优先；同分时取更晚一封（问题常出现在后续回邮，避免总定位第一封）
+  _pick.sort(function(a, b) { return (b.hitCount || 0) - (a.hitCount || 0) || (b.email.idx || 0) - (a.email.idx || 0); });
+  var ordered = _pick.slice(0, limit || 3);
   return { emails: emails, hits: ordered };
+}
+// 【R26】按 AI 给出的邮件线索（role + quote 原句片段）精确定位问题/依据邮件，避免总是取第一封。
+// 返回 { refText, evidence } 或 null（AI 未给线索或匹配不到时由调用方回退到 getEmailEvidenceList）。
+function getAiLocatedEmail(text, aiMail, includeAmazon) {
+  if (!aiMail || !aiMail.quote) return null;
+  var emails = splitReplyEmails(String(text || ''), includeAmazon);
+  if (!emails.length) return null;
+  var q = String(aiMail.quote || '').replace(/\s+/g, '').toLowerCase();
+  if (q.length < 4) return null;
+  function norm(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  var cands = [];
+  for (var i = 0; i < emails.length; i++) {
+    var em = emails[i];
+    if (!em.body) continue;
+    var bodyNorm = norm(em.body);
+    // 原句片段完整出现，或片段的前/后半段（≥8字）出现，均视为命中
+    var hit = bodyNorm.indexOf(q) >= 0;
+    if (!hit && q.length >= 16) {
+      var half = q.slice(0, Math.floor(q.length / 2));
+      if (half.length >= 8 && bodyNorm.indexOf(half) >= 0) hit = true;
+    }
+    if (!hit) continue;
+    var score = (aiMail.role && em.role === aiMail.role ? 200 : 0) + Math.min(bodyNorm.indexOf(q) >= 0 ? 100 : 0, 100);
+    cands.push({ em: em, score: score });
+  }
+  if (!cands.length) return null;
+  cands.sort(function(a, b) { return b.score - a.score; });
+  var best = cands[0].em;
+  // 展示句：优先原文里含 quote 的那一句
+  var sents = getReasonSentences(best.body);
+  var quoteRaw = String(aiMail.quote || '');
+  var sentence = '';
+  for (var k = 0; k < sents.length; k++) {
+    if (norm(sents[k]).indexOf(q.slice(0, Math.min(q.length, 12))) >= 0) { sentence = sents[k]; break; }
+  }
+  if (!sentence) sentence = quoteRaw;
+  return {
+    refText: formatEmailRef(best),
+    evidence: formatEmailRef(best) + '：「' + String(sentence).substring(0, 240) + '」',
+    email: best
+  };
 }
 function formatEvidenceWithRefs(hits) {
   if (!hits || !hits.length) return '（无可用客服回邮内容，无法提取证据）';
@@ -2619,6 +3045,93 @@ function renderDimensionReasonHtml(dim, detail, result, title) {
   var basisLabel = isFail ? '问题原因（判定依据）：' : (model.grade === '优秀' ? '优秀原因（符合标准）：' : '符合标准：');
   var evidenceLabel = isFail ? '问题邮件（实际回邮）：' : (model.grade === '优秀' ? '优秀依据（实际回邮）：' : '实际回邮：');
   return '<div class="reason-block"><div class="reason-title">' + escHtml(prefix) + '</div>' + opHtml + '<div class="reason-basis"><b>' + basisLabel + '</b>' + escHtml(maskOrderNoForDisplay(model.basis)) + '</div><div class="reason-evidence"><b>' + evidenceLabel + '</b>' + escHtml(maskOrderNoForDisplay(model.evidence)) + '</div>' + thirdLine + '</div>';
+}
+
+// ===== 【R24·需求2】AI 定型单专用：各维度质检结果的「问题说明」渲染 =====
+// 规则：达标 → 只写明达标原因，不引用实际回邮；不达标/优秀 → 指出是哪封邮件 + 该邮件如何被检出有问题 + 优化方案。
+function getAiDimensionReasonModel(dim, detail, result) {
+  var det = detail || {};
+  var grade = det.grade || '-';
+  // 【R26】理由直接用 AI 结构化理由（含【结论】【邮件证据】【依据】），保留标签分行显示；仅清掉旧前缀
+  var reason = String(det.aiWhy || det.reason || det.passReason || ((det.issues || []).join('；')) || '')
+    .replace(/^【AI 评分理由】/, '').replace(/^【平台禁忌核查】/, '').trim();
+  var includeAmazon = !!(result && result.amazonIncluded > 0);
+  var replyText = String((result && result.reply) || '');
+  // 【R26】优先按 AI 给出的邮件线索精确定位；失败再回退到维度关键词匹配
+  var located = getAiLocatedEmail(replyText, det.aiMail, includeAmazon);
+  var refText, evidence;
+  if (located) {
+    refText = located.refText;
+    evidence = located.evidence;
+  } else {
+    var evList = getEmailEvidenceList(replyText, dim, det.issues || [], 1, includeAmazon);
+    // 【R30】只定位一封（命中词最多/最靠后），不再把多封拼在一起，避免「所有邮件都被指为问题邮件」
+    refText = evList.hits.length ? formatEmailRef(evList.hits[0].email) : '未定位到具体邮件';
+    evidence = evList.hits.length ? formatEvidenceWithRefs([evList.hits[0]]) : '';
+  }
+  var clause = getStandardClause(dim, grade === '优秀' ? '优秀' : (grade === '不达标' ? '不达标' : '达标'));
+  // 【R27】优化方案已移除：理由回归中肯的自然语言，不再拼固定模板改写方案
+  return { grade: grade, reason: reason, refText: refText, evidence: evidence, clause: clause, located: !!located };
+}
+// 【R26】把 AI 结构化理由按【结论】【邮件证据】【依据】标签拆成多行，避免挤成一团没说服力
+function formatAiReasonHtml(reason, escHtml, maskOrderNoForDisplay) {
+  var s = String(reason || '').trim();
+  if (!s) return '';
+  var parts = s.split(/【(结论|具体原因|违规原因|判定理由|邮件证据|依据|证据|判定依据|标准|SOP|命中邮件)】/);
+  if (parts.length < 3) return escHtml(maskOrderNoForDisplay(s));
+  var out = '';
+  for (var i = 1; i < parts.length; i += 2) {
+    var label = parts[i], text = String(parts[i + 1] || '').trim();
+    if (!text) continue;
+    out += '<div class="reason-basis"><b>【' + escHtml(label) + '】</b>' + escHtml(maskOrderNoForDisplay(text)) + '</div>';
+  }
+  return out || escHtml(maskOrderNoForDisplay(s));
+}
+function renderAiDimensionReasonHtml(dim, detail, result, title) {
+  var m = getAiDimensionReasonModel(dim, detail, result);
+  var prefix = title || 'AI 判分理由';
+  var html = '<div class="reason-block"><div class="reason-title">' + escHtml(prefix) + '</div>';
+  if (m.grade === '已核查') {
+    // 【R26】平台禁忌维度：命中红线时给命中原因，未命中时给核查结论
+    html += formatAiReasonHtml(m.reason || '已核查平台禁忌各红线项，未发现违规。', escHtml, maskOrderNoForDisplay);
+  } else if (m.grade === '达标') {
+    // 达标：只写达标原因（结构化理由），不引用实际回邮
+    html += '<div class="reason-basis"><b>达标原因：</b></div>' + formatAiReasonHtml(m.reason || '本维度符合质检要求，AI 判定达标。', escHtml, maskOrderNoForDisplay);
+  } else if (dim === '平台禁忌' && m.grade === '不达标') {
+    // 【R30】平台禁忌：先按「当前规则」现场复核一遍——
+    //   · 仍命中 → 用最新命中项写清「违规类型 + 为什么违规 + 命中原文 + 命中邮件」；
+    //   · 已不再命中 → 说明是旧版规则的历史误判，如实提示并建议重判（绝不编造原因）。
+    var _rep = String((result && result.reply) || '');
+    var _now = null;
+    try { _now = qcAiRedlineCheck({ reply: _rep, bizType: '邮件' }); } catch (_e0) { _now = null; }
+    if (_now) {
+      var _loc2 = null;
+      try { _loc2 = qcLocateRedlineEmail(_rep, _now.issues || []); } catch (_e1) {}
+      var _ref2 = (_loc2 && _loc2.refText) || m.refText;
+      var _ls = (_now.explain && _now.explain.length) ? _now.explain.slice() : ((detail && detail.issues) || []);
+      var _why2 = '【结论】该回邮触碰平台禁忌红线，整单计 0 分。\n【具体原因】' + _ls.join('；');
+      html += '<div class="reason-basis"><b>问题邮件：</b>' + escHtml(_ref2) + (_loc2 ? '' : '（按命中的违规原句定位）') + '</div>';
+      html += formatAiReasonHtml(_why2, escHtml, maskOrderNoForDisplay);
+    } else {
+      html += '<div class="reason-basis"><b>问题邮件：</b>无（按当前规则复核，未在客服回邮中定位到违规邮件）</div>';
+      html += '<div class="reason-basis"><b>【结论】</b>该单原被判「平台禁忌红线」，整单 0 分；但按<b>当前规则</b>复核这份回邮，<b>未再命中任何平台禁忌红线</b>。</div>';
+      html += '<div class="reason-basis"><b>【原因】</b>这是修复前的历史判定残留：旧版规则会把亚马逊官方系统信、客户来信里的链接/评价字样误当成客服违规，因此出现无具体原因的 0 分，不是当前模型判定的结果。</div>';
+      html += '<div class="reason-basis" style="color:#b45309;"><b>【建议】</b>勾选「重新判定已定型单」后重判本单，分数会按当前规则重新计算；本单不在回邮数据中标红（当前无违规邮件可指）。</div>';
+    }
+    if (m.clause) html += '<div class="reason-basis"><b>对照标准：</b>' + escHtml(m.clause) + '</div>';
+    html += '<div class="reason-basis" style="color:#b91c1c;">该封邮件已在下方「回邮数据」中<b>标红</b>，可直接核对触发红线的原句。</div>';
+  } else {
+    // 不达标 / 优秀：哪封邮件 + 中肯判定理由 + 对照标准 + 邮件原文（R27 已移除优化方案）
+    var label = m.grade === '优秀' ? '优秀依据邮件' : '问题邮件';
+    html += '<div class="reason-basis"><b>' + label + '：</b>' + escHtml(m.refText) + (m.located ? '' : '（按维度特征推测）') + '</div>';
+    html += formatAiReasonHtml(m.reason || ('AI 判定该维度为' + m.grade), escHtml, maskOrderNoForDisplay);
+    if (m.clause) html += '<div class="reason-basis"><b>对照标准：</b>' + escHtml(m.clause) + '</div>';
+    // 【R30】按要求删掉「邮件原文（实际回邮）」块：原文统一在下方「回邮数据」里按定位结果标红/标黄，不再重复贴第一封
+    html += '<div class="reason-basis" style="color:#475569;">定位到的邮件已在下文「回邮数据」中' + (m.grade === '优秀' ? '<b style="color:#b45309;">标黄</b>' : '<b style="color:#b91c1c;">标红</b>') + '，可直接核对原句。</div>';
+    // 【R27】按要求移除「优化方案」行
+  }
+  html += '</div>';
+  return html;
 }
 
 // ===================== 多语种判分词库 =====================
@@ -3130,6 +3643,8 @@ function rebuildSensitiveWords() {
     for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
       var k = KNOWLEDGE_BASE[i];
       if (!k || k.sourceType !== 'file' || !k.fileCloudPath) continue;
+      // 【20261125a·需求2】敏感词库只认「邮件」类型的平台禁忌知识；AZ / 中差评 SOP 不参与敏感词
+      if (knowledgeBizOf(k) !== '邮件') continue;
       var dims = getKnowledgeDimensions(k);
       if (!dims || dims.indexOf('平台禁忌') < 0) continue;
       var ft = String(k.fileType || '') + ' ' + String(k.fileName || '');
@@ -3468,7 +3983,7 @@ function getQcLogicStats() {
   for (var i = 0; i < results.length; i++) {
     var r = results[i] || {};
     if (r.exGate && r.exGate.blocked) st.exGateBlocked++;
-    if (r.grade === '无法质检') { st.na++; continue; }
+    if (r.grade === '无法质检' || r.grade === QC_AI_PENDING_GRADE || r.aiPending) { st.na++; continue; }
     if (isReferenceCaseResult(r)) st.ref++;
     if (r.redlineViolation) st.redline++;
     for (var d = 0; d < DIM_NAMES.length; d++) {
@@ -4585,9 +5100,15 @@ function renderDetailTable() {
           html += '<td class="' + _dimCls + '"><span class="score-badge ' + cls + '">' + score + '</span></td>';
         }
       }
-      if (r.totalScore === -1) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">无法质检</span></td>'; }
+      if (r.aiPending || r.grade === QC_AI_PENDING_GRADE) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">待AI判分</span></td>'; }
+      else if (r.totalScore === -1) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">无法质检</span></td>'; }
       else if (isReferenceCaseResult(r)) { html += '<td class="cell-group-end"><span class="score-badge score-na">-</span></td><td><span class="score-badge score-na">参考案例</span></td>'; }
-      else { var tc = r.grade === '优秀' ? 'score-excellent' : (r.grade === '达标' ? 'score-pass' : 'score-fail'); html += '<td class="cell-group-end"><span class="score-badge ' + tc + '">' + r.totalScore + '</span></td><td><span class="score-badge ' + tc + '">' + r.grade + '</span></td>'; }
+      else {
+        var tc = r.grade === '优秀' ? 'score-excellent' : (r.grade === '达标' ? 'score-pass' : 'score-fail');
+        // 【R28】本次重判批次的单加醒目角标，让新判定与旧判定一眼可区分
+        var _batchTag = qcRebatchBadgeHtml(r);
+        html += '<td class="cell-group-end"><span class="score-badge ' + tc + '">' + r.totalScore + '</span></td><td><span class="score-badge ' + tc + '">' + r.grade + '</span>' + _batchTag + '</td>';
+      }
       var appealStatus = getAppealStatus(r);
       html += '<td class="cell-group-start">' + appealStatusBadge(appealStatus) + '</td><td class="cell-group-end"><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span> <span class="clickable" onclick="openAppealModal(' + r._index + ')">申诉</span></td>';
       var _os = orderSendStat(r);
@@ -4797,36 +5318,79 @@ function qcParseAppealThread(text) {
   pushCur();
   // 无「操作」标题的纯文本 → 视为单条
   if (!items.length) return [{ who: '', time: '', gmt: '', body: raw.trim() }];
-  // 由近及远：按时间倒序（无时间的排最后，保持原相对顺序）
-  return items.map(function(x, idx) { x._i = idx; return x; }).sort(function(a, b) {
-    if (a.time && b.time) return a.time < b.time ? 1 : (a.time > b.time ? -1 : a._i - b._i);
-    if (a.time) return -1;
-    if (b.time) return 1;
+  // 归并：无时间、无归属的条目并入前一条（如邮箱、提示语）；带时间的独立成条
+  var merged = [];
+  for (var j = 0; j < items.length; j++) {
+    var it0 = items[j];
+    if (j > 0 && !it0.time && !it0.who) {
+      var prev0 = merged[merged.length - 1];
+      if (prev0) prev0.body = (prev0.body ? prev0.body + '\n' : '') + (it0.body || '');
+      continue;
+    }
+    merged.push(it0);
+  }
+  items = merged;
+  // 由近及远：按「日期 + 时分」完整倒序（此前只比日期，同一天的记录顺序会乱）；
+  // 时间完全相同时「亚马逊操作」优先于「我方操作」（2026-11-24 需求3）
+  function _sk(x) {
+    var t = String(x.time || '');
+    if (!t) return '';
+    var m = String(x.gmt || '').match(/(\d{1,2}):(\d{2})/);
+    if (m) t += ' ' + ('0' + m[1]).slice(-2) + ':' + m[2];
+    return t;
+  }
+  return items.map(function(x, idx) { x._i = idx; x._sk = _sk(x); return x; }).sort(function(a, b) {
+    if (a._sk && b._sk && a._sk !== b._sk) return a._sk < b._sk ? 1 : -1;
+    if (a._sk && b._sk) {
+      var aAmz = (a.who === '亚马逊操作') ? 0 : 1;
+      var bAmz = (b.who === '亚马逊操作') ? 0 : 1;
+      if (aAmz !== bAmz) return aAmz - bAmz;
+      return a._i - b._i;
+    }
+    if (a._sk) return -1;
+    if (b._sk) return 1;
     return a._i - b._i;
   });
 }
-function qcAppealThreadHtml(text, boxId) {
-  var items = qcParseAppealThread(text);
-  if (!items.length) return '<div class="rc-empty-hint">暂无申诉内容</div>';
-  var hasOur = items.some(function(x) { return x.who === '您操作'; });
-  var html = '<div class="rc-thread" id="' + boxId + '">';
-  // 有回复 / 无回复 标识（两种按钮样式；点击可筛选该侧内容）
-  html += '<div class="rc-reply-toggle" data-box="' + boxId + '">'
-    + '<button type="button" class="' + (hasOur ? 'on' : '') + '" onclick="qcThreadFilter(\'' + boxId + '\',\'ours\')">有回复</button>'
-    + '<button type="button" class="' + (!hasOur ? 'on' : '') + '" onclick="qcThreadFilter(\'' + boxId + '\',\'all\')">无回复</button>'
-    + '</div>';
+/**
+ * 申诉记录渲染
+ * mode = 'az'  → AZ：无「有回复/无回复」按钮，全部展开，无折叠控件
+ * mode = 'neg' → 中差评：无「有回复/无回复」按钮，保留折叠/展开
+ */
+function qcAppealThreadHtml(text, boxId, mode) {
+  var raw = String(text || '');
+  var isAz = (mode === 'az');
+
+  // 平台自动提示语单独成行（右对齐小字），不混进正文
+  var notice = '';
+  var mNotice = raw.match(/已回答的案例[\s\S]{0,140}?请联系我们[。.]?/);
+  if (mNotice) {
+    notice = mNotice[0].replace(/\s+/g, '');
+    raw = raw.replace(mNotice[0], '');
+  }
+
+  var items = qcParseAppealThread(raw);
+  var html = '';
+  if (notice) {
+    html += '<div class="rc-thread-notice"><span class="rc-thread-notice-v">' + escHtml(notice) + '</span></div>';
+  }
+  if (!items.length) return html + '<div class="rc-empty-hint">暂无申诉内容</div>';
+
+  html += '<div class="rc-thread' + (isAz ? ' rc-thread-flat' : '') + '" id="' + boxId + '">';
   for (var i = 0; i < items.length; i++) {
     var it = items[i];
     var id = boxId + '_t' + i;
     var isAmz = it.who === '亚马逊操作';
     var meta = [it.time, it.gmt].filter(function(x) { return !!x; }).join(' ');
     var preview = String(it.body || '').replace(/\s+/g, ' ').slice(0, 60);
-    html += '<div class="rc-thread-item' + (isAmz ? ' rc-thread-amz' : '') + '" data-who="' + (it.who === '您操作' ? 'ours' : 'amz') + '">'
-      + '<div class="rc-thread-head" onclick="qcThreadToggle(\'' + id + '\')">'
-      + '<span class="rc-thread-who">' + escHtml(it.who || '申诉记录') + '</span>'
-      + '<span class="rc-thread-sub">' + escHtml(preview) + '</span>'
-      + '<span class="rc-thread-time">' + escHtml(meta) + '</span>'
-      + '<span class="rc-thread-caret">▶</span></div>'
+
+    html += '<div class="rc-thread-item' + (isAmz ? ' rc-thread-amz' : '') + (isAz ? ' open' : '') + '">'
+      + '<div class="rc-thread-head"' + (isAz ? '' : (' onclick="qcThreadToggle(\'' + id + '\')"')) + '>'
+      + '<span class="rc-thread-who">' + escHtml(it.who || '申诉记录') + '</span>';
+    if (!isAz) html += '<span class="rc-thread-sub">' + escHtml(preview) + '</span>';
+    html += '<span class="rc-thread-time">' + escHtml(meta) + '</span>';
+    if (!isAz) html += '<span class="rc-thread-caret">▶</span>';
+    html += '</div>'
       + '<div class="rc-thread-body" id="' + id + '">' + escHtml(it.body || '') + '</div></div>';
   }
   return html + '</div>';
@@ -4888,7 +5452,7 @@ function buildAppealDataBlockHtml(r, boxId, bizType) {
   }
   var _ap = qcRawField(r, 'appealContent') || String(r.reply || '');
   html += '<div class="rc-field" style="flex-direction:column;gap:8px;"><span class="rc-field-l" style="flex:0 0 auto;">申诉内容</span>'
-        + '<div style="width:100%;">' + qcAppealThreadHtml(_ap, 'apThread_' + (boxId || 'x')) + '</div></div>';
+        + '<div style="width:100%;">' + qcAppealThreadHtml(_ap, 'apThread_' + (boxId || 'x'), bizType === 'AZ' ? 'az' : 'neg') + '</div></div>';
   html += '</div></div></div>';
   if (r.totalScore !== -1 && r.sopPending) html += '<div style="margin-top:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">' + escHtml(bizType) + ' 专属 SOP 尚未上传，当前按通用六维度对「申诉内容」判分；SOP 上传后自动生效，无需重新导入。</div>';
   return html + '</div>';
@@ -4940,7 +5504,9 @@ function buildReplyDataBlockHtml(r, boxId) {
   // 同人归一：把别名（尹玉婷1→尹玉婷）也加进名单，保证署名气泡能按人匹配高亮
   for (var _qb = 0; _qb < _qcAgentNames.length; _qb++) { var _qc = canonicalAgentName(_qcAgentNames[_qb]); if (_qc && _qcAgentNames.indexOf(_qc) < 0) _qcAgentNames.push(_qc); }
   if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
-  html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, boxId, _qcAgentNames) + '</div>';
+  var _focus = null;
+  try { _focus = qcReplyFocus(r); } catch (_fE) { _focus = null; }
+  html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, boxId, _qcAgentNames, _focus) + '</div>';
   // 四个登记字段已上移到“回邮数据”标题行横向并列
   html += '</div>';
   return html;
@@ -4972,21 +5538,1870 @@ function showDetail(index) {
   for (var i = 0; i < DIM_NAMES.length; i++) {
     var dn = DIM_NAMES[i], score = r.scores[dn], det = r.details[dn] || {};
     html += '<tr><td style="font-weight:600;">' + dn + '</td>';
-    if (score === -1) html += '<td><span class="score-badge score-na">-</span></td><td>-</td><td>-</td>';
+    if (score === -1) {
+      // 【R26】AI 定型单的平台禁忌维度：即便不适用/已核查，也要显示 AI 的核查理由
+      if (r.aiFinalized && det.aiWhy) {
+        var _prohHtml = renderAiDimensionReasonHtml(dn, det, r, 'AI 平台禁忌核查理由');
+        html += '<td><span class="score-badge score-na">-</span></td><td>已核查</td><td class="issue-list">' + _prohHtml + '</td>';
+      } else {
+        html += '<td><span class="score-badge score-na">-</span></td><td>-</td><td>-</td>';
+      }
+    }
     else {
       var gr = det.grade || '', cls = gr === '优秀' ? 'score-excellent' : (gr === '达标' ? 'score-pass' : 'score-fail');
-      html += '<td><span class="score-badge ' + cls + '">' + score + '</span></td><td><span class="score-badge ' + cls + '">' + gr + '</span></td><td class="issue-list">' + renderDimensionReasonHtml(dn, det, r, '自动打分理由（含回邮证据）') + '</td>';
+      // 【R24】AI 定型单：得分/等级已是 AI 判定，问题说明走 AI 专用模板（达标只写原因；不达标/优秀定位邮件+检测依据+优化方案）
+      var reasonHtml = r.aiFinalized
+        ? renderAiDimensionReasonHtml(dn, det, r, 'AI 判分理由（' + gr + '）')
+        : renderDimensionReasonHtml(dn, det, r, '自动打分理由（含回邮证据）');
+      html += '<td><span class="score-badge ' + cls + '">' + score + '</span></td><td><span class="score-badge ' + cls + '">' + gr + '</span></td><td class="issue-list">' + reasonHtml + '</td>';
     }
     html += '</tr>';
   }
   html += '</tbody></table></div>';
+  // 【20261125d】邮件类型：展示本次质检参照的 SOP 依据（总则 + 命中的场景包），并注明判分规则来自判定清单
+  if (typeof qcBizTypeOf === 'function' && qcBizTypeOf(r) === '邮件' && typeof qcSopApplicableDocs === 'function') {
+    try {
+      var _sopDocs = qcSopApplicableDocs(String(r.reply || '') + '\n' + String(r.customer || ''));
+      if (_sopDocs.length) {
+        html += '<div class="detail-section"><h4>本单适用的 SOP 质检依据（邮件 · v2）</h4><div class="detail-msg-box">';
+        html += '<div style="margin-bottom:8px;color:var(--gray-600);font-size:12px;">以下 SOP 文档为本次判分的规则来源；扣分点来自其判定清单中 P0/P1 的违规表述命中，未命中不扣分。</div>';
+        for (var sd = 0; sd < _sopDocs.length; sd++) {
+          var sod = _sopDocs[sd];
+          html += '<div style="margin-bottom:6px;">• <b>' + escHtml(sod.title) + '</b>'
+            + ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(sod.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 查看原文</a></div>';
+        }
+        html += '</div></div>';
+      }
+    } catch (e) {}
+  }
   if (r.knowledgeEvidence && r.knowledgeEvidence.length) { html += '<div class="detail-section"><h4>知识库命中记录</h4><div class="detail-msg-box">'; for (var ke = 0; ke < r.knowledgeEvidence.length; ke++) { var kev = r.knowledgeEvidence[ke]; html += '<div style="margin-bottom:8px;"><b>' + escHtml(kev.title) + '</b>（' + escHtml(knowledgeTypeLabel(kev.type)) + '）<br>' + escHtml(kev.content); var kevb = findKnowledgeById(kev.id); if (kevb && kevb.sourceType === 'url') html += ' <a href="' + escHtml(kevb.url) + '" target="_blank" style="color:var(--primary);text-decoration:underline;">🔗 打开文档</a>'; else if (kevb && kevb.sourceType === 'file') html += ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(kevb.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 打开附件</a>'; html += '</div>'; } html += '</div></div>'; }
   html += buildReplyDataBlockHtml(r, 'replyChat_' + index);
   html += '<div class="detail-section"><h4>申诉状态</h4>' + appealStatusBadge(getAppealStatus(r)) + ' <button class="btn btn-outline btn-sm" onclick="closeRecordModal();openAppealModal(' + index + ')">查看/处理申诉</button></div>';
+  // 【R20】AI 主判分：展示本单判分来源与定型状态（复核按钮已移除，改由质检标准页全量重判入口）
+  if (r.aiFinalized || r.aiPending || r.aiAdopted) {
+    var _aiTag = r.aiFinalized
+      ? '<span style="color:var(--success);">🤖 AI 已定型判分</span>'
+      : (r.aiPending ? '<span style="color:var(--warning);">⏳ 待 AI 判分</span>' : '<span style="color:var(--success);">AI 复核采纳</span>');
+    html += '<div class="detail-section"><h4>判分来源</h4>' + _aiTag
+      + (r.aiJudgeAt ? ' <span style="font-size:12px;color:var(--gray-500);">判分时间 ' + escHtml(r.aiJudgeAt) + '</span>' : '')
+      + (r.aiBatch && qcCanSeeRebatch() ? ' <span style="font-size:12px;color:#b91c1c;background:#fee2e2;padding:1px 6px;border-radius:4px;">判分批次 ' + escHtml(r.aiBatch) + (QC_AI_LAST_BATCH && r.aiBatch === QC_AI_LAST_BATCH ? '（本次）' : '') + '</span>' : '')
+      + (r.aiPrev && qcCanSeeRebatch() ? '<div style="font-size:12px;color:#9a3412;background:#fff7ed;border:1px solid #fed7aa;border-radius:5px;padding:7px 9px;margin-top:6px;">🔄 ' + escHtml(qcAiPrevSummary(r)) + '</div>' : '')
+      + (r.aiPrev && qcRebatchLevel() === 'badge' ? '<div style="font-size:12px;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px 9px;margin-top:6px;">该单已被重新判定，此处显示的是最新结果。</div>' : '')
+      + '<div style="font-size:12px;color:var(--gray-500);margin-top:6px;">' + (r.aiPending ? '尚未执行大模型质检；管理员在「质检标准」页点「AI 全量重判」后定型。' : '本单分数由智谱 GLM 盲审判定，已写云端定型，其他设备打开一致。') + '</div></div>';
+  }
+  // 【R32】详情底部：单条 AI 模型重跑（与质检标准页 AI 主判分同一套判定，仅本单）
+  if (typeof isAdminMode === 'function' && isAdminMode()) {
+    html += '<div class="detail-section" id="qcAiRerunBox"><h4>AI 模型重跑</h4>'
+      + '<div style="font-size:12px;color:var(--gray-600);line-height:1.7;margin-bottom:8px;">对<b>当前这一单</b>单独跑一次 AI 主判分（与「质检标准 → AI 主判分」同一套判定依据与档位分）。判定后立即定型并同步云端，本单会带「🆕重判」标识，详情可看「重判前 → 本次」对比。</div>'
+      + '<button class="btn btn-primary btn-sm" id="qcAiRerunBtn" onclick="qcAiRerunOne(' + index + ')">🤖 AI 模型重跑（仅本单）</button>'
+      + (r.aiPending ? ' <button class="btn btn-outline btn-sm" onclick="qcDoubaoOpen(' + index + ')" title="免费模型判分失败时用">🟡 豆包兜底</button>' : '')
+      + ' <span id="qcAiRerunStatus" style="font-size:12px;color:var(--gray-500);"></span></div>';
+  }
   document.getElementById('recordModalBody').innerHTML = html;
   document.getElementById('recordModal').classList.add('show');
 }
 
+// ============================================================
+// 【20261126·R20】AI 主判分模式：大模型判分直接覆盖规则判分
+//   - 默认开启：新明细不再跑规则引擎，改为调用智谱 GLM 盲审判分
+//   - 判一次即定型(aiFinalized)写云端，其他设备只读、不重判
+//   - 未判/失败标记「待AI判分」，复用「无法质检」剔除路径，绝不出现规则分
+//   - 管理员可在质检标准页切回规则引擎(兜底)
+// ============================================================
+var QC_AI_PRIMARY_KEY = 'qc_ai_primary_mode_v1';
+function qcAiPrimaryEnabled() {
+  try { var v = localStorage.getItem(QC_AI_PRIMARY_KEY); return v === null ? true : v === '1'; } catch (e) { return true; }
+}
+function qcAiPrimarySet(on) {
+  try { localStorage.setItem(QC_AI_PRIMARY_KEY, on ? '1' : '0'); } catch (e) {}
+}
+// 页面加载后同步 AI 主判分开关 UI（幂等）
+document.addEventListener('DOMContentLoaded', function() { try { var chk = document.getElementById('qcAiPrimaryChk'); if (chk) chk.checked = qcAiPrimaryEnabled(); } catch (e) {} });
+var QC_AI_PENDING_GRADE = '待AI判分';
+// 待判分占位：复用「无法质检」的剔除语义（totalScore=-1），统计/看板自动剔除
+function qcAiPendingResult(item) {
+  var scores = {};
+  for (var d = 0; d < DIM_NAMES.length; d++) scores[DIM_NAMES[d]] = -1;
+  return { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
+    reply: item.reply || '', customer: item.customer || '', scores: scores, totalScore: -1,
+    grade: QC_AI_PENDING_GRADE, issues: ['待 AI 判分：尚未执行大模型质检，管理员执行「AI 全量重判」后定型'], details: {},
+    aiPending: true };
+}
+// ============================================================
+// 【20261125g】AI 辅助复核（智谱 GLM-4-Flash，经 qcproxy 转发）
+//   - 仅作独立复核建议展示；不写回 results、不改评分/规则/QC_LOGIC_VERSION
+//   - API Key 存管理员本机 localStorage，不上传云端、不写日志
+// ============================================================
+var QC_AI_KEY_STORAGE = 'qc_ai_zhipu_key_v1';
+var QC_AI_MODEL = 'glm-4-flash';
+var _qcAiIndex = -1;
+
+function qcAiLoadKey(pid) {
+  pid = pid || qcAiProvider().id;
+  try {
+    var k = localStorage.getItem(qcAiKeyStoreName(pid));
+    if (k) return k;
+    if (pid === 'zhipu') { var old = localStorage.getItem(QC_AI_KEY_STORAGE); if (old) return old; }
+    return '';
+  } catch (e) { return ''; }
+}
+function qcAiGetProxyUrl() {
+  try { return (window.CLOUDBASE_CONFIG && window.CLOUDBASE_CONFIG.proxyUrl) || ''; } catch (e) { return ''; }
+}
+
+// ===== 【R34】AI 供应商注册表：浏览器可直连（CORS 放行），无需云函数 =====
+// 背景：CloudBase 体验版额度用尽后云函数被停用（InsufficientBalance），qcproxy 转发全挂。
+// 现支持管理员在前端选供应商 + 填 Key，浏览器直连其 OpenAI 兼容接口。
+// 已实测 CORS 放行的：SiliconFlow(*) / 阿里 DashScope(*) / OpenRouter(*) / Moonshot / DeepSeek。
+var QC_AI_PROVIDERS = {
+  zhipu: {
+    label: '智谱 GLM（原默认）',
+    url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    model: 'glm-4-flash',
+    direct: false,
+    keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
+    note: '智谱不支持浏览器直连（CORS 预检被拦），必须走云函数；云函数停用时不可用'
+  },
+  siliconflow: {
+    label: 'SiliconFlow 硅基流动（免费额度·推荐）',
+    url: 'https://api.siliconflow.cn/v1/chat/completions',
+    model: 'Qwen/Qwen2.5-7B-Instruct',
+    modelCandidates: ['Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat', 'Qwen/Qwen2.5-14B-Instruct'],
+    direct: true,
+    keyUrl: 'https://cloud.siliconflow.cn/account/ak',
+    note: '注册送免费额度；Qwen2.5-7B-Instruct / GLM-4-9B 等免费模型可长期用；浏览器可直连'
+  },
+  dashscope: {
+    label: '阿里百炼 DashScope（免费额度）',
+    url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-plus',
+    modelCandidates: ['qwen-plus', 'qwen-turbo', 'qwen-max'],
+    direct: true,
+    keyUrl: 'https://bailian.console.aliyun.com/',
+    note: '新用户各模型有免费 Token 额度（百万级）；qwen-plus / qwen-turbo 可用；浏览器可直连'
+  },
+  deepseek: {
+    label: 'DeepSeek（便宜·无免费额度）',
+    url: 'https://api.deepseek.com/chat/completions',
+    model: 'deepseek-chat',
+    direct: true,
+    keyUrl: 'https://platform.deepseek.com/api_keys',
+    note: '无免费额度但极便宜：判 1000 条约 1~2 元；浏览器可直连'
+  },
+  openrouter: {
+    label: 'OpenRouter（含 :free 免费模型）',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    model: 'google/gemma-4-31b-it:free',
+    // 【R35】免费模型会随时增删（实测 llama-3.3-70b-instruct:free 已被下架），按优先级依次兜底
+    modelCandidates: [
+      'google/gemma-4-31b-it:free',
+      'baidu/ernie-5.5-flash-preview:free',
+      'inclusionai/ling-3.2-flash:free',
+      'nvidia/nemotron-3.5-lightning:free'
+    ],
+    direct: true,
+    keyUrl: 'https://openrouter.ai/keys',
+    note: '模型名带 :free 后缀的完全免费（有速率限制）；浏览器可直连'
+  },
+  moonshot: {
+    label: 'Moonshot Kimi（有免费额度）',
+    url: 'https://api.moonshot.cn/v1/chat/completions',
+    model: 'moonshot-v1-8k',
+    direct: true,
+    keyUrl: 'https://platform.moonshot.cn/console/api-keys',
+    note: '新用户送额度；浏览器可直连'
+  }
+};
+var QC_AI_PROVIDER_KEY = 'qc_ai_provider_v1';
+function qcAiProvider() {
+  var id = 'zhipu';
+  try { id = localStorage.getItem(QC_AI_PROVIDER_KEY) || 'zhipu'; } catch (e) {}
+  if (!QC_AI_PROVIDERS[id]) id = 'zhipu';
+  var p = QC_AI_PROVIDERS[id];
+  return {
+    id: id, label: p.label, url: p.url, model: p.model, direct: !!p.direct,
+    keyUrl: p.keyUrl || '', note: p.note || '',
+    // 【R35】候选模型（首个为主模型），主模型下架/限流时自动换下一个
+    candidates: (p.modelCandidates && p.modelCandidates.length) ? p.modelCandidates.slice() : [p.model]
+  };
+}
+function qcAiSetProvider(id) {
+  if (!QC_AI_PROVIDERS[id]) return;
+  try { localStorage.setItem(QC_AI_PROVIDER_KEY, id); } catch (e) {}
+  QC_AI_MODEL = QC_AI_PROVIDERS[id].model;
+}
+function qcAiKeyStoreName(pid) { return 'qc_ai_key_' + (pid || qcAiProvider().id) + '_v1'; }
+function qcAiSaveKey(key, pid) {
+  try { localStorage.setItem(qcAiKeyStoreName(pid || qcAiProvider().id), String(key || '')); } catch (e) {}
+}
+// 统一调用：供应商支持直连则浏览器直连，否则经云函数代理
+function qcAiCallModelOne(pid, key, messages, model) {
+  var prov = QC_AI_PROVIDERS[pid || qcAiProvider().id] || QC_AI_PROVIDERS.zhipu;
+  var useModel = String(model || prov.model || QC_AI_MODEL || 'glm-4-flash');
+  var proxy = qcAiGetProxyUrl();
+  if (prov.direct) {
+    return fetch(prov.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+      body: JSON.stringify({ model: useModel, messages: messages, stream: false, temperature: 0.2, max_tokens: 3600 })
+    }).then(function (resp) {
+      return resp.text().then(function (txt) {
+        var j = {};
+        try { j = JSON.parse(txt); } catch (e) { throw new Error('AI 返回非 JSON：' + txt.slice(0, 160)); }
+        if (!resp.ok || (j.error && !j.choices)) {
+          var em = '';
+          try { em = (j.error && (j.error.message || j.error.code)) || j.message || ''; } catch (e2) {}
+          if (resp.status === 401 || /invalid.*key|unauthorized|api.?key/i.test(String(em))) throw new Error('API Key 无效或已过期（401），请重新填写');
+          if (resp.status === 429 || /rate.?limit|quota|exceed|余额|额度/i.test(String(em))) throw new Error('该模型额度/速率受限（429）：' + (em || '请换模型或稍后重试'));
+          throw new Error('AI 接口 HTTP ' + resp.status + '：' + (em || txt.slice(0, 160)));
+        }
+        var c = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+        return String(c).trim();
+      });
+    });
+  }
+  if (!proxy) return Promise.reject(new Error('当前供应商（' + prov.label + '）不支持浏览器直连，且云端代理未配置'));
+  return fetch(proxy, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'ai', apiKey: key, model: useModel, messages: messages })
+  }).then(function (resp) {
+    return resp.text().then(function (txt) {
+      var j = {};
+      try { j = JSON.parse(txt); } catch (e) { j = {}; }
+      if (!resp.ok || j.error) {
+        var _raw = String(j.error || j.message || (j.code ? (j.code + ' ' + (j.message || '')) : '') || txt || '').trim();
+        if (/InsufficientBalance|FUNCTIONS_INVOCATION_FAILED|Function is Unavailable|resource[\s_]?exhausted/i.test(_raw)) {
+          throw new Error('云端资源额度已用尽，云函数被平台停用（InsufficientBalance）——请改用「直连」供应商（SiliconFlow / 阿里百炼 / OpenRouter 有免费额度），或到腾讯云开发控制台续费。');
+        }
+        if (/\b401\b|invalid.*(?:api|key)|unauthorized/i.test(_raw + ' ' + resp.status)) throw new Error('API Key 无效或已过期（401），请重新填写 Key');
+        throw new Error(_raw || ('HTTP ' + resp.status));
+      }
+      return String(j.content || '').trim();
+    });
+  });
+}
+
+
+// 【R35】候选模型自动兜底：主模型不可用（下架/限流/不支持）时依次换下一个。
+// 免费模型会轮换，写死一个必然某天全挂——这是必需的自愈能力。
+// 用户显式传了 model 就只试它（不擅自替换）。
+function qcAiCallModel(pid, key, messages, model) {
+  var prov = qcAiProvider();
+  var given = String(model || '').trim();
+  var list = given ? [given] : prov.candidates.slice();
+  var idx = 0, lastErr = null;
+  function tryNext() {
+    if (idx >= list.length) {
+      return Promise.reject(lastErr || new Error('所有候选模型均不可用，请到服务商控制台确认模型名'));
+    }
+    var m = list[idx++];
+    return qcAiCallModelOne(pid, key, messages, m).catch(function (e) {
+      lastErr = e;
+      var msg = String((e && e.message) || e);
+      // Key 失效 / 余额不足 / 云端停机 → 换模型也没用，直接抛
+      if (/Key 无效|401|余额|欠费|billing|云端资源额度/i.test(msg)) throw e;
+      // 模型不存在 / 不支持 / 限流 → 换下一个候选
+      return tryNext();
+    });
+  }
+  return tryNext();
+}
+// ===== 【R34】供应商选择器 UI 同步 =====
+function qcAiProviderInit() {
+  var sel = document.getElementById('qcAiProviderSel');
+  if (!sel) return;
+  var cur = qcAiProvider();
+  if (!sel.options || sel.options.length === 0) {
+    var html = '';
+    for (var id in QC_AI_PROVIDERS) {
+      if (!Object.prototype.hasOwnProperty.call(QC_AI_PROVIDERS, id)) continue;
+      var p = QC_AI_PROVIDERS[id];
+      html += '<option value="' + id + '">' + escHtml(p.label) + (p.direct ? '' : '（需代理）') + '</option>';
+    }
+    sel.innerHTML = html;
+  }
+  sel.value = cur.id;
+  var note = document.getElementById('qcAiProviderNote');
+  if (note) note.textContent = cur.note || '';
+  var link = document.getElementById('qcAiProviderKeyLink');
+  if (link) { if (cur.keyUrl) { link.href = cur.keyUrl; link.style.display = ''; } else { link.style.display = 'none'; } }
+  var keyInput = document.getElementById('qcAiBulkKey');
+  if (keyInput && !keyInput.value) keyInput.value = qcAiLoadKey(cur.id);
+}
+function qcAiProviderChanged() {
+  var sel = document.getElementById('qcAiProviderSel');
+  var id = String((sel && sel.value) || 'zhipu');
+  qcAiSetProvider(id);
+  var cur = qcAiProvider();
+  var note = document.getElementById('qcAiProviderNote');
+  if (note) note.textContent = cur.note || '';
+  var link = document.getElementById('qcAiProviderKeyLink');
+  if (link) { if (cur.keyUrl) { link.href = cur.keyUrl; link.style.display = ''; } else { link.style.display = 'none'; } }
+  var keyInput = document.getElementById('qcAiBulkKey');
+  if (keyInput) keyInput.value = qcAiLoadKey(id);
+  try { showToast('已切换到：' + cur.label + '（模型 ' + cur.model + '）', 'success'); } catch (e) {}
+}
+// ===== R23: 优秀排除条件本地硬校验（不依赖 AI 是否遵守 prompt）=====
+// 命中任一 → 总等级不得优秀（最高达标）+ 各维度分数压到「达标」档，其余分数保留；红线/整单0分不动。
+var EXC_REFUND_PLAN = /退款方案|提供退款|提出退款|给予退款|办理退款|安排退款|提供全额退款|全额退款|部分退款|(?:offer|provide|propose|arrange|issue|give)[^。；;.!?\n]{0,24}refund|refund\s+(?:plan|option|scheme)|rimbors\w*|erstattung|r[ée]mbours\w*|reembolso|devoluci[óo]n/i;
+// 甲：订单已成功办理全额退款（显式全额表述，或客服已执行退款且属退货/拦截/取消场景）
+// 乙：顾客来信后，人工（非机器人）第一封去信在未核实原因前直接给出退款方案
+function qcAiExcellentExclude(rawItem) {
+  var reply = String((rawItem && rawItem.reply) || '');
+  var reasons = [];
+  if (!reply) return reasons;
+  try {
+    // 甲：已成功办理全额退款
+    var fHit = excClauseHit(reply, EXC_FULL_REFUND, null);
+    if (fHit) reasons.push('甲·订单已成功办理全额退款（会话中「' + fHit + '」）');
+    else {
+      var rHit = excClauseHit(reply, EXC_REFUND_EXEC, EXC_REFUND_NEG);
+      if (rHit && EXC_REFUND_CTX.test(reply)) reasons.push('甲·客服已执行退款且属退货/拦截/取消场景（按全额退款计，「' + rHit + '」）');
+    }
+    // 乙：顾客来信后人工第一封即提供退款方案（先剔除 robot 块）
+    var clean = qcReplyWithoutRobot(reply);
+    var msgs = splitReplyEmails(clean, true);
+    var custSeen = false, firstAgentBody = '';
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (m.role === '客户来信') { custSeen = true; continue; }
+      if (m.role === '客服回邮' && custSeen && m.body) { firstAgentBody = m.body; break; }
+    }
+    if (!custSeen && msgs.length && msgs[0].role === '客服回邮') firstAgentBody = msgs[0].body;
+    if (firstAgentBody) {
+      var pHit = excClauseHit(firstAgentBody, EXC_REFUND_PLAN, EXC_REFUND_NEG);
+      if (pHit) reasons.push('乙·顾客来信后人工第一封即提供退款方案（「' + pHit + '」）');
+    }
+  } catch (e) {}
+  return reasons;
+}
+// 把某维度分数压到「达标」档（命中优秀排除时用）；无达标档定义则保持原分
+function qcAiCapToPass(dim, score) {
+  var entries = qcAiLevelMap()[dim] || [];
+  var cap = null;
+  for (var i = 0; i < entries.length; i++) if (entries[i].grade === '达标') { cap = entries[i].score; break; }
+  if (cap == null || typeof score !== 'number' || score <= cap) return score;
+  return cap;
+}
+// 【R24·需求1】AI 主判分前：本地确定性平台禁忌红线检测（红线规则 + 平台禁忌敏感词库）
+// 命中即整单0分，不调用 AI（省免费额度、确定性、不依赖模型是否遵守 prompt）。
+// 检测文本与规则引擎 inspectOne 完全一致：客服回邮（剔除 robot）+ amazon 兜底。
+// 【R29】红线检测专用：剔除「客户来信（拉取时间）」段与亚马逊官方系统信模板段，
+// 只保留客服 [发送成功/失败/已撤回] 的回邮，避免把亚马逊模板信里的 remove feedback /
+// sellercentral 帮助链接误判成客服的平台禁忌红线。仅对无「收起」会话结构的单块回邮生效；
+// 有「收起」结构时 extractAgentReplies 已能正确按块排除，不重复处理。
+function qcRedlineStripCustomer(text) {
+  var src = String(text || '');
+  if (!src || src === '无联客记录') return src;
+  if (src.indexOf('收起') >= 0) return src; // 有会话结构：交给 extractAgentReplies 按块处理
+  // 剔除「（拉取时间…）」开头的客户来信段（含其后附带的亚马逊系统信模板），
+  // 保留到下一个「日期+[发送状态]」或「日期+（拉取时间」或结尾；前导客户描述一并去掉。
+  var custRe = /（拉取时间[^）]*）[\s\S]*?(?=\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}:\d{2}(?:\[(?:发送成功|发送失败|已撤回)\]|（拉取时间)|$)/g;
+  var cleaned = src.replace(custRe, ' ');
+  // 兜底：若清洗后仍残留亚马逊系统信强特征句，整段按其边界再剔除一次（多语种模板）。
+  var amzRe = /(?:Dear Amazon Seller[^]{0,80}Customer Service team|Thank you for contacting us regarding your feedback|Remove Marketplace Seller Feedback|we can only remove feedback|how Amazon will handle seller feedback)[\s\S]*?(?=\d{4}-\d{2}-\d{2}[ T]\d{1,2}:\d{2}:\d{2}|$)/gi;
+  cleaned = cleaned.replace(amzRe, ' ');
+  return cleaned.trim() || src; // 清洗后为空则保留原文，避免漏判
+}
+// ===== 【R30】平台禁忌可解释化 + 回邮数据单封定位 =====
+// 红线命中项 → 人话解释（为什么这算平台禁忌），并把命中的原句摘出来
+var QC_REDLINE_RULES = [
+  { k: /邮箱地址/, name: '站外邮箱联系', why: '把沟通引导到平台外的邮箱，平台禁止', probe: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/ },
+  { k: /paypal/i, name: '站外收款方式（PayPal）', why: '诱导买家使用站外支付渠道，平台禁止', probe: /\bpaypal\b/i },
+  { k: /ebay/i, name: '第三方平台（eBay）', why: '把交易或沟通引流到其他平台，平台禁止', probe: /\bebay\b/i },
+  { k: /alibaba/i, name: '第三方平台（Alibaba）', why: '把交易或沟通引流到其他平台，平台禁止', probe: /\balibaba\b/i },
+  { k: /aliexpress/i, name: '第三方平台（AliExpress）', why: '把交易或沟通引流到其他平台，平台禁止', probe: /\baliexpress\b/i },
+  { k: /电话/, name: '站外电话联系', why: '留下或索要电话、引导私下沟通，平台禁止', probe: /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/ },
+  { k: /社交媒体/, name: '站外社媒联系', why: '引导到 Facebook / WhatsApp 等站外社交工具，平台禁止', probe: /\bfacebook\b|\binstagram\b|\bwhatsapp\b|\bwechat\b|\btelegram\b|\btwitter\b/i },
+  { k: /修改评价|利诱|威胁/, name: '评价操纵（利诱/威胁修改评价）', why: '以利益或压力影响买家评价（要求改评/删评、以退款换好评等），平台禁止', probe: /\b(?:review|feedback|rating)\b/i },
+  { k: /粗暴|不礼貌/, name: '粗暴/不礼貌用语', why: '客服回邮出现侮辱性或攻击性表达，平台禁止', probe: /\bstupid\b|\bidiot\b|\bfool\b|\bdamn\b|\bshit\b|\bfuck\b/i },
+  { k: /可编辑链接|链接/, name: '站外可编辑链接', why: '回邮出现非 Amazon 的可编辑链接（商品页/店铺/表单等），平台禁止把买家引到站外', probe: /https?:\/\/(?!amazon|sellercentral)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/i },
+  { k: /敏感词/, name: '平台禁忌敏感词', why: '命中的词出现在评价操纵语境（要求改评/删评/换取利益），属于平台红线', probe: /\b(?:remove|feedback|comment|review|valutazione|bewertung)\b/i }
+];
+// 按命中的违规项挑出用于定位的原句关键词
+function qcRedlineProbes(issues) {
+  var joined = (issues || []).join(' '), out = [];
+  for (var i = 0; i < QC_REDLINE_RULES.length; i++) if (QC_REDLINE_RULES[i].k.test(joined)) out.push(QC_REDLINE_RULES[i].probe);
+  return out;
+}
+// 把红线命中项翻译成「违规类型 + 为什么违规 + 命中原文」的说明行
+function qcRedlineExplain(issues, text) {
+  var lines = [], sents = getReasonSentences(String(text || ''));
+  for (var i = 0; i < (issues || []).length; i++) {
+    var iss = String(issues[i] || '').trim();
+    if (!iss || iss.indexOf('命中原文') === 0) continue;
+    var meta = null;
+    for (var r = 0; r < QC_REDLINE_RULES.length; r++) if (QC_REDLINE_RULES[r].k.test(iss)) { meta = QC_REDLINE_RULES[r]; break; }
+    var snippet = '';
+    if (meta) {
+      for (var s = 0; s < sents.length && !snippet; s++) {
+        var sn = sents[s];
+        if (isMetaLine(sn) || sn.length < 8) continue;
+        meta.probe.lastIndex = 0;
+        if (meta.probe.test(sn)) snippet = sn.replace(/\s+/g, ' ').trim().substring(0, 150);
+      }
+    }
+    var detail = iss.replace(/^邮件中|^回邮中/, '');
+    var line = (lines.length + 1) + '. ' + (meta ? meta.name : '平台禁忌') + '：' + (meta ? meta.why : '不符合平台规则') + '（判定依据：' + detail + '）';
+    if (snippet) line += ' 命中原文：「' + snippet + '」';
+    lines.push(line);
+  }
+  return lines;
+}
+// 在整段回邮里定位「真正触发红线」的那一封（客服回邮优先、命中词多者优先），供标红使用
+function qcLocateRedlineEmail(reply, issues) {
+  var emails = splitReplyEmails(String(reply || ''), true);
+  if (!emails.length) return null;
+  var probes = qcRedlineProbes(issues);
+  if (!probes.length) return null;
+  var best = null, bestScore = 0;
+  for (var e = 0; e < emails.length; e++) {
+    var em = emails[e];
+    if (!em.body) continue;
+    var sents = getReasonSentences(em.body);
+    for (var i = 0; i < sents.length; i++) {
+      var s = sents[i];
+      if (isMetaLine(s) || s.length < 8) continue;
+      var hits = 0;
+      for (var k = 0; k < probes.length; k++) { probes[k].lastIndex = 0; if (probes[k].test(s)) hits++; }
+      if (!hits) continue;
+      var sc = hits * 10 + (em.role === '客服回邮' ? 5 : 0);
+      if (sc > bestScore) { bestScore = sc; best = { email: em, sentence: s }; }
+    }
+  }
+  if (!best) return null;
+  var sent = String(best.sentence).replace(/\s+/g, ' ').trim().substring(0, 160);
+  return { refText: formatEmailRef(best.email), email: best.email, sentence: sent, aiMail: { role: best.email.role, quote: sent.substring(0, 120) } };
+}
+// 回邮气泡定位计划：不达标/平台禁忌→红，优秀→黄；只标定位到的那一封
+function qcReplyFocus(r) {
+  if (!r || r.totalScore === -1) return null;
+  var kind = '';
+  if (r.redlineViolation === true || r.grade === '不达标') kind = 'bad';
+  else if (r.grade === '优秀') kind = 'good';
+  if (!kind) return null;
+  var reply = String(r.reply || '');
+  var target = null;
+  if (r.redlineViolation) {
+    // 【R30】旧版红线判定可能已失效：先按当前规则复核，复核不命中就不标红（避免指着正常邮件说违规）
+    var _nowRed = null;
+    try { _nowRed = qcAiRedlineCheck({ reply: reply, bizType: '邮件' }); } catch (_eR) { _nowRed = null; }
+    if (!_nowRed) return null;
+    target = qcLocateRedlineEmail(reply, _nowRed.issues || []);
+    if (!target) return null;
+  }
+  if (!target && r.details) {
+    var want = kind === 'good' ? ['优秀'] : ['不达标'];
+    for (var d = 0; d < DIM_NAMES.length; d++) {
+      var dn = DIM_NAMES[d];
+      if (dn === '平台禁忌') continue;
+      var det = r.details[dn] || {};
+      if (want.indexOf(det.grade) < 0) continue;
+      var lo = getAiLocatedEmail(reply, det.aiMail, !!r.amazonIncluded);
+      if (lo) { target = { refText: lo.refText, email: lo.email, sentence: lo.evidence }; break; }
+    }
+  }
+  if (!target && r.details) {
+    for (var d2 = 0; d2 < DIM_NAMES.length; d2++) {
+      var dn2 = DIM_NAMES[d2];
+      var det2 = r.details[dn2] || {};
+      if (kind === 'good' ? det2.grade !== '优秀' : det2.grade !== '不达标') continue;
+      var ev = getEmailEvidenceList(reply, dn2, det2.issues || [], 1, !!r.amazonIncluded);
+      if (ev.hits.length) { target = { refText: formatEmailRef(ev.hits[0].email), email: ev.hits[0].email, sentence: ev.hits[0].sentence }; break; }
+    }
+  }
+  if (!target || !target.email || !target.email.body) return null;
+  return { kind: kind, label: kind === 'good' ? '优秀依据邮件' : '问题邮件', refText: target.refText, body: String(target.email.body), role: target.email.role, sentence: target.sentence };
+}
+// 气泡正文与定位目标比对（忽略空白/标点，取前缀互含）
+function qcReplyMsgMatch(a, b) {
+  function nrm(s) { return String(s || '').replace(/[\s\u00a0]+/g, '').replace(/[。！？；;,.!?：:、\"\'“”‘’]/g, ''); }
+  var x = nrm(a), y = nrm(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  var n = Math.min(24, y.length);
+  if (n >= 8 && x.indexOf(y.substring(0, n)) >= 0) return true;
+  var m = Math.min(24, x.length);
+  return m >= 8 && y.indexOf(x.substring(0, m)) >= 0;
+}
+
+// 【R29】为红线命中附上命中的具体原文证据句（每条违规最多1句，去元数据、去重）。
+function qcRedlineEvidence(text, issues) {
+  var out = [];
+  var sentences = getReasonSentences(String(text || ''));
+  var joined = (issues || []).join(' ');
+  var kw = [];
+  if (/邮箱/.test(joined)) kw.push(/@/);
+  if (/PayPal/i.test(joined)) kw.push(/paypal/i);
+  if (/eBay/i.test(joined)) kw.push(/ebay/i);
+  if (/链接/.test(joined)) kw.push(/https?:\/\//i);
+  if (/修改评价|利诱|威胁/.test(joined)) kw.push(/\b(?:review|feedback|rating|change|remove|modify|withdraw|positive|5.?star)\b/i);
+  if (/敏感词/.test(joined)) kw.push(/\b(?:remove|feedback|comment|review|valutazione|bewertung)\b/i);
+  if (!kw.length) return out;
+  for (var i = 0; i < sentences.length && out.length < 3; i++) {
+    var s = sentences[i];
+    if (isMetaLine(s) || s.length < 12) continue;
+    var hit = false;
+    for (var k = 0; k < kw.length; k++) if (kw[k].test(s)) { hit = true; break; }
+    if (hit) out.push('命中原文：「' + s.replace(/\s+/g, ' ').trim().substring(0, 160) + '」');
+  }
+  return out;
+}
+function qcAiRedlineCheck(item) {
+  var reply = String((item && item.reply) || '');
+  if (!reply || reply === '无联客记录') return null;
+  // 【R29】先用清洗后的客服回邮做红线检测，避免客户来信/亚马逊系统信模板误判
+  var safe = qcRedlineStripCustomer(reply);
+  var ex = extractAgentReplies(safe);
+  var agentText = ex.agentText || '';
+  var replyForCheck = qcReplyWithoutRobot(safe);
+  if ((ex.amazonCount || 0) > 0 && !agentText.trim()) {
+    var withAmazon = extractAgentReplies(safe, true);
+    agentText = withAmazon.agentText || ex.nonAmazonText || replyForCheck || '';
+  }
+  if (!agentText.trim()) agentText = safe;
+  try {
+    var pr = checkProhibition(agentText, String(replyForCheck || agentText));
+    if (pr && pr.score === 0 && pr.issues && pr.issues.length) {
+      // 【R30】把每条违规翻译成「违规类型 + 为什么违规 + 命中原文」，让 0 分有据可查
+      try { pr.explain = qcRedlineExplain(pr.issues, agentText); } catch (e) { pr.explain = []; }
+      // 【R30】定位真正触发红线的那一封，供明细显示与回邮数据标红
+      try {
+        var _loc = qcLocateRedlineEmail(safe, pr.issues);
+        if (_loc) { pr.refText = _loc.refText; pr.locatedSentence = _loc.sentence; pr.aiMail = _loc.aiMail; }
+      } catch (e) {}
+      // 【R29】把命中的具体证据句附到 issues，让「为什么判红线0分」可解释
+      try {
+        var ev = qcRedlineEvidence(agentText, pr.issues);
+        if (ev && ev.length) pr.issues = pr.issues.concat(ev);
+      } catch (e) {}
+      return pr;
+    }
+  } catch (e) {}
+  return null;
+}
+// ===== 【20261127】AI 回复 → 定型结果：自动判分与豆包兜底共用同一套结果构造口径 =====
+// 来源：原 qcAiJudgeOne 内的解析构造段，逐字搬出；仅把 resolve(result) 改为 return result，
+// 并把 aiJudgeModel 参数化。任何判分口径（档位固定分/优秀排除/V2.0 等级）改动只改这一处。
+function qcAiBuildResultFromContent(_r, content, modelLabel) {
+        if (!content) throw new Error('AI 未返回内容');
+        var scores = qcAiParseScores(content);
+        if (!scores || !Object.keys(scores).length) throw new Error('AI 输出无法解析出有效分数');
+        var v2g = qcAiParseV2Grade(content);
+        var why = qcAiParseWhy(content);
+        var gradeMap = qcAiParseGradeMap(content);  // 【R24】AI 逐维等级（优先于按分数反查）
+        var mailMap = qcAiParseMailMap(content);   // 【R26】AI 逐维邮件定位线索
+        // 【R23】优秀排除硬校验：命中全额退款 / 人工首封退款方案 → 不得优秀、各维压到达标档
+        var excl = qcAiExcellentExclude(_r);
+        // 构造定型 result：以待判分占位为底，灌入 AI 分数（R23：彻底清空规则历史理由）
+        var result = qcAiPendingResult(_r);
+        result.scores = {};
+        result.details = {};
+        var v2why = (function(){ try { var fs=String.fromCharCode(96); var t=String(content||''); while(t.indexOf(fs)>=0) t=t.replace(fs,''); var jj=qcAiExtractJsonObj(t); var o=jj?JSON.parse(jj):{}; return String(o._v2why||'').replace(/\s+/g,' ').trim().slice(0,240); } catch(e){ return ''; } })();
+        for (var d = 0; d < DIM_NAMES.length; d++) {
+          var dn = DIM_NAMES[d];
+          if (dn === '平台禁忌') {
+            // 【R26】平台禁忌维度也要给理由：写明已核查哪些红线项、结论是什么
+            var _prohWhy = why['平台禁忌'] || '已核查站外联系方式、站外交易引导（邮箱/PayPal/社媒/电话）、评价操纵与敏感词库，未发现违规（本地红线检测通过）。';
+            result.scores[dn] = -1;
+            result.details[dn] = { score: -1, grade: '已核查', issues: ['【平台禁忌核查】' + _prohWhy], reason: _prohWhy, aiWhy: _prohWhy, source: 'ai' };
+            continue;
+          }
+          var sc = scores[dn];
+          if (sc == null || isNaN(sc)) sc = 0;
+          // 命中优秀排除：该维度压到「达标」档固定分（若本身低于达标档则不动）
+          if (excl.length) sc = qcAiCapToPass(dn, sc);
+          result.scores[dn] = sc;
+          // R23：issues 只写 AI 给出的该维度打分理由，绝不带规则引擎历史文字
+          var rsn = why[dn] || '';
+          // 【R24】维度等级优先采用 AI 在 _grade 里给出的判定，缺失时才按分数反查
+          var _g = (gradeMap[dn] === '优秀' || gradeMap[dn] === '达标' || gradeMap[dn] === '不达标') ? gradeMap[dn] : qcDimGradeForScore(dn, sc);
+          // 【优秀排除压档】分数压到达标档时等级也同步为达标，避免优秀等级与压档分数矛盾
+          if (excl.length && _g === '优秀') _g = '达标';
+          var _aiReason = rsn || ('该维度判 ' + _g + ' 档、给档位固定分 ' + sc + ' 分（AI 未给出更细理由）');
+          result.details[dn] = {
+            score: sc,
+            grade: _g,
+            issues: ['【AI 评分理由】' + _aiReason],
+            reason: _aiReason,
+            passReason: _aiReason,
+            source: 'ai',
+            aiGrade: _g,
+            aiWhy: _aiReason,
+            aiMail: mailMap[dn] || null   // 【R26】AI 给出的该维度问题/依据邮件定位线索
+          };
+        }
+        var total = 0;
+        for (var j2 = 0; j2 < DIM_NAMES.length; j2++) { var jd = DIM_NAMES[j2]; if (jd !== '平台禁忌' && result.scores[jd] >= 0) total += result.scores[jd]; }
+        result.totalScore = total;
+        var finalGrade = (v2g === '优秀' || v2g === '达标' || v2g === '不达标') ? v2g : determineGrade(total);
+        if (excl.length && finalGrade === '优秀') finalGrade = '达标';
+        result.grade = finalGrade;
+        // R23：整单 issues 只写 AI 判定依据 + 排除说明，清空旧规则历史
+        result.issues = ['【AI 判定】' + finalGrade + '（总分 ' + total + ' 仅同档排序）' + (v2why ? '：' + v2why : '')];
+        if (excl.length) result.issues.push('【优秀排除·本地硬校验】' + excl.join('；') + ' → 不得判优秀，各维度分数已压至达标档');
+        result.aiFinalized = true;
+        result.aiJudgeAt = new Date().toISOString();
+        result.aiJudgeModel = modelLabel || QC_AI_MODEL;
+        result.aiV2grade = (excl.length && v2g === '优秀') ? '达标' : (v2g || finalGrade);
+        result.aiV2why = v2why;
+        result.aiExclude = excl.length ? excl : null;
+        result.aiRaw = String(content).slice(0, 6000);
+        result.aiPending = false;
+  return result;
+}
+
+// 【R20】单条 AI 判分核心：盲审 → 调用智谱 → 解析分数/等级 → 返回定型 result（Promise）
+function qcAiJudgeOne(rawItem, key) {
+  return new Promise(function(resolve, reject) {
+    try {
+      if (!key) throw new Error('缺少 API Key');
+      var _provCfg = qcAiProvider();
+      if (!_provCfg.direct && !qcAiGetProxyUrl()) throw new Error('当前供应商（' + _provCfg.label + '）需云函数代理，但代理未配置');
+      // 用与展示层一致的上下文：四类依据 + 盲审判分要求
+      var _r = rawItem || {};
+      // 【R24·需求1】先做本地红线硬检测：触碰平台禁忌（含敏感词库）→ 整单0分，不调用 AI
+      var _red = qcAiRedlineCheck(_r);
+      if (_red) {
+        var redResult = qcAiPendingResult(_r);
+        redResult.scores = {}; redResult.details = {};
+        // 【R30】把红线原因写成可读的多段说明（违规类型 + 为什么违规 + 命中原文 + 定位邮件）
+        var _redLines = (_red.explain && _red.explain.length) ? _red.explain.slice() : (_red.issues || []).slice();
+        var _redWhy = '【结论】该回邮触碰平台禁忌红线，整单计 0 分（其余维度不再计分）。'
+          + '\n【具体原因】' + _redLines.join('；');
+        if (_red.refText) _redWhy += '\n【命中邮件】' + _red.refText + (_red.locatedSentence ? '：「' + String(_red.locatedSentence).substring(0, 120) + '」' : '');
+        for (var rd = 0; rd < DIM_NAMES.length; rd++) {
+          var rdn = DIM_NAMES[rd];
+          redResult.scores[rdn] = 0;
+          if (rdn === '平台禁忌') {
+            redResult.details[rdn] = {
+              score: 0, grade: '不达标',
+              issues: _red.issues.slice(),
+              reason: _redWhy, aiWhy: _redWhy,
+              aiMail: _red.aiMail || null,
+              source: 'ai-redline'
+            };
+          } else {
+            redResult.details[rdn] = {
+              score: 0, grade: '不达标',
+              issues: ['因触碰平台禁忌红线（详见「平台禁忌」维度），该维度整单计 0 分'],
+              reason: '因触碰平台禁忌红线，整单 0 分；具体违规原因见「平台禁忌」维度。',
+              aiWhy: '因触碰平台禁忌红线，整单 0 分；具体违规原因见「平台禁忌」维度。',
+              source: 'ai-redline'
+            };
+          }
+        }
+        redResult.totalScore = 0;
+        redResult.grade = '不达标';
+        redResult.issues = _red.issues.slice();
+        redResult.redlineViolation = true;
+        redResult.redlineExplain = _redLines.slice();
+        redResult.redlineRef = _red.refText || '';
+        redResult.aiFinalized = true;
+        redResult.aiJudgeAt = new Date().toISOString();
+        redResult.aiJudgeModel = QC_AI_MODEL;
+        redResult.aiV2grade = '不达标';
+        redResult.aiV2why = '触碰平台禁忌红线（含敏感词库），整单0分：' + _redLines.join('；').substring(0, 180);
+        redResult.aiRedline = true;
+        redResult.aiRaw = '';
+        redResult.aiPending = false;
+        resolve(redResult);
+        return;
+      }
+      var ctx = qcAiCollectContext(_r);
+      var messages = qcAiBuildMessages(ctx);
+      // 【R21】带退避重试：429/限流 自动等待重试（最多 4 次）
+      // 【R34】改走 qcAiCallModel：支持「浏览器直连」供应商（绕过已停用的云函数）
+      var _pid = qcAiProvider().id;
+      function _attempt(n) {
+        return qcAiCallModel(_pid, key, messages).catch(function(err) {
+          var _msg = String((err && err.message) || err);
+          var _soft = /429|rate.?limit|too many|限流|频率|稍后|繁忙|busy|overload/.test(_msg);
+          if (_soft && n < 4) {
+            var _wait = 3500 * Math.pow(2, n);
+            return new Promise(function(rs) { setTimeout(rs, _wait); }).then(function() { return _attempt(n + 1); });
+          }
+          throw err;
+        });
+      }
+      _attempt(0)
+      .then(function(content) {
+        resolve(qcAiBuildResultFromContent(_r, content, QC_AI_MODEL));
+      }).catch(function(e) { reject(e); });
+    } catch (e) { reject(e); }
+  });
+}
+
+function qcOpenAiModal(index) {
+  if (typeof requireAdmin === 'function' && !requireAdmin('AI 辅助复核')) return;
+  var r = results[index];
+  if (!r) return;
+  _qcAiIndex = index;
+  var keyInput = document.getElementById('qcAiKey');
+  if (keyInput) keyInput.value = qcAiLoadKey(qcAiProvider().id);
+  var ctx = document.getElementById('qcAiContext');
+  if (ctx) {
+    var c = qcAiCollectContext(r);
+    var sopCount = (String(c.sop).match(/===== SOP：/g) || []).length;
+    var basis = '判分依据：质检标准V2.0（优秀判定修订版）✓ · 等级四步判定(门槛+增量OR+阻断+本职基线) · 敏感词 ' + (String(c.sensitive).match(/[\u4e00-\u9fa5A-Za-z]/g) || []).length + ' 字' + (c.biz === '邮件' ? (' · 适用SOP ' + sopCount + ' 份') : ' · 非邮件不适用SOP');
+    ctx.textContent = '本单：' + escHtml(r.account || '') + ' · ' + escHtml(r.order || '')
+      + '\n' + basis + '\n盲审模式：AI 看不到系统原分数，将独立按上述依据逐维度打分。结果仅供参考，需管理员手动采纳才会生效。'
+      + (r.aiAdopted ? '\n（本单已采纳过 AI 分数：' + escHtml((r.aiAdopt && r.aiAdopt.at) || '') + '）' : '');
+  }
+  var result = document.getElementById('qcAiResult');
+  if (result) result.textContent = '点击「开始 AI 复核」后，这里会显示 AI 给出的逐维度建议与理由。';
+  var status = document.getElementById('qcAiStatus');
+  if (status) status.textContent = '';
+  document.getElementById('aiModal').classList.add('show');
+}
+function qcCloseAiModal() {
+  var ov = document.getElementById('aiModal');
+  if (ov) ov.classList.remove('show');
+}
+// ===== R15: 完整判分依据（质检标准V1.0+等级范围+敏感词+SOP场景包）=====
+// ===== R17: 档位固定分——从运行时质检标准提取每个维度的合法档位分数 =====
+function qcAiLevelMap() {
+  // 返回 { 维度名: [{grade, score}, ...] }，完全由页面保存的 STANDARDS 驱动
+  var standards = (typeof STANDARDS !== 'undefined' && STANDARDS && STANDARDS.length) ? STANDARDS : (typeof DEFAULT_STANDARDS !== 'undefined' ? DEFAULT_STANDARDS : []);
+  var map = {};
+  for (var s = 0; s < standards.length; s++) {
+    var items = standards[s].items || [];
+    for (var it = 0; it < items.length; it++) {
+      var item = items[it];
+      var name = item.name || '';
+      var levels = item.levels || [];
+      var arr = [];
+      for (var lv = 0; lv < levels.length; lv++) {
+        var L = levels[lv];
+        if (L.score == null) continue;
+        var sc = Number(L.score);
+        if (isNaN(sc)) continue;
+        arr.push({ grade: String(L.grade || ''), score: sc });
+      }
+      if (arr.length && name) map[name] = arr;
+    }
+  }
+  return map;
+}
+function qcAiLevelScores(dim) {
+  var arr = (qcAiLevelMap()[dim] || []).map(function(x){ return x.score; });
+  // 去重并按分数从小到大
+  var seen = {}, out = [];
+  arr.sort(function(a,b){return a-b;});
+  for (var i=0;i<arr.length;i++){ if(!seen[arr[i]]){ seen[arr[i]]=1; out.push(arr[i]); } }
+  return out;
+}
+function qcAiLevelText() {
+  // 给 AI 看的「档位固定分」清单，随页面标准动态变化
+  var map = qcAiLevelMap();
+  var out = [];
+  for (var dim in map) { if (!Object.prototype.hasOwnProperty.call(map, dim)) continue;
+    if (dim === '平台禁忌') continue;
+    var parts = map[dim].map(function(x){ return x.grade + '=' + x.score + '分'; });
+    out.push('- ' + dim + '：只能给 ' + parts.join(' / ') + ' 之一，禁止任何其它分数（尤其不要给中间值）');
+  }
+  return out.join('\n');
+}
+function qcAiSnapToLevel(dim, num, gradeHint) {
+  // 把任意分数吸附到该维度合法档位分。优先按 gradeHint(中文等级) 匹配对应档位分；
+  // 否则取与该分数最接近的档位分。没有档位定义时退化为四舍五入。
+  var n = Number(num);
+  if (isNaN(n)) return null;
+  var entries = qcAiLevelMap()[dim] || [];
+  if (!entries.length) return Math.round(n);
+  if (gradeHint) {
+    var g = String(gradeHint);
+    // 先精确相等（避免"不达标"被"达标"子串误命中）
+    for (var i0=0;i0<entries.length;i0++) {
+      if (entries[i0].grade === g) return entries[i0].score;
+    }
+    // 再按 grade 长度降序做包含匹配，长的（"不达标"）优先于短的（"达标"）
+    var sorted = entries.slice().sort(function(a,b){ return String(b.grade||'').length - String(a.grade||'').length; });
+    for (var i=0;i<sorted.length;i++) {
+      if (sorted[i].grade && g.indexOf(sorted[i].grade) >= 0) return sorted[i].score;
+    }
+  }
+  var scores = qcAiLevelScores(dim);
+  var best = scores[0], diff = Math.abs(n - best);
+  for (var j=1;j<scores.length;j++) {
+    var d = Math.abs(n - scores[j]);
+    if (d < diff) { diff = d; best = scores[j]; }
+  }
+  return best;
+}
+// ===== R18: 质检标准 V2.0（优秀判定修订版）——等级判定规则权威文本 =====
+// 来源：用户整理的《质检标准.xlsx》A2:E21 + A23:G42。总分只用于同档排序，不再决定等级。
+function qcAiV2RuleText() {
+  return [
+    '【亚飞客服质检标准 V2.0（优秀判定修订版）· 等级判定规则】',
+    '■ 总原则：各维度档位分之和（总分100）仅用于同档内的绩效排序，不再作为等级判定依据；等级由下列规则独立判定。各维度只允许使用「档位固定分清单」里的分值，禁止 36 / 20 / 12 等表中不存在的分值。',
+    '■ 等级四步判定流程：',
+    ' 第1步 查红线：邮箱地址/站外链接(物流链接除外)、PayPal/eBay、买家个人信息、利诱威胁改评价、辱骂客户 → 命中则整单0分、判不达标、停止。',
+    ' 第2步 查硬伤：①客户核心问题无方案或方案错误；②答应退款/补件/跟进但实际未做；③态度恶劣 → 命中则判不达标、停止。',
+    ' 第3步 查门槛①全程闭环：从客户首次提问到问题最终解决，处理链条完整、该做的操作全部落实(承诺退款已办理并完成登记、承认的问题已提交反馈、承诺补件已安排)、客户核心诉求被实质解决。不算闭环的三种情形：只发邮件客户未回应且状态不明；只给部分退款/补偿但剩余如何处理未说明且客户未再回应；操作做完但客户核心疑问从未被回答。不通过 → 封顶达标、不得优秀、停止。',
+    ' 第4步 先做【本职基线测试】再查三条增量：本职动作(任何客服按SOP都会做的，如开发票/未发货改地址/办理退款/常规补件/常规查单与物流解释/道歉安抚礼貌模板)完成了只算达标，不算优秀。剔除本职后逐条独立判定——',
+    '  ②超预期：客户诉求已满足前提下，用成本更低或体验更好的等效方案且客户接受(补件/部分退款/换货替代全额退款并获认可；预判风险提前说明；主动避免同类问题或挽回公司损失)。须引证邮件原句；仅“礼貌”“已退款”不算。',
+    '  ③主动跟进：客户未催促、客服先动、去信含实质进展(不是“还在处理中”)、且最终问题解决。客户先催才给 / 只回“跟进中” / 跟进后仍未解决 → 均不成立。不设天数期限。',
+    '  ④客户认可：客户明确表达感谢/认同/褒奖且有文字记录，不得推断；仅回“ok”不算。',
+    '  三条互不替代，命中任意一条即为优秀(OR，不是AND)；三条全不命中判达标。',
+    '■ 阻断(一票否决，最高优先)：客户明确表达负面(失望/后悔/投诉/要求升级/不会再买/“早知道就不买了”) → 即使增量有成立项也不得优秀，最高判达标。',
+    '■ 优秀额外排除条件（2026-11-26 用户新增，命中任意一条 → 不得判优秀、最高判达标；不整单0分、不影响其他维度分数）：',
+    '  甲、该订单已经成功办理了全额退款：只要会话、上传登记列或客服回邮显示全额退款已实际办成（已退款到账、已支付成功、已提交并完成全额退款流程），即使命中门槛或任一增量，也不得判优秀，最高判达标。仅“承诺/提议/部分退款/补偿”不算“已成功办理全额退款”，按其余规则正常判定。',
+    '  乙、顾客来信后人工发送的第一封邮件就提供了退款方案：顾客发来邮件后，客服（非机器人自动回复）发出的第一封回复即直接给出退款方案/提出退款，而没有先尝试解决客户实际问题或给出实质处置的，不得判优秀，最高判达标。机器人自动回复的首封邮件不计入“人工第一封”；若首封人工回复先做了实质处理、退款方案出现在后续邮件，则不受此条限制。',
+    '■ 达标：操作方案等基本正确，仅轻微细节错误或同理心不足、表达不够清晰。不达标：流程出现较大问题或态度技巧欠缺导致客户不满/影响问题解决，或多处轻微错误。',
+    '■ 落地说明：明细表暂无《客户最终反馈》《主动跟进》列，②③④须据回邮会话原文判断，无文字记录一律不命中；③只看“客户是否先催、客服是否先动”，不以客服自述为据。',
+  ].join('\n');
+}
+
+// 解析 AI 结构化输出里的 V2.0 等级判定（优秀/达标/不达标），供采纳写回
+function qcAiParseV2Grade(text) {
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  var _jsonStr = qcAiExtractJsonObj(s);
+  if (!_jsonStr) return null;
+  var m = [null, _jsonStr];
+  if (!m) return null;
+  try {
+    var obj = JSON.parse(m[1]);
+    var g = String((obj && obj._v2grade) || '').replace(/级$/, '');
+    if (g === '优秀' || g === '达标' || g === '不达标') return g;
+  } catch (e) {}
+  return null;
+}
+function qcAiStdText() {
+  // 用运行时 STANDARDS（用户在页面编辑保存的权威版本），非写死的 DEFAULT_STANDARDS
+  var standards = (typeof STANDARDS !== 'undefined' && STANDARDS && STANDARDS.length) ? STANDARDS : (typeof DEFAULT_STANDARDS !== 'undefined' ? DEFAULT_STANDARDS : []);
+  var out = [];
+  for (var s = 0; s < standards.length; s++) {
+    var cat = standards[s];
+    out.push('【' + (cat.category || '') + '】');
+    var items = cat.items || [];
+    for (var it = 0; it < items.length; it++) {
+      var item = items[it];
+      out.push('- ' + (item.name || '') + (item.maxScore != null ? '（满分' + item.maxScore + '分）' : ''));
+      var levels = item.levels || [];
+      for (var lv = 0; lv < levels.length; lv++) {
+        var L = levels[lv];
+        var detail = String(L.detail || '').replace(/\s+/g, ' ').slice(0, 420);
+        out.push('  [' + (L.grade || '') + ' ' + (L.score != null ? L.score + '分' : '') + '] ' + detail);
+      }
+    }
+  }
+  return out.join('\n');
+}
+function qcAiGradeText() {
+  var rules = (typeof GRADE_RULES !== 'undefined' && GRADE_RULES && GRADE_RULES.length) ? GRADE_RULES : (typeof DEFAULT_GRADE_RULES !== 'undefined' ? DEFAULT_GRADE_RULES : []);
+  var out = [];
+  for (var g = 0; g < rules.length; g++) {
+    var R = rules[g];
+    var desc = String(R.description || '').replace(/\s+/g, ' ').slice(0, 160);
+    out.push('- ' + (R.grade || '') + '：' + R.minScore + '~' + R.maxScore + '分' + (desc ? '（' + desc + '）' : ''));
+  }
+  return out.join('\n');
+}
+function qcAiSensitiveText() {
+  var words = (typeof sensitiveWordList !== 'undefined' && sensitiveWordList && sensitiveWordList.length) ? sensitiveWordList : (typeof SENSITIVE_WORDS_BUILTIN !== 'undefined' ? SENSITIVE_WORDS_BUILTIN : []);
+  var seen = {}, byLang = {};
+  for (var i = 0; i < words.length; i++) {
+    var W = words[i] || {};
+    var w = String(W.w || '').trim();
+    if (!w || seen[w]) continue;
+    seen[w] = 1;
+    var lang = String(W.lang || '其它');
+    (byLang[lang] = byLang[lang] || []).push(w);
+  }
+  var out = [];
+  for (var lg in byLang) { if (!Object.prototype.hasOwnProperty.call(byLang, lg)) continue;
+    out.push('【' + lg + '】' + byLang[lg].join(' / '));
+  }
+  return out.join('\n');
+}
+function qcAiSopText(replyText) {
+  // 按场景路由取适用 SOP：总则0.3/0.4 + 命中场景包 + S18，全文来自知识库 sopDoc.content
+  if (typeof qcSopApplicableDocs !== 'function') return '';
+  var docs = qcSopApplicableDocs(String(replyText || ''));
+  var out = [], total = 0;
+  var SOP_BUDGET = 10000; // 【R26】理由需引证 SOP 判定项，预算 7000→10000；并发提速仍是主要手段，不影响整体速度
+  for (var i = 0; i < docs.length && total < SOP_BUDGET; i++) {
+    var d = docs[i];
+    var body = String(d.content || '').replace(/\s*\n\s*/g, '\n').trim();
+    if (!body) continue;
+    var room = SOP_BUDGET - total;
+    if (body.length > room) body = '（全文过长，截取前 ' + room + ' 字）\n' + body.slice(0, room);
+    out.push('===== SOP：' + (d.title || d.sopCode || '') + ' =====\n' + body);
+    total += body.length;
+  }
+  return out.join('\n\n');
+}
+// ===== R23 需求4：模型判分依据展示（优秀依据单独列出）=====
+function qcAiBasisHtml() {
+  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+  function block(title, body, color) {
+    return '<div style="margin-bottom:16px;"><h4 style="margin:0 0 8px;font-size:14px;color:' + (color || '#1e3a8a') + ';">' + esc(title) + '</h4>'
+      + '<pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px 12px;margin:0;max-height:320px;overflow:auto;">' + esc(body) + '</pre></div>';
+  }
+  var html = '<div style="font-size:13px;color:#334155;line-height:1.8;">'
+    + '<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:10px 12px;margin-bottom:16px;">本看板由智谱 GLM 按以下 <b>5 类依据</b> 独立盲审打分；其中 <b>优秀判定依据</b> 单独列在最后一栏。所有依据均取自页面当前保存的质检标准与知识库，管理员改动后自动跟随。</div>';
+  html += block('① 档位固定分清单（各维度只能用表中分值，禁中间值）', qcAiLevelText());
+  html += block('② 质检标准 V1.0（维度档位 + 核查明细）', qcAiStdText());
+  html += block('③ 等级分数范围', qcAiGradeText());
+  html += block('④ 平台禁忌敏感词库', qcAiSensitiveText() || '（非邮件类型不适用）');
+  html += block('⑤ 本单适用的亚马逊 SOP 场景包判定清单', '(按回邮场景动态路由：总则 0.3/0.4 + 命中场景包 + S18；全文取自知识库 sopDoc)', '#0f766e');
+  // 优秀依据：从 V2.0 规则文本里抽出「优秀」相关行，单独成栏
+  var v2 = qcAiV2RuleText();
+  var lines = String(v2).split('\n'), excel = [];
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i];
+    if (/优秀|增量|门槛|闭环|阻断|本职|超预期|主动跟进|客户认可|全额退款|第一封/.test(ln)) excel.push(ln);
+  }
+  html += '<div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:12px 14px;margin-bottom:8px;">'
+    + '<h4 style="margin:0 0 8px;font-size:15px;color:#92400e;">⭐ 优秀判定依据（单独列出）</h4>'
+    + '<div style="font-size:12px;color:#78350f;line-height:1.7;margin-bottom:8px;">优秀 = 门槛(全程闭环)成立 <b>且</b> 命中任一增量(②超预期 / ③主动跟进 / ④客户认可，OR) <b>且</b> 无阻断；先过本职基线测试。总分只用于同档内排序、不决定等级。命中下列「优秀额外排除条件」任一 → 不得优秀、最高达标。</div>'
+    + '<pre style="white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.7;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;margin:0;max-height:360px;overflow:auto;">' + esc(excel.join('\n') || v2) + '</pre>'
+    + '</div>';
+  html += '</div>';
+  return html;
+}
+function qcShowAiBasis() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('查看判分依据')) return;
+  var m = document.getElementById('aiBasisModal');
+  if (!m) return;
+  var body = document.getElementById('aiBasisBody');
+  if (body) body.innerHTML = qcAiBasisHtml();
+  m.classList.add('show');
+}
+function qcCloseAiBasis() {
+  var m = document.getElementById('aiBasisModal');
+  if (m) m.classList.remove('show');
+}
+function qcAiCollectContext(r) {
+  var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 8000); // 【R26】理由需定位具体问题邮件，回邮预算恢复 8000 以覆盖完整会话
+  var scores = [];
+  for (var d = 0; d < DIM_NAMES.length; d++) {
+    var dn = DIM_NAMES[d], sc = r.scores ? r.scores[dn] : -1;
+    if (sc === -1 || sc === undefined || sc === null) continue;
+    var det = (r.details && r.details[dn]) || {};
+    var reason = det.reason || det.detail || det.summary || '';
+    if (typeof reason !== 'string') reason = JSON.stringify(reason || {});
+    var issues = (det.issues || []).join('；');
+    scores.push('- ' + dn + '：' + sc + '分（' + (det.grade || '-') + '）' + (reason ? '；系统理由：' + String(reason).slice(0, 160) : '') + (issues ? '；问题：' + String(issues).slice(0, 200) : ''));
+  }
+  var biz = String(r.bizType || r.socType || '邮件');
+  var sopFull = '';
+  try { sopFull = (biz === '邮件') ? qcAiSopText(String(reply || '') + '\n' + String(r.customer || '')) : ''; } catch (e) { sopFull = ''; }
+  return {
+    std: qcAiStdText(),
+    v2rule: qcAiV2RuleText(),
+    levelText: qcAiLevelText(),
+    grade: qcAiGradeText(),
+    sensitive: (biz === '邮件') ? qcAiSensitiveText() : '',
+    sop: sopFull,
+    biz: biz,
+    scores: scores.join('\n'),
+    reply: reply,
+    total: r.totalScore,
+    gradeVal: r.grade || ''
+  };
+}
+function qcAiBuildMessages(ctx) {
+    var sys = '你是资深电商客服邮件质检复核员。这是一次【盲审】：你看不到系统原判分，请完全依据提供的【亚飞客服质检标准 V2.0（优秀判定修订版）】的维度档位与核查明细、【等级判定规则 V2.0】、【档位固定分清单】、【平台禁忌敏感词库】以及【本单适用的亚马逊 SOP 场景包判定清单】，对客服回邮独立复核打分并判定等级。'
+    + '【输出方式】先用一段连贯、中肯的自然语言写出你的判定理由（像写给客服看的质检评语）：逐维度说明判哪一档、为什么，并引用回邮里的具体原句或标准/SOP 判定项作为证据，不要空泛套话。写完后，另起一行输出一行机器可读 JSON（下面第⑤条）。正文要简洁、具体、有说服力，每个维度 2~4 句即可。'
+    + '①【理由要具体、有引证】：每个维度的理由都要说清楚三点——判到了哪一档；依据回邮里的哪句原文（写明出自顾客来信还是客服第几封回邮）；对应质检标准/SOP 的哪一条要求。严禁「表达清晰」「服务良好」「符合标准」这类空话。没有相应内容也要明确说「本单回邮中未发现 X，因此判为 Y」。'
+    + '②严格按 V2.0 四步流程判定总等级：第1步查红线（平台禁忌：站外链接/邮箱/电话/社媒/PayPal/评价操纵/敏感词库）→第2步查硬伤（不达标）→第3步查门槛（全程闭环）→第4步先过本职基线测试再查增量②超预期/③主动跟进/④客户认可（OR），并检查阻断条件。总分只用于同档内排序、不决定等级；优秀＝门槛成立且命中任一增量且无阻断；门槛不通过封顶达标；客户明确负面则阻断、最高达标。两条优秀额外排除：甲、订单已成功办理全额退款；乙、顾客来信后客服人工第一封即提供退款方案（机器人不算、先做实质处理后续再提退款不算）。命中任一不得优秀、最高达标，但这两条不是红线、不整单0分。'
+    + '③【平台禁忌维度也要给理由】：即使未发现违规，也要用一句话写明你核查了哪些红线项、结论是什么，例如「已核查站外联系方式、站外交易引导、评价操纵与敏感词库，未发现违规」。若发现违规则指出具体哪一个链接/邮箱/词/句及出自哪一封邮件。（注意：整单红线由系统本地硬检测，你只需给核查理由。）'
+    + '④【档位铁律】每个维度的分数只能是【档位固定分清单】里的分数，禁止任何中间值（方案只给40/32/15，流程只给25/10，技巧只给15/10/5，态度只给15/10/5，语言只给5/0）。判定为哪一档就给该档对应固定分。'
+    + '⑤正文写完后【必须】另起一行输出机器可读结果，只输出 JSON 对象本身，不要代码块、不要多余文字。格式：QC_SCORES_JSON:{"语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判达标：回邮有完整问候与落款、语法通顺；依据质检标准语言语法表达-达标：表达完整、语气礼貌。","方案合理性":"判达标：客服回邮第2封明确答复退款并闭环；依据质检标准方案合理性-达标：给出有效方案。"},"_mail":{"语言语法表达":{"role":"客服回邮","quote":"Best regards 落款原句"},"方案合理性":{"role":"客服回邮","quote":"我们已为您办理退款的原句"}},"_v2grade":"达标","_v2why":"门槛成立但未命中任一增量"}'
+    + '字段说明：_why 每维用【一句中肯的话】写明结论(判哪档)+最关键的回邮证据+依据条款，会写入质检明细替换旧理由，务必具体、别空泛，每维控制在 90 字以内；_grade 填中文等级（优秀/达标/不达标）；_mail 每维给出该判定依据的邮件线索（role 填「客服回邮」或「客户来信」，quote 填该邮件里最有辨识度的原句片段15-60字，用于精确定位是哪一封；禁止所有维度都填同一封或同一句，证据确实来自同一封时可相同）；_v2grade/_v2why 填 V2.0 四步判定的总等级与一句依据。若命中优秀排除甲乙，_v2grade 不得填优秀、最高达标。'
+    + '注意：无客服回邮或仅有机器人自动回复的单不参与质检；敏感词须在评价操纵语境才判违规；SOP标注「质检不判/后台真值NA」的项不得据此扣分。用中文、结构化。';
+  var m = [{ role: 'system', content: sys }];
+  // 拆成多条 user 消息，每条控制在云函数 16000 字清洗上限内
+  function pushPart(prefix, text, limit) {
+    var str = String(text || '');
+    if (!str) return;
+    var max = limit || 14000;
+    for (var pos = 0; pos < str.length; pos += max) {
+      m.push({ role: 'user', content: prefix + (pos ? '（续）\n' : '') + str.slice(pos, pos + max) });
+    }
+  }
+  pushPart('【档位固定分清单（每个维度只能给清单里的分数，禁止中间值）】\n', ctx.levelText, 4000);
+  pushPart('【质检标准V1.0（维度档位+核查明细）】\n', ctx.std, 12000);
+  pushPart('【等级判定规则 V2.0（优秀判定修订版：总分不决定等级，门槛+任一增量OR+阻断+本职基线）】\n', ctx.v2rule, 12000);
+  pushPart('【等级分数范围】\n', ctx.grade, 4000);
+  pushPart('【平台禁忌敏感词库（' + (ctx.biz || '邮件') + '，评价操纵语境才判违规）】\n', ctx.sensitive, 12000);
+  pushPart('【本单适用的亚马逊SOP场景包判定清单】\n', ctx.sop, 12000);
+  // 【盲审】不再注入系统判分/系统理由，只发回邮原文
+  pushPart('【客服回邮原文（请据此独立打分）】\n', ctx.reply, 14000);
+  return m;
+}
+function qcAiRun() {
+  var r = results[_qcAiIndex];
+  if (!r) { showToast('找不到本单数据', 'error'); return; }
+  var keyEl = document.getElementById('qcAiKey');
+  var key = String(keyEl ? keyEl.value : '').trim();
+  if (!key) { showToast('请先填写智谱 API Key（在 open.bigmodel.cn 免费申请）', 'error'); return; }
+  var remember = document.getElementById('qcAiRemember');
+  if (remember && remember.checked) { try { localStorage.setItem(QC_AI_KEY_STORAGE, key); } catch (e) {} }
+  var proxy = qcAiGetProxyUrl();
+  if (!proxy) { showToast('云端代理未配置，无法调用 AI', 'error'); return; }
+
+  var resultBox = document.getElementById('qcAiResult');
+  var status = document.getElementById('qcAiStatus');
+  var btn = document.getElementById('qcAiRunBtn');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = '正在请求智谱 GLM…';
+  if (resultBox) resultBox.textContent = 'AI 正在分析，请稍候…';
+
+  var ctx = qcAiCollectContext(r);
+  var payload = { action: 'ai', apiKey: key, model: QC_AI_MODEL, messages: qcAiBuildMessages(ctx) };
+
+  fetch(proxy, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).then(function (resp) {
+    return resp.text().then(function (txt) {
+      var j = {};
+      try { j = JSON.parse(txt); } catch (e) { throw new Error('代理返回非 JSON：' + txt.slice(0, 120)); }
+      if (!resp.ok || j.error) throw new Error(j.error || ('HTTP ' + resp.status));
+      return j;
+    });
+  }).then(function (j) {
+    var content = String(j.content || '').trim();
+    if (!content) throw new Error('AI 未返回内容');
+    _qcAiLastContent = content;
+    if (resultBox) resultBox.textContent = content;
+    var adoptBar = document.getElementById('qcAiAdoptBar');
+    var adoptPrev = document.getElementById('qcAiAdoptPreview');
+    var adoptState = document.getElementById('qcAiAdoptState');
+    var parsed = qcAiParseScores(content);
+    _qcAiLastV2Grade = qcAiParseV2Grade(content);
+    _qcAiLastV2Why = (function () { var fence = String.fromCharCode(96); var t = String(content || ''); while (t.indexOf(fence) >= 0) t = t.replace(fence, ''); var _j2 = qcAiExtractJsonObj(t); if (!_j2) return ''; try { var oo = JSON.parse(_j2); return String(oo._v2why || '').slice(0, 160); } catch (e) { return ''; } })();
+    if (adoptBar) adoptBar.style.display = parsed ? 'block' : 'none';
+    if (adoptPrev && parsed) {
+      var dims = [];
+      for (var _dk in parsed) if (Object.prototype.hasOwnProperty.call(parsed, _dk)) dims.push(_dk + ' ' + parsed[_dk] + '分');
+      adoptPrev.textContent = 'AI 建议分数（盲审得出）：' + dims.join(' · ') + '。采纳后本单分数与看板统计会同步更新，并可被撤回。' + (_qcAiLastV2Grade ? (' | V2.0 等级判定：' + _qcAiLastV2Grade + (_qcAiLastV2Why ? '（' + _qcAiLastV2Why + '）' : '')) : '');
+    }
+    if (adoptState) adoptState.textContent = '';
+    if (status) status.textContent = parsed ? '盲审完成 · 可手动采纳' : '盲审完成（AI 未给出可解析分数，无法采纳）';
+  }).catch(function (err) {
+    if (resultBox) resultBox.textContent = 'AI 复核失败：' + String(err && err.message || err);
+    if (status) status.textContent = '失败';
+    try { showToast('AI 复核失败：' + String(err && err.message || err), 'error'); } catch (e) {}
+  }).then(function () {
+    if (btn) btn.disabled = false;
+  });
+}
+
+
+// ===== R16: 盲审结构化分数解析 + 手动采纳（管理员）=====
+var _qcAiLastContent = '';
+var _qcAiLastV2Grade = null;
+var _qcAiLastV2Why = '';
+// 【R22】按「括号配平」从 AI 文本里提取最外层完整 JSON，兼容 _grade 等嵌套对象
+function qcAiExtractJsonObj(text) {
+  var s = String(text || "");
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, "");
+  var key = s.indexOf("QC_SCORES_JSON");
+  var st = (key >= 0) ? s.indexOf("{", key) : -1;
+  if (st < 0) {
+    var k2 = s.indexOf("语言语法表达");
+    st = (k2 >= 0) ? s.lastIndexOf("{", k2) : -1;
+  }
+  if (st < 0) return null;
+  var depth = 0, inStr = false, esc = false;
+  for (var i = st; i < s.length; i++) {
+    var c = s.charAt(i);
+    if (inStr) {
+      if (esc) { esc = false; }
+      else if (c === String.fromCharCode(92)) { esc = true; }
+      else if (c === String.fromCharCode(34)) { inStr = false; }
+      continue;
+    }
+    if (c === String.fromCharCode(34)) { inStr = true; continue; }
+    if (c === "{") { depth++; }
+    else if (c === "}") { depth--; if (depth === 0) return s.slice(st, i + 1); }
+  }
+  return null;
+}
+function qcAiParseScores(text) {
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  var _jsonStr = qcAiExtractJsonObj(s);
+  if (!_jsonStr) return null;
+  var m = [null, _jsonStr];
+  if (!m) {
+    var k = s.indexOf('语言语法表达');
+    if (k >= 0) {
+      var lb = s.lastIndexOf('{', k), rb = s.indexOf('}', k);
+      if (lb >= 0 && rb > lb) m = [null, s.slice(lb, rb + 1)];
+    }
+  }
+  if (!m) return null;
+  var obj = null;
+  try { obj = JSON.parse(m[1]); } catch (e) { return null; }
+  if (!obj || typeof obj !== 'object') return null;
+  var out = {};
+  for (var d = 0; d < DIM_NAMES.length; d++) {
+    var dn = DIM_NAMES[d];
+    if (dn === '平台禁忌') continue; // 红线维度不做人工采纳
+    var v = obj[dn];
+    if (v === undefined || v === null || v === '') continue;
+    var num = Number(v);
+    if (isNaN(num)) continue;
+    var max = getDimMax(dn);
+    if (max > 0 && num > max) num = max;
+    if (num < 0) num = 0;
+    // R17: 优先按 AI 给出的该维度等级命中对应档位分，否则吸附到最近档位分，杜绝中间值
+    var gh = obj._grade ? obj._grade[dn] : null;
+    var snapped = qcAiSnapToLevel(dn, num, gh);
+    out[dn] = (snapped == null) ? Math.round(num) : snapped;
+  }
+  return Object.keys(out).length ? out : null;
+}
+// 【R24·需求2】从 AI 输出解析逐维度等级（_grade 对象）：维度等级直接采用 AI 判定，而非按分数反查
+function qcAiParseGradeMap(text) {
+  var out = {};
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  try {
+    var jstr = qcAiExtractJsonObj(s);
+    if (!jstr) return out;
+    var obj = JSON.parse(jstr);
+    var g = obj && obj._grade;
+    if (g && typeof g === 'object') {
+      for (var d = 0; d < DIM_NAMES.length; d++) {
+        var dn = DIM_NAMES[d];
+        var v = g[dn] == null ? '' : String(g[dn]);
+        if (v === '优秀' || v === '达标' || v === '不达标') out[dn] = v;
+      }
+    }
+  } catch (e) {}
+  return out;
+}
+// 【R23】从 AI 输出解析逐维度理由：优先 JSON 的 _why 字段，否则回退正文「维度：…理由…」行
+function qcAiParseWhy(text) {
+  var reasons = {};
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  try {
+    var jstr = qcAiExtractJsonObj(s);
+    if (jstr) {
+      var obj = JSON.parse(jstr);
+      if (obj && obj._why && typeof obj._why === 'object') {
+        for (var d = 0; d < DIM_NAMES.length; d++) {
+          var dn = DIM_NAMES[d];
+          if (obj._why[dn] != null) reasons[dn] = String(obj._why[dn]).replace(/\s+/g, ' ').trim().slice(0, 600);
+        }
+      }
+    }
+  } catch (e) {}
+  // 正文回退：匹配「- 维度：分数…理由：xxx」或「维度：xxx（N分）」
+  if (!Object.keys(reasons).length) {
+    var lines = s.split(/\n/);
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      for (var k = 0; k < DIM_NAMES.length; k++) {
+        var dk = DIM_NAMES[k];
+        if (reasons[dk] || ln.indexOf(dk) < 0) continue;
+        var p = ln.indexOf('理由');
+        var txt = p >= 0 ? ln.slice(p + 2) : ln;
+        txt = txt.replace(/^[：:\s·—-]+/, '');
+        if (txt && txt.length > 2) reasons[dk] = txt.replace(/\s+/g, ' ').trim().slice(0, 600);
+      }
+    }
+  }
+  return reasons;
+}
+// 【R26】解析 AI 给出的逐维度「问题/依据邮件定位线索」：JSON 的 _mail 字段
+// 结构：{ 维度: { role:'客服回邮'|'客户来信', quote:'该邮件里最有辨识度的原句片段' } }
+function qcAiParseMailMap(text) {
+  var out = {};
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  try {
+    var jstr = qcAiExtractJsonObj(s);
+    if (!jstr) return out;
+    var obj = JSON.parse(jstr);
+    var mm = obj && obj._mail;
+    if (mm && typeof mm === 'object') {
+      for (var d = 0; d < DIM_NAMES.length; d++) {
+        var dn = DIM_NAMES[d];
+        var v = mm[dn];
+        if (!v) continue;
+        if (typeof v === 'string') { out[dn] = { quote: String(v).slice(0, 160) }; continue; }
+        var role = String(v.role || '');
+        if (role.indexOf('客服') >= 0) role = '客服回邮';
+        else if (role.indexOf('顾客') >= 0 || role.indexOf('客户') >= 0 || role.indexOf('买家') >= 0) role = '客户来信';
+        else role = '';
+        var quote = String(v.quote || v.sentence || '').slice(0, 160);
+        out[dn] = { role: role, quote: quote };
+      }
+    }
+  } catch (e) {}
+  return out;
+}
+function applyAiAdopt(result, aiAdopt) {
+  if (!result || !aiAdopt || !aiAdopt.scores || result.appealAdjusted) return false;
+  var prevTotal = result.totalScore, prevGrade = result.grade;
+  var prevScores = JSON.parse(JSON.stringify(result.scores || {}));
+  var scores = aiAdopt.scores, applied = 0;
+  for (var d = 0; d < DIM_NAMES.length; d++) {
+    var dn = DIM_NAMES[d];
+    if (dn === '平台禁忌') continue;
+    if (scores[dn] === undefined) continue;
+    if (!result.scores || result.scores[dn] === undefined) continue;
+    var num = Number(scores[dn]);
+    if (isNaN(num)) continue;
+    var max = getDimMax(dn);
+    if (max > 0 && num > max) num = max;
+    if (num < 0) num = 0;
+    num = Math.round(num);
+    result.scores[dn] = num;
+    if (result.details && result.details[dn]) {
+      result.details[dn].score = num;
+      result.details[dn].grade = qcDimGradeForScore(dn, num);
+      var note = 'AI 复核采纳：' + num + ' 分（' + result.details[dn].grade + '）';
+      var issues = result.details[dn].issues || (result.details[dn].issues = []);
+      var dup = false;
+      for (var k = 0; k < issues.length; k++) if (String(issues[k]).indexOf('AI 复核采纳：') === 0) { issues[k] = note; dup = true; break; }
+      if (!dup) issues.push(note);
+    }
+    applied++;
+  }
+  if (!applied) return false;
+  var total = 0;
+  for (var j = 0; j < DIM_NAMES.length; j++) {
+    var jd = DIM_NAMES[j];
+    if (jd !== '平台禁忌' && result.scores[jd] >= 0) total += result.scores[jd];
+  }
+  result.totalScore = total;
+  var _v2g = aiAdopt.v2grade;
+  result.grade = (_v2g === '优秀' || _v2g === '达标' || _v2g === '不达标') ? _v2g : determineGrade(total);
+  result.aiAdopted = true;
+  result.aiAdopt = {
+    scores: scores,
+    at: aiAdopt.at || new Date().toISOString(),
+    by: aiAdopt.by || '',
+    model: aiAdopt.model || QC_AI_MODEL,
+    originalTotal: aiAdopt.originalTotal != null ? aiAdopt.originalTotal : prevTotal,
+    originalGrade: aiAdopt.originalGrade != null ? aiAdopt.originalGrade : prevGrade,
+    originalScores: aiAdopt.originalScores || prevScores,
+    v2grade: aiAdopt.v2grade || null,
+    v2why: aiAdopt.v2why || ''
+  };
+  return true;
+}
+function qcAiAdopt() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('采纳 AI 分数')) return;
+  var idx = _qcAiIndex, r = results[idx];
+  if (!r) { showToast('找不到本单数据', 'error'); return; }
+  if (r.appealAdjusted) { showToast('本单已有申诉终裁，不能采纳 AI 分数', 'error'); return; }
+  var scores = qcAiParseScores(_qcAiLastContent);
+  if (!scores) { showToast('AI 未输出可解析的分数，无法采纳', 'error'); return; }
+  var snapshot = {
+    scores: scores,
+    at: new Date().toISOString(),
+    by: (typeof AUTH !== 'undefined' && AUTH && AUTH.name) ? AUTH.name : '管理员',
+    model: QC_AI_MODEL,
+    originalTotal: r.totalScore,
+    originalGrade: r.grade,
+    originalScores: JSON.parse(JSON.stringify(r.scores || {})),
+    v2grade: _qcAiLastV2Grade || null,
+    v2why: _qcAiLastV2Why || ''
+  };
+  if (!applyAiAdopt(r, snapshot)) { showToast('没有可采纳的维度分数', 'error'); return; }
+  try { renderDetailTable(); } catch (e) {}
+  try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
+  try { saveDataToUrl(); } catch (e) {}
+  try { qcAuditAppend(r, 'ai-adopt'); } catch (e) {}
+  var adoptBtn = document.getElementById('qcAiAdoptBtn');
+  if (adoptBtn) { adoptBtn.disabled = true; adoptBtn.textContent = '已采纳到本单'; }
+  var adoptState = document.getElementById('qcAiAdoptState');
+  if (adoptState) adoptState.textContent = '总分 ' + snapshot.originalTotal + ' → ' + r.totalScore + '（' + r.grade + '）';
+  if (typeof showToast === 'function') showToast('已采纳 AI 盲审分数：总分 ' + snapshot.originalTotal + ' → ' + r.totalScore + '（' + r.grade + '）', 'success');
+  try {
+    cloudSaveState().catch(function (err) { showToast('已采纳，但云端保存失败：' + ((err && err.message) || err), 'error'); });
+  } catch (e) {}
+}
+// 【R25】AI 全量重判：管理员触发，并发 worker 池判分并定型，断点续判、限流退避、最终写云端
+// 提速要点：默认 3 条并发（可调 1/3/5），去掉原来固定 700ms 串行节流；仍保留 429 指数退避、断点续判、每20条落盘、申诉优先。
+var QC_AI_BULK = { running: false, aborted: false, done: 0, fail: 0, skip: 0, total: 0, cursor: 0, active: 0, conc: 3, finished: false };
+// 【R28】最近一次重判批次（刷新后仍可识别"本次重判"的单）；批次存本机，不写云端配置
+var QC_AI_LAST_BATCH = (function(){ try { return localStorage.getItem('qc_ai_last_batch_v1') || ''; } catch (e) { return ''; } })();
+// 【R32】记住最近 5 个批次：单条「AI 模型重跑」会生成新批次，不能把上一次全量重判的🆕标识抹掉
+var QC_AI_RECENT_BATCHES = (function(){
+  var arr = [];
+  try {
+    var raw = localStorage.getItem('qc_ai_recent_batches_v1');
+    if (raw) { var p = JSON.parse(raw); if (Object.prototype.toString.call(p) === '[object Array]') arr = p.filter(Boolean); }
+    if (!arr.length && QC_AI_LAST_BATCH) arr = [QC_AI_LAST_BATCH];
+  } catch (e) { arr = QC_AI_LAST_BATCH ? [QC_AI_LAST_BATCH] : []; }
+  return arr;
+})();
+function qcAiIsRecentBatch(b) {
+  if (!b) return false;
+  if (QC_AI_LAST_BATCH && b === QC_AI_LAST_BATCH) return true;
+  return QC_AI_RECENT_BATCHES.indexOf(b) >= 0;
+}
+function qcAiMarkBatch(batchId) {
+  if (!batchId) return;
+  QC_AI_LAST_BATCH = batchId;
+  var next = [batchId];
+  for (var i = 0; i < QC_AI_RECENT_BATCHES.length; i++) { var b = QC_AI_RECENT_BATCHES[i]; if (b && b !== batchId) next.push(b); }
+  QC_AI_RECENT_BATCHES = next.slice(0, 5);
+  try { localStorage.setItem('qc_ai_last_batch_v1', batchId); } catch (e) {}
+  try { localStorage.setItem('qc_ai_recent_batches_v1', JSON.stringify(QC_AI_RECENT_BATCHES)); } catch (e) {}
+}
+// 【R28】生成一个批次ID：本地时间 YYYYMMDD-HHmmss
+function qcAiBatchNow() {
+  var d = new Date();
+  function p2(n) { return n < 10 ? ('0' + n) : ('' + n); }
+  return '' + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds());
+}
+// 【R28】本次要判的条数上限（>0 生效，0 或非法 = 全部）
+function qcAiGradeAllLimit() {
+  try { var e = document.getElementById('qcAiLimitInput'); var v = parseInt(e && e.value, 10); return (v > 0) ? v : 0; } catch (e) { return 0; }
+}
+// 【R28】重判前 → 本次 的一句话摘要，用于角标 title 与详情展示
+function qcAiPrevSummary(r) {
+  var p = r && r.aiPrev;
+  if (!p) return '本次 AI 判分（无上次判定记录）';
+  var pf = (p.totalScore === -1 || p.totalScore == null) ? '-' : p.totalScore;
+  return '重判前：' + (p.grade || '-') + ' / ' + pf + ' 分（' + (p.aiBatch || p.aiJudgeAt || '旧判定') + '）→ 本次：' + (r.grade || '-') + ' / ' + r.totalScore + ' 分';
+}
+function qcAiGradeAllSpeed() {
+  try { var se = document.getElementById('qcAiSpeedSel'); var v = parseInt(se && se.value, 10); if (v === 1 || v === 3 || v === 5) return v; } catch (e) {}
+  return 3;
+}
+function qcAiGradeAll() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
+  if (QC_AI_BULK.running) { showToast('AI 判分正在进行中，请等待完成', 'error'); return; }
+  var _prov = qcAiProvider();
+  var key = (function(){
+    try {
+      var b = document.getElementById('qcAiBulkKey');
+      var m = document.getElementById('qcAiKey');
+      return String((b && b.value) || (m && m.value) || qcAiLoadKey(_prov.id)).trim();
+    } catch (e) { return qcAiLoadKey(_prov.id); }
+  })();
+  if (!key) { showToast('请先填写「' + _prov.label + '」的 API Key（点面板右上「去申请 Key」）', 'error'); return; }
+  qcAiSaveKey(key, _prov.id);
+  var _mirror = document.getElementById('qcAiKey'); if (_mirror) _mirror.value = key;
+  if (!_prov.direct && !qcAiGetProxyUrl()) { showToast('当前服务商需云函数代理，但代理不可用；请改选「直连」服务商（SiliconFlow / 阿里百炼 / OpenRouter）', 'error'); return; }
+  // 【R23 需求1】只判「是否考核=是」的单；非考核单不调用 AI、不改动原结果
+  var force = (function(){ try { var f=document.getElementById('qcAiForceChk'); return !!(f && f.checked); } catch(e){ return false; } })();
+  var targets = [];
+  for (var t = 0; t < results.length; t++) {
+    if (typeof isAssessedResult === 'function' && !isAssessedResult(results[t])) continue; // 非考核单跳过
+    if (!force && results[t].aiFinalized) continue; // 断点续判：已定型跳过；force 则连已定型一起重判
+    targets.push(t);
+  }
+  // 【R28】可选"本次重判条数"：>0 时只取前 N 条目标（按明细表顺序）
+  var limit = qcAiGradeAllLimit();
+  if (limit > 0 && targets.length > limit) targets = targets.slice(0, limit);
+  // 【R28】生成本次重判批次ID，写入本机供刷新后继续识别"本次重判"
+  var batchId = qcAiBatchNow();
+  qcAiMarkBatch(batchId);
+  var conc = qcAiGradeAllSpeed();
+  var total = targets.length;
+  QC_AI_BULK = { running: true, aborted: false, done: 0, fail: 0, skip: 0, total: total, cursor: 0, active: 0, conc: conc, finished: false, batch: batchId };
+  _qcAiBulkSavedAt = 0;
+  var status = document.getElementById('qcAiStatus');
+  var resultBox = document.getElementById('qcAiResult');
+  function log(msg) { try { if (status) status.textContent = msg; if (resultBox) resultBox.textContent = msg + '\n' + (resultBox.textContent || '').slice(0, 1200); var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = msg; } catch (e) {} }
+  function finish(msg) {
+    if (QC_AI_BULK.finished) return;
+    QC_AI_BULK.finished = true;
+    QC_AI_BULK.running = false;
+    log(msg);
+    try { renderDetailTable(); } catch (e) {}
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); } catch (e) {}
+    if (QC_AI_BULK.done > 0 && typeof cloudSaveState === 'function') {
+      try {
+        var _sv2 = cloudSaveState();
+        if (_sv2 && _sv2.catch) _sv2.catch(function (err) {
+          var _m2 = String((err && err.message) || err);
+          if (qcIsCloudRestricted(err) || /InsufficientBalance|RESOURCE_EXHAUSTED|restricted/i.test(_m2)) {
+            try { showToast('判分结果已保存在本机，但云端停用无法同步。请立即点「导出数据」备份，避免清缓存丢失。', 'error'); } catch (e3) {}
+          }
+        });
+      } catch (e) {}
+    }
+  }
+  function progress() { return '（成功 ' + QC_AI_BULK.done + ' 失败 ' + QC_AI_BULK.fail + ' · 并发 ' + conc + '）'; }
+  // 单个 worker：循环从共享游标领任务，直到游标耗尽或中止
+  function worker() {
+    if (!QC_AI_BULK.running || QC_AI_BULK.aborted) {
+      QC_AI_BULK.active--;
+      if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) {
+        finish('已中止。已完成 ' + QC_AI_BULK.done + ' 条，失败 ' + QC_AI_BULK.fail + ' 条。');
+      }
+      return;
+    }
+    if (QC_AI_BULK.cursor >= total) {
+      QC_AI_BULK.active--;
+      if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) {
+        finish('AI 判分完成（批次 ' + batchId + '）：成功 ' + QC_AI_BULK.done + ' 条，失败 ' + QC_AI_BULK.fail + ' 条。已定型写入云端（仅考核单 · 并发 ' + conc + '）；本次判过的单在明细表标「🆕本次」，详情可看"重判前→本次"对比。');
+      }
+      return;
+    }
+    var k = QC_AI_BULK.cursor++;
+    var i = targets[k];
+    var r = results[i];
+    log('正在 AI 判分 第 ' + (k + 1) + ' / ' + total + ' 条（仅考核单 · 批次 ' + batchId + '）' + progress());
+    // 【R28】重判前快照：若本单已有 AI 判定，保留其等级/总分/批次，供展示"重判前→本次"对比
+    var _prevSnap = r.aiFinalized ? { grade: r.grade, totalScore: r.totalScore, aiBatch: r.aiBatch || '', aiJudgeAt: r.aiJudgeAt || '' } : null;
+    qcAiJudgeOne(r, key, batchId).then(function(judged) {
+      // 保留 runQualityCheck 透传的登记字段与申诉（申诉终裁优先，不被 AI 覆盖）
+      var appealKeep = r.appeal, adjustedKeep = r.appealAdjusted;
+      for (var f2 in judged) if (Object.prototype.hasOwnProperty.call(judged, f2)) r[f2] = judged[f2];
+      if (_prevSnap) r.aiPrev = _prevSnap;   // 【R28】写回旧判定快照（judged 不带此字段，安全）
+      r.aiBatch = batchId;                    // 【R28】标记本单归属的重判批次
+      if (appealKeep) r.appeal = appealKeep;
+      if (adjustedKeep) r.appealAdjusted = adjustedKeep;
+      // 若本单有申诉终裁，恢复其裁决分数（申诉优先于 AI）
+      if (typeof normalizeResultAppeal === 'function') { try { normalizeResultAppeal(r); } catch (e) {} }
+      QC_AI_BULK.done++;
+      _qcAiBulkCheckpoint();
+      setTimeout(worker, 30);   // 【R25】并发模式：成功后仅 30ms 微小间隔，不再固定 700ms
+    }).catch(function(e) {
+      QC_AI_BULK.fail++;
+      r.aiPending = true; r.grade = QC_AI_PENDING_GRADE; r.totalScore = -1; r.aiFailReason = String((e && e.message) || e).slice(0, 80);
+      _qcAiBulkCheckpoint();
+      setTimeout(worker, 120);  // 失败worker稍作间隔再领下一条
+    });
+  }
+  log('AI 判分开始（批次 ' + batchId + ' · 并发 ' + conc + '），本次 ' + total + ' 条' + (limit > 0 ? '（上限 ' + limit + ' 条）' : '（全部）') + (force ? ' · 含已定型重新判定' : '') + '…');
+  if (total === 0) { finish('没有需要 AI 判分的考核单（仅有未定型单才会判）。'); return; }
+  // 启动 min(conc,total) 个 worker；错峰 120ms 启动，避免瞬间并发尖峰
+  var startN = Math.min(conc, total);
+  for (var w = 0; w < startN; w++) { QC_AI_BULK.active++; setTimeout(worker, 60 + w * 120); }
+}
+
+
+// ============================================================
+// 【20261127】豆包兜底判分：自动免费模型全部失败时的人工通道
+//   顺序：先自动调免费模型（qcAiJudgeOne）→ 全失败 → 本通道。
+//   ① 复制质检指令（与自动判分同一份 messages，含当前质检标准+知识库+回邮）
+//   ② 粘到豆包网页 https://www.doubao.com/ 让它判
+//   ③ 把豆包回复粘回，复用 qcAiBuildResultFromContent 写入并锁定 aiFinalized
+//   口径与自动判分 100% 一致（档位固定分/优秀排除/V2.0 等级），只有来源标签不同。
+//   不改自动判分链路；只新建入口函数。
+// ============================================================
+var QC_DOUBAO_OPEN_URL = 'https://www.doubao.com/chat/';
+var _qcDoubaoIndex = -1;
+
+// 生成给豆包的判分指令全文：把 system+user 消息拼成可直接粘贴的纯文本
+function qcDoubaoPromptText(index) {
+  var r = results[index];
+  if (!r) return '';
+  var ctx = qcAiCollectContext(r);
+  var msgs = qcAiBuildMessages(ctx);
+  var out = [];
+  for (var i = 0; i < msgs.length; i++) {
+    out.push((msgs[i].role === 'system' ? '【判分规则】\n' : '【判分材料】\n') + String(msgs[i].content || ''));
+  }
+  out.push('\n【请严格按上面的输出格式给出逐维理由和 QC_SCORES_JSON 那一行的机器可读结果。】');
+  return out.join('\n\n');
+}
+
+function qcDoubaoOpen(index) {
+  if (typeof requireAdmin === 'function' && !requireAdmin('豆包兜底判分')) return;
+  var r = results[index];
+  if (!r) { showToast('找不到本单数据', 'error'); return; }
+  if (r.aiFinalized) { showToast('本单已定型，如需用豆包改判请先勾选「重新判定已定型单」', 'error'); return; }
+  _qcDoubaoIndex = index;
+  var m = document.getElementById('doubaoModal');
+  if (!m) return;
+  var info = document.getElementById('qcDoubaoInfo');
+  if (info) info.textContent = '本单：' + (r.account || '') + ' · ' + (r.order || '') + ' · ' + (r.agent || '');
+  var ta = document.getElementById('qcDoubaoText');
+  if (ta) ta.value = '';
+  var st = document.getElementById('qcDoubaoStatus');
+  if (st) { st.textContent = ''; st.style.color = 'var(--gray-500)'; }
+  m.classList.add('show');
+}
+
+function qcDoubaoOpenFirstPending() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('豆包兜底判分')) return;
+  var idx = -1;
+  for (var i = 0; i < results.length; i++) {
+    if (typeof isAssessedResult === 'function' && !isAssessedResult(results[i])) continue;
+    if (results[i].aiPending && !results[i].aiFinalized) { idx = i; break; }
+  }
+  if (idx < 0) { showToast('当前没有待判分条目（自动判分失败的单会标「待AI判分」）', 'error'); return; }
+  qcDoubaoOpen(idx);
+}
+
+function qcDoubaoClose() {
+  var m = document.getElementById('doubaoModal');
+  if (m) m.classList.remove('show');
+}
+
+function qcDoubaoCopyPrompt() {
+  var r = results[_qcDoubaoIndex];
+  if (!r) { showToast('请先选择待判分条目', 'error'); return; }
+  var text = qcDoubaoPromptText(_qcDoubaoIndex);
+  var done = function() {
+    var st = document.getElementById('qcDoubaoStatus');
+    if (st) { st.style.color = 'var(--success)'; st.textContent = '质检指令已复制（' + text.length + ' 字）。粘贴到豆包对话框，让它按指令判分。'; }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(function() { legacy(); });
+  } else legacy();
+  function legacy() {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta); done();
+    } catch (e) { showToast('复制失败，请手动选择文本复制', 'error'); }
+  }
+}
+
+function qcDoubaoApply() {
+  var r = results[_qcDoubaoIndex];
+  if (!r) { showToast('请先选择待判分条目', 'error'); return; }
+  var ta = document.getElementById('qcDoubaoText');
+  var content = String(ta && ta.value || '').trim();
+  if (!content) { showToast('请先把豆包的判分回复粘贴进来', 'error'); return; }
+  var st = document.getElementById('qcDoubaoStatus');
+  try {
+    // 红线单本地已硬判 0 分，不允许豆包覆盖
+    var red = qcAiRedlineCheck(r);
+    if (red) { showToast('红线单由本地规则硬判 0 分，不接受豆包覆盖', 'error'); return; }
+    var judged = qcAiBuildResultFromContent(r, content, '豆包网页（人工粘贴）');
+    var appealKeep = r.appeal, adjustKeep = r.appealAdjusted;
+    var idx = _qcDoubaoIndex;
+    for (var f in judged) if (Object.prototype.hasOwnProperty.call(judged, f)) r[f] = judged[f];
+    r.aiBatch = qcAiBatchNow();
+    qcAiMarkBatch(r.aiBatch);
+    if (appealKeep) r.appeal = appealKeep;
+    if (adjustKeep) r.appealAdjusted = adjustKeep;
+    try { if (typeof normalizeResultAppeal === 'function') normalizeResultAppeal(r); } catch (e) {}
+    try { renderDetailTable(); } catch (e) {}
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+    try { cloudSaveState(); } catch (e) {}
+    if (st) { st.style.color = 'var(--success)'; st.textContent = '豆包判分已写入并锁定：' + (r.grade || '-') + ' · ' + (r.totalScore === -1 ? '-' : r.totalScore + ' 分'); }
+    showToast('豆包判分已写入并锁定（与自动判分同一口径）', 'success');
+    try { if (typeof closeRecordModal === 'function' && document.getElementById('recordModal').classList.contains('show')) showDetail(idx); } catch (e) {}
+  } catch (e) {
+    var msg = String((e && e.message) || e);
+    if (st) { st.style.color = 'var(--danger)'; st.textContent = '写入失败：' + msg; }
+    showToast('豆包回复解析失败：' + msg, 'error');
+  }
+}
+
+
+
+// ===== 【20261127】豆包批量表格：规则写一次 + N 条回邮成表 → 豆包回一张结果表 → 按单号解析回填 =====
+// 与单条兜底共用 qcAiBuildResultFromContent，口径一致；失败单不影响成功单。
+var QC_DOUBAO_BATCH_IDS = [];
+
+function qcDoubaoCollectPending(limit) {
+  var out = [];
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    if (!r || r.aiFinalized) continue;
+    if (typeof isAssessedResult === 'function' && !isAssessedResult(r)) continue;
+    var red = qcAiRedlineCheck(r);
+    if (red) continue; // 红线单本地硬判，不送豆包
+    if (!r.aiPending && r.grade !== QC_AI_PENDING_GRADE) continue;
+    out.push(i);
+    if (out.length >= (limit || 5)) break;
+  }
+  return out;
+}
+
+// 生成批量表格指令：公共规则只写一次，后面跟一张待判单表格
+function qcDoubaoBatchPrompt(indices) {
+  if (!indices || !indices.length) return '';
+  var sample = results[indices[0]] || {};
+  var ctx = qcAiCollectContext(sample);
+  var msgs = qcAiBuildMessages(ctx);
+  // 规则部分：只取 system + 规则类 user 消息（去掉"本单回邮原文"那段）
+  var ruleParts = [];
+  for (var i = 0; i < msgs.length; i++) {
+    var c = String(msgs[i].content || '');
+    if (/客服回邮原文（请据此独立打分）/.test(c)) continue; // 本单回邮段换成表格
+    ruleParts.push(c);
+  }
+  var rows = [];
+  for (var k = 0; k < indices.length; k++) {
+    var r = results[indices[k]] || {};
+    var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 8000).replace(/\n/g, ' ');
+    rows.push('| ' + (k + 1) + ' | ' + String(r.order || '').replace(/\|/g, '/') + ' | ' + String(r.account || '').replace(/\|/g, '/') + ' | ' + String(r.agent || '').replace(/\|/g, '/') + ' | ' + reply.replace(/\|/g, '/') + ' |');
+  }
+  var table = '\n【待判分清单（共 ' + indices.length + ' 条，请逐条独立盲审；回邮中的换行已替换为空格）】\n'
+    + '| 序号 | 平台单号 | 账号 | 客服 | 客服回邮原文 |\n'
+    + '|---|---|---|---|---|\n' + rows.join('\n') + '\n';
+  var out = ruleParts.join('\n\n') + '\n' + table
+    + '\n【输出要求（必须严格遵守，否则无法回填）】\n'
+    + '对上表每一条独立打分。先逐条写 2~4 句中文理由，再在最后输出一个 JSON 数组，每行一个对象，格式严格如下：\n'
+    + 'DUOBAO_BATCH_JSON:[{"序号":1,"单号":"表里对应平台单号","语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判X档：理由…","方案合理性":"…","流程&操作完整性":"…","服务技巧":"…","服务态度":"…"},"_v2grade":"达标","_v2why":"V2.0四步一句依据"}]'
+    + '\n分数只能用【档位固定分清单】里的值，禁止中间值；等级按【等级判定规则 V2.0】四步独立判定。必须覆盖表里全部 ' + indices.length + ' 条，单号必须与表中一致。';
+  return out;
+}
+
+function qcDoubaoBatchOpen() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('豆包兜底判分')) return;
+  var pend = qcDoubaoCollectPending(5);
+  if (!pend.length) { showToast('当前没有待判分条目（自动判分失败的单会标「待AI判分」）', 'error'); return; }
+  QC_DOUBAO_BATCH_IDS = pend;
+  var m = document.getElementById('doubaoBatchModal');
+  if (!m) return;
+  var info = document.getElementById('qcDoubaoBatchInfo');
+  if (info) {
+    var names = [];
+    for (var i = 0; i < pend.length; i++) { var r = results[pend[i]]; names.push((r.order || r.account || ('第' + (pend[i] + 1) + '条'))); }
+    info.textContent = '本次 ' + pend.length + ' 条：' + names.join('、');
+  }
+  var ta = document.getElementById('qcDoubaoBatchText');
+  if (ta) ta.value = '';
+  var st = document.getElementById('qcDoubaoBatchStatus');
+  if (st) { st.textContent = ''; st.style.color = 'var(--gray-500)'; }
+  m.classList.add('show');
+}
+
+function qcDoubaoBatchClose() {
+  var m = document.getElementById('doubaoBatchModal');
+  if (m) m.classList.remove('show');
+}
+
+function qcDoubaoBatchCopy() {
+  var text = qcDoubaoBatchPrompt(QC_DOUBAO_BATCH_IDS);
+  var done = function() {
+    var st = document.getElementById('qcDoubaoBatchStatus');
+    if (st) { st.style.color = 'var(--success)'; st.textContent = '批量指令已复制（' + text.length + ' 字，' + QC_DOUBAO_BATCH_IDS.length + ' 条）。粘贴到豆包让它逐条判。'; }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(function() { legacy(); });
+  } else legacy();
+  function legacy() {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      document.execCommand('copy'); document.body.removeChild(ta); done();
+    } catch (e) { showToast('复制失败，请手动选择文本复制', 'error'); }
+  }
+}
+
+// 从豆包回复里抽取 DUOBAO_BATCH_JSON 数组；容错：可带代码块、可缺前缀（直接找 JSON 数组）
+function qcDoubaoParseBatch(text) {
+  var s = String(text || '');
+  var fence = String.fromCharCode(96);
+  while (s.indexOf(fence) >= 0) s = s.replace(fence, '');
+  var k = s.indexOf('DUOBAO_BATCH_JSON');
+  var arrStr = '';
+  if (k >= 0) {
+    var lb = s.indexOf('[', k);
+    var depth = 0, inStr = false, esc = false;
+    for (var i = lb; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '[') depth++;
+      else if (c === ']') { depth--; if (depth === 0) { arrStr = s.slice(lb, i + 1); break; } }
+    }
+  }
+  if (!arrStr) {
+    // 兜底：找最后一个顶层 JSON 数组（含 "单号" 字段）
+    var re = /\[\s*\{[\s\S]*?\}\s*\]/g, mm, last = '';
+    while ((mm = re.exec(s))) if (/"单号"/.test(mm[0])) last = mm[0];
+    arrStr = last;
+  }
+  if (!arrStr) return null;
+  try { var arr = JSON.parse(arrStr); return (arr && Object.prototype.toString.call(arr) === '[object Array]') ? arr : null; }
+  catch (e) { return null; }
+}
+
+function qcDoubaoBatchApply() {
+  if (!QC_DOUBAO_BATCH_IDS.length) { showToast('请先打开批量兜底并复制指令', 'error'); return; }
+  var ta = document.getElementById('qcDoubaoBatchText');
+  var content = String(ta && ta.value || '').trim();
+  if (!content) { showToast('请先把豆包的判分回复整段粘贴进来', 'error'); return; }
+  var arr = qcDoubaoParseBatch(content);
+  if (!arr || !arr.length) {
+    var st0 = document.getElementById('qcDoubaoBatchStatus');
+    if (st0) { st0.style.color = 'var(--danger)'; st0.textContent = '解析失败：没找到 DUOBAO_BATCH_JSON 数组，或 JSON 格式有误。请让豆包只输出要求的 JSON 数组。'; }
+    showToast('解析失败：未找到有效的批量 JSON 数组', 'error');
+    return;
+  }
+  var doneN = 0, failN = 0, skipped = [];
+  var batchId = qcAiBatchNow();
+  for (var a = 0; a < arr.length; a++) {
+    var item = arr[a] || {};
+    var seq = Number(item['序号']);
+    var idx = (seq >= 1 && seq <= QC_DOUBAO_BATCH_IDS.length) ? QC_DOUBAO_BATCH_IDS[seq - 1] : -1;
+    // 序号不对时按单号精确匹配兜底
+    if (idx < 0 && item['单号']) {
+      for (var q = 0; q < QC_DOUBAO_BATCH_IDS.length; q++) {
+        if (String(results[QC_DOUBAO_BATCH_IDS[q]].order || '') === String(item['单号'])) { idx = QC_DOUBAO_BATCH_IDS[q]; break; }
+      }
+    }
+    if (idx < 0) { failN++; skipped.push('第' + (a + 1) + '条(序号/单号对不上)'); continue; }
+    var r = results[idx];
+    if (!r || r.aiFinalized) { failN++; skipped.push('序号' + seq + '(已定型)'); continue; }
+    try {
+      // 单条 JSON 对象转成与自动判分一致的单条回复文本，复用同一构造函数
+      var one = JSON.stringify(item);
+      var judged = qcAiBuildResultFromContent(r, one, '豆包网页（批量表格）');
+      var appealKeep = r.appeal, adjustKeep = r.appealAdjusted;
+      for (var f in judged) if (Object.prototype.hasOwnProperty.call(judged, f)) r[f] = judged[f];
+      r.aiBatch = batchId;
+      if (appealKeep) r.appeal = appealKeep;
+      if (adjustKeep) r.appealAdjusted = adjustKeep;
+      try { if (typeof normalizeResultAppeal === 'function') normalizeResultAppeal(r); } catch (e) {}
+      doneN++;
+    } catch (e) { failN++; skipped.push('序号' + seq + '(' + String((e && e.message) || e).slice(0, 30) + ')'); }
+  }
+  qcAiMarkBatch(batchId);
+  try { renderDetailTable(); } catch (e) {}
+  try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+  try { cloudSaveState(); } catch (e) {}
+  var st = document.getElementById('qcDoubaoBatchStatus');
+  if (st) {
+    st.style.color = doneN ? 'var(--success)' : 'var(--danger)';
+    st.textContent = '完成：成功 ' + doneN + ' 条，失败 ' + failN + ' 条' + (skipped.length ? '（' + skipped.join('；') + '）' : '') + '。成功的条目已锁定，与自动判分同一口径。';
+  }
+  showToast('豆包批量回填：成功 ' + doneN + ' 条，失败 ' + failN + ' 条', doneN ? 'success' : 'error');
+}
+
+// 【R32】详情页「AI 模型重跑（单条）」：与「质检标准 → AI 主判分」完全同一套判定链路
+//   （qcAiJudgeOne + 批次号 + aiPrev 快照），只是作用域限定为当前这一单，判完即定型并同步云端。
+var QC_AI_ONE_RUNNING = false;
+function qcAiRerunOne(index) {
+  if (typeof requireAdmin === 'function' && !requireAdmin('AI 模型重跑（单条）')) return;
+  var r = results[index];
+  if (!r) { showToast('未找到这一单', 'error'); return; }
+  if (QC_AI_ONE_RUNNING) { showToast('正在判定中，请稍候…', 'error'); return; }
+  // 无法质检 / 参考案例：主判分不会判这类单，先确认再跑
+  var _nonAssessed = (r.totalScore === -1) || (typeof isReferenceCaseResult === 'function' && isReferenceCaseResult(r));
+  if (_nonAssessed) {
+    try { if (!window.confirm('这单当前是「无法质检 / 参考案例」，AI 主判分正常不会判它。仍要对本单重跑 AI 判分吗？')) return; } catch (e) {}
+  }
+  var _prov = qcAiProvider();
+  var key = qcAiLoadKey(_prov.id);
+  if (!key) {
+    try {
+      key = String(window.prompt('请输入「' + _prov.label + '」的 API Key（只存本机浏览器）\n申请地址：' + (_prov.keyUrl || '见服务商控制台'), '') || '').trim();
+    } catch (e) { key = ''; }
+    if (!key) { showToast('缺少 API Key，无法重跑', 'error'); return; }
+    qcAiSaveKey(key, _prov.id);
+  }
+  if (!_prov.direct && !qcAiGetProxyUrl()) { showToast('当前服务商需云函数代理，但代理不可用；请改选「直连」服务商', 'error'); return; }
+  QC_AI_ONE_RUNNING = true;
+  var _btn = document.getElementById('qcAiRerunBtn');
+  var _st = document.getElementById('qcAiRerunStatus');
+  if (_btn) { _btn.disabled = true; _btn.textContent = '🤖 判定中…'; }
+  if (_st) { _st.style.color = '#1d4ed8'; _st.textContent = '正在调用大模型对当前这一单判分，约需 10–30 秒…'; }
+  var batchId = qcAiBatchNow();
+  // 与全量重判一致：保留重判前快照，供「🆕重判」角标与详情对比使用
+  var prevSnap = r.aiFinalized ? { grade: r.grade, totalScore: r.totalScore, aiBatch: r.aiBatch || '', aiJudgeAt: r.aiJudgeAt || '' } : null;
+  qcAiJudgeOne(r, key).then(function(judged) {
+    var appealKeep = r.appeal, adjustKeep = r.appealAdjusted;
+    for (var f in judged) if (Object.prototype.hasOwnProperty.call(judged, f)) r[f] = judged[f];
+    if (prevSnap) r.aiPrev = prevSnap;
+    r.aiBatch = batchId;
+    if (appealKeep) r.appeal = appealKeep;
+    if (adjustKeep) r.appealAdjusted = adjustKeep;
+    try { if (typeof normalizeResultAppeal === 'function') normalizeResultAppeal(r); } catch (e) {}
+    qcAiMarkBatch(batchId);
+    QC_AI_ONE_RUNNING = false;
+    try { renderDetailTable(); } catch (e) {}
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+    try { if (typeof showDetail === 'function') showDetail(index); } catch (e) {}
+    try { cloudSaveState(); } catch (e) {}
+    var _pf = (prevSnap && prevSnap.totalScore != null && prevSnap.totalScore !== -1) ? (prevSnap.totalScore + ' 分') : '-';
+    var msg = 'AI 重跑完成：' + (r.grade || '-') + ' / ' + (r.totalScore === -1 ? '-' : r.totalScore + ' 分')
+      + (r.redlineViolation ? '（平台禁忌红线 · 整单 0 分）' : '')
+      + (prevSnap ? '｜重判前：' + (prevSnap.grade || '-') + ' / ' + _pf : '');
+    try { showToast(msg, 'success'); } catch (e) {}
+  }).catch(function(e) {
+    QC_AI_ONE_RUNNING = false;
+    var b2 = document.getElementById('qcAiRerunBtn');
+    if (b2) { b2.disabled = false; b2.textContent = '🤖 AI 模型重跑（仅本单）'; }
+    var s2 = document.getElementById('qcAiRerunStatus');
+    if (s2) { s2.style.color = '#b91c1c'; s2.textContent = '判定失败：' + String((e && e.message) || e) + '（本单原结果未改动）'; }
+    try { showToast('AI 重跑失败：' + String((e && e.message) || e), 'error'); } catch (e2) {}
+  });
+}
+function qcAiGradeAllStop() {
+  QC_AI_BULK.aborted = true;
+  // 中止时若所有 worker 都已停止领任务但尚有在途请求，等它们回来后由 cursor>=total 分支收尾；
+  // 这里兜底：若已无 active worker 立即给出中止提示
+  try { if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) { QC_AI_BULK.finished = true; QC_AI_BULK.running = false; var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = '已中止。已完成 ' + QC_AI_BULK.done + ' 条。'; } } catch (e) {}
+}
+// 【R21】中途落盘：每 20 条写一次云端，防止跑一半崩掉/关页面全部丢失
+var _qcAiBulkSavedAt = 0;
+function _qcAiBulkCheckpoint() {
+  if (QC_AI_BULK.done - _qcAiBulkSavedAt < 20) return;
+  _qcAiBulkSavedAt = QC_AI_BULK.done;
+  try { if (typeof cloudSaveState === 'function') cloudSaveState(); } catch (e) {}
+  try {
+    var p = document.getElementById('qcAiBulkStatus');
+    if (p) p.textContent = (p.textContent || '') + ' 〔已落盘 ' + QC_AI_BULK.done + ' 条〕';
+  } catch (e) {}
+}
+// 【R20】模式开关：切换 AI 主判分 / 规则引擎，切换后按当前模式全量重算
+function qcAiPrimaryToggle(on) {
+  if (typeof requireAdmin === 'function' && !requireAdmin('切换判分模式')) return;
+  qcAiPrimarySet(!!on);
+  try { showToast(on ? '已启用 AI 主判分：请点「AI 全量重判」让新明细定型' : '已回退规则引擎：点「刷新数据」按规则重算', 'success'); } catch (e) {}
+  if (!on && typeof runQualityCheck === 'function') { try { runQualityCheck(); } catch (e) {} }
+}
+// 【R20】从质检标准页面板启动全量重判：把 Key 传入弹窗输入框供 qcAiGradeAll 读取
+function qcAiGradeAllStart() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
+  var _prov = qcAiProvider();
+  var bulkKey = document.getElementById('qcAiBulkKey');
+  var modalKey = document.getElementById('qcAiKey');
+  var key = String((bulkKey && bulkKey.value) || '').trim();
+  if (!key) key = qcAiLoadKey(_prov.id);
+  if (!key) { showToast('请先粘贴「' + _prov.label + '」的 API Key（面板上方有申请入口）', 'error'); return; }
+  qcAiSaveKey(key, _prov.id);
+  if (modalKey) modalKey.value = key;
+  if (bulkKey) bulkKey.value = key;
+  qcAiGradeAll();
+}
+
+
+function qcAiUndoAdopt() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('撤回 AI 采纳')) return;
+  var idx = _qcAiIndex, r = results[idx];
+  if (!r || !r.aiAdopted || !r.aiAdopt) { showToast('本单没有可撤回的 AI 采纳', 'error'); return; }
+  var a = r.aiAdopt;
+  if (a.originalScores) r.scores = JSON.parse(JSON.stringify(a.originalScores));
+  r.totalScore = a.originalTotal != null ? a.originalTotal : r.totalScore;
+  r.grade = a.originalGrade != null ? a.originalGrade : determineGrade(r.totalScore);
+  for (var dn in (a.originalScores || {})) {
+    if (!Object.prototype.hasOwnProperty.call(a.originalScores, dn)) continue;
+    if (r.details && r.details[dn] && r.details[dn].issues) {
+      var iss = r.details[dn].issues;
+      for (var i = iss.length - 1; i >= 0; i--) if (String(iss[i]).indexOf('AI 复核采纳：') === 0) iss.splice(i, 1);
+      if (r.scores[dn] !== undefined) r.details[dn].grade = qcDimGradeForScore(dn, r.scores[dn]);
+    }
+  }
+  r.aiAdopted = false; r.aiAdopt = null;
+  try { renderDetailTable(); } catch (e) {}
+  try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
+  try { saveDataToUrl(); } catch (e) {}
+  var adoptBtn = document.getElementById('qcAiAdoptBtn');
+  if (adoptBtn) { adoptBtn.disabled = false; adoptBtn.textContent = '✅ 采纳 AI 分数到本单'; }
+  var adoptState = document.getElementById('qcAiAdoptState');
+  if (adoptState) adoptState.textContent = '已撤回，恢复原分数';
+  if (typeof showToast === 'function') showToast('已撤回 AI 采纳，恢复原分数', 'success');
+  try { cloudSaveState().catch(function () {}); } catch (e) {}
+}
 function closeModal() { var ov = document.getElementById('detailModal'); if (ov) { ov.classList.remove('show'); ov.classList.remove('minimized'); } }
 function closeRecordModal() { var ov = document.getElementById('recordModal'); if (ov) ov.classList.remove('show'); }
 function toggleModalMinimize() { var ov = document.getElementById('detailModal'); if (ov) ov.classList.toggle('minimized'); }
@@ -5469,7 +7884,7 @@ function wowChartLine(rows, metric) {
 }
 
 function dashboardGroup(item) { return getGroupByAgent(item.agent); }
-function dashboardTotal(item) { return item.grade === '无法质检' ? 0 : 1; } // 「无法质检」不纳入统计（2026-10-15）
+function dashboardTotal(item) { return (item.grade === '无法质检' || item.grade === QC_AI_PENDING_GRADE || item.aiPending) ? 0 : 1; } // 「无法质检」「待AI判分」不纳入统计
 function dashboardValidTotal(item) { return item.totalScore >= 0 ? 1 : 0; }
 function dashboardScoreSum(item) { return item.totalScore >= 0 ? Number(item.totalScore) || 0 : 0; }
 function dashboardPassCount(item) { return (item.grade === '优秀' || item.grade === '达标' || item.grade === '参考案例') ? 1 : 0; } // 「无法质检」不再计为达标
@@ -5491,6 +7906,7 @@ function qcRecordWeeklyStatBatch() {
   var n = 0, pass = 0, fail = 0, scoreSum = 0, valid = 0, maxDate = '';
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i] || {};
+    if (r.aiPending || r.grade === QC_AI_PENDING_GRADE) continue;
     var d = String(r.date || '').trim();
     if (d > maxDate) maxDate = d;
     if (!isAssessedResult(r)) continue;
@@ -5519,11 +7935,12 @@ function qcRecordWeeklyStatBatch() {
 function qcRecordToolBatches() {
   // 任意来源的批次（页面直传 b-*、工具推送 tool-*）若还没有统计记录，都按批次补一条；
   // 这样页面重载 / 换了设备后统计记录不会丢，明细日期仍与批次一一对应。
-  var batches = Object.create(null), known = Object.create(null);
+  var batches = Object.create(null), known = Object.create(null), deleted = Object.create(null);
+  for (var di = 0; di < QC_WS_DELETED.length; di++) deleted[QC_WS_DELETED[di]] = true;
   QC_WEEKLY_STATS.forEach(function(w) { if (w.batchId) known[w.batchId] = true; });
   results.forEach(function(r) {
     var k = r.batchId;
-    if (typeof k !== 'string' || !k || known[k]) return;
+    if (typeof k !== 'string' || !k || known[k] || deleted[k]) return; // 【20261124e】已删批次不补录
     var b = batches[k] || (batches[k] = { id: 'ws-' + k, batchId: k, date: '', count: 0, pass: 0, fail: 0, avg: 0, valid: 0 });
     var d = String(r.date || '').slice(0, 10);
     if (d > b.date) b.date = d;
@@ -5580,6 +7997,7 @@ function qcMergeWeeklyStats(incoming) {
   for (i = 0; i < incoming.length; i++) {
     var w = incoming[i];
     if (!w || !w.id) continue;
+    if (qcWsIsDeletedStat(w)) continue; // 【20261124e】已删除的统计记录绝不并线回来
     var cur = map[w.id];
     if (!cur) { QC_WEEKLY_STATS.push(w); map[w.id] = w; added++; }
     else if (String(w.editedAt || '') > String(cur.editedAt || '')) {
@@ -5676,27 +8094,32 @@ function renderWeeklyStatsAdmin() {
     + '<button class="btn btn-primary btn-sm" onclick="qcWsApplyFilter()">筛选</button>'
     + '<button class="btn btn-outline btn-sm" onclick="qcWsClearFilter()">清空</button>'
     + '<span style="font-size:12px;color:var(--gray-500);">' + (fromD || toD ? ('已筛选 ' + filteredWs.length + ' / 共 ' + sorted.length + ' 条记录') : ('共 ' + sorted.length + ' 条记录')) + '</span></div>';
-  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的统计日期区间；保存后同步到数据看板与质检明细，区间相同的记录自动合并聚合</span></div><div class="card-body">' + filterBar + '<div class="table-wrap"><table class="summary-table"><thead><tr><th style="min-width:300px;">统计日期区间（可编辑）</th><th>质检量</th><th>平均分</th><th>达标</th><th>不达标</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
+  var h = '<div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>总质检量 · 周度统计记录管理</h3><span style="font-size:12px;color:var(--gray-500);">管理员可编辑每条记录的统计日期区间及质检量 / 平均分 / 达标 / 不达标，也可删除记录（删除后所有设备同步消失、明细数据不受影响，且不会被自动补录回来）；区间相同的记录自动合并聚合</span></div><div class="card-body">' + filterBar + '<div class="table-wrap"><table class="summary-table"><thead><tr><th style="min-width:300px;">统计日期区间（可编辑）</th><th>质检量（可编辑）</th><th>平均分（可编辑）</th><th>达标（可编辑）</th><th>不达标（可编辑）</th><th>导入时间</th><th>操作</th></tr></thead><tbody>';
   if (!filteredWs.length) {
     h += '<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--gray-400);">该时间范围内暂无统计记录</td></tr>';
   }
   for (var i = 0; i < filteredWs.length; i++) {
     var w = filteredWs[i];
     var fromId = 'wsDateFrom_' + i, toId = 'wsDateTo_' + i;
+    var cntId = 'wsCount_' + i, avgId = 'wsAvg_' + i, passId = 'wsPass_' + i, failId = 'wsFail_' + i;
     var _from = String(w.date || '').slice(0, 10);
     var _to = String(w.dateTo || '').slice(0, 10) || _from;
+    var _inp = 'padding:4px 6px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;width:74px;';
     h += '<tr>'
       + '<td style="white-space:nowrap;">'
       + '<input type="date" id="' + fromId + '" value="' + escHtml(_from) + '" style="padding:4px 6px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
       + '<span style="margin:0 5px;color:var(--gray-500);">~</span>'
       + '<input type="date" id="' + toId + '" value="' + escHtml(_to) + '" style="padding:4px 6px;border:1px solid var(--gray-300);border-radius:5px;font-size:13px;">'
       + '</td>'
-      + '<td>' + (Number(w.count) || 0) + '</td>'
-      + '<td>' + (Math.round((Number(w.avg) || 0) * 10) / 10) + '</td>'
-      + '<td style="color:#16a34a;">' + (Number(w.pass) || 0) + '</td>'
-      + '<td style="color:#dc2626;">' + (Number(w.fail) || 0) + '</td>'
+      + '<td><input type="number" min="0" step="1" id="' + cntId + '" value="' + (Number(w.count) || 0) + '" style="' + _inp + '"></td>'
+      + '<td><input type="number" min="0" step="0.1" id="' + avgId + '" value="' + (Math.round((Number(w.avg) || 0) * 10) / 10) + '" style="' + _inp + '"></td>'
+      + '<td><input type="number" min="0" step="1" id="' + passId + '" value="' + (Number(w.pass) || 0) + '" style="' + _inp + ';color:#16a34a;"></td>'
+      + '<td><input type="number" min="0" step="1" id="' + failId + '" value="' + (Number(w.fail) || 0) + '" style="' + _inp + ';color:#dc2626;"></td>'
       + '<td style="color:var(--gray-500);font-size:12px;">' + escHtml(String(w.createdAt || '').replace('T', ' ').slice(0, 19)) + (w.editedAt ? '<br>改期 ' + escHtml(String(w.editedAt).replace('T', ' ').slice(0, 19)) : '') + '</td>'
-      + '<td><button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatRange(' + htmlAttrJsStr(w.id) + ',\'' + fromId + '\',\'' + toId + '\')">保存日期</button></td>'
+      + '<td style="white-space:nowrap;">'
+      + '<button class="btn btn-outline btn-sm" onclick="qcSaveWeeklyStatEdit(' + htmlAttrJsStr(w.id) + ',\'' + fromId + '\',\'' + toId + '\',\'' + cntId + '\',\'' + avgId + '\',\'' + passId + '\',\'' + failId + '\')">保存修改</button> '
+      + '<button class="btn btn-outline btn-sm" style="color:#dc2626;border-color:#fca5a5;" onclick="qcDeleteWeeklyStat(' + htmlAttrJsStr(w.id) + ')">删除</button>'
+      + '</td>'
       + '</tr>';
   }
   h += '</tbody></table></div></div></div>';
@@ -5738,6 +8161,76 @@ function qcSaveWeeklyStatRange(id, fromInputId, toInputId) {
 }
 // 兼容旧调用（单日 → 视为同一天的区间）
 function qcSaveWeeklyStatDate(id, inputId) { return qcSaveWeeklyStatRange(id, inputId, inputId); }
+// 【20261124e·需求2】保存整条统计记录的编辑：日期区间 + 质检量 / 平均分 / 达标 / 不达标（仅管理员）
+function qcSaveWeeklyStatEdit(id, fromInputId, toInputId, cntId, avgId, passId, failId) {
+  if (!requireAdmin('修改统计记录')) return;
+  function el(x) { return document.getElementById(x); }
+  var fromEl = el(fromInputId), toEl = el(toInputId), cntEl = el(cntId), avgEl = el(avgId), passEl = el(passId), failEl = el(failId);
+  if (!fromEl || !cntEl || !avgEl || !passEl || !failEl) return;
+  var from = String(fromEl.value || '').trim();
+  var to = toEl ? String(toEl.value || '').trim() : from;
+  var okDate = /^\d{4}-\d{2}-\d{2}$/;
+  if (!okDate.test(from)) { showToast('开始日期格式不正确，请选择有效日期', 'error'); return; }
+  if (!to) to = from;
+  if (!okDate.test(to)) { showToast('结束日期格式不正确，请选择有效日期', 'error'); return; }
+  if (to < from) { showToast('结束日期不能早于开始日期', 'error'); return; }
+  var count = parseInt(cntEl.value, 10);
+  if (isNaN(count) || count < 0) { showToast('质检量必须是不小于 0 的整数', 'error'); return; }
+  var avg = parseFloat(avgEl.value);
+  if (isNaN(avg) || avg < 0 || avg > 1000) { showToast('平均分格式不正确', 'error'); return; }
+  avg = Math.round(avg * 10) / 10;
+  var pass = parseInt(passEl.value, 10);
+  var fail = parseInt(failEl.value, 10);
+  if (isNaN(pass) || pass < 0) { showToast('达标数必须是不小于 0 的整数', 'error'); return; }
+  if (isNaN(fail) || fail < 0) { showToast('不达标数必须是不小于 0 的整数', 'error'); return; }
+  if (pass + fail > count) { showToast('达标（' + pass + '）+ 不达标（' + fail + '）不能超过质检量（' + count + '）', 'error'); return; }
+  var stat = null;
+  for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
+    if (QC_WEEKLY_STATS[i].id === id) {
+      QC_WEEKLY_STATS[i].date = from;
+      QC_WEEKLY_STATS[i].dateTo = to;
+      QC_WEEKLY_STATS[i].count = count;
+      QC_WEEKLY_STATS[i].avg = avg;
+      QC_WEEKLY_STATS[i].pass = pass;
+      QC_WEEKLY_STATS[i].fail = fail;
+      QC_WEEKLY_STATS[i].editedAt = new Date().toISOString();
+      stat = QC_WEEKLY_STATS[i];
+      break;
+    }
+  }
+  if (!stat) return;
+  var nSync = stat.batchId ? qcApplyEditedBatchDates(results, rawData) : 0;
+  var syncNote = stat.batchId ? '；本批次 ' + nSync + ' 条明细日期已同步' : '';
+  renderDetailTable();
+  renderWeeklyStatsAdmin();
+  renderWeeklyKpi();
+  renderDashboard();
+  return cloudSaveState().then(function(saved) {
+    if (!saved) { showToast('修改已在当前页面生效，但未确认云端保存', 'error'); return; }
+    showToast('统计记录已保存：' + from + ' ~ ' + to + '，量 ' + count + '，均分 ' + avg + '，达标 ' + pass + '，不达标 ' + fail + syncNote, 'success');
+  }).catch(function() { showToast('修改已在当前页面生效，但云端保存失败，请恢复连接后重新保存', 'error'); });
+}
+// 【20261124e·需求1】删除一条统计记录（仅管理员）：写入墓碑防自动补录，明细数据不受影响
+function qcDeleteWeeklyStat(id) {
+  if (!requireAdmin('删除统计记录')) return;
+  if (!window.confirm('确定删除这条统计记录吗？\n\n· 删除后所有设备都不再显示该记录（看板统计同步减少）\n· 质检明细数据不受影响\n· 该记录不会被自动补录回来，但无法在页面恢复')) return;
+  var idx = -1, rec = null;
+  for (var i = 0; i < QC_WEEKLY_STATS.length; i++) {
+    if (QC_WEEKLY_STATS[i].id === id) { idx = i; rec = QC_WEEKLY_STATS[i]; break; }
+  }
+  if (idx === -1) return;
+  // 墓碑：记住记录 id 与批次 id，防止 qcRecordToolBatches / 其他设备把记录带回来
+  if (rec.id && QC_WS_DELETED.indexOf(rec.id) === -1) QC_WS_DELETED.push(rec.id);
+  if (rec.batchId && QC_WS_DELETED.indexOf(rec.batchId) === -1) QC_WS_DELETED.push(rec.batchId);
+  QC_WEEKLY_STATS.splice(idx, 1);
+  renderWeeklyStatsAdmin();
+  renderWeeklyKpi();
+  renderDashboard();
+  return cloudSaveState().then(function(saved) {
+    if (!saved) { showToast('记录已在当前页面删除，但未确认云端保存（其他设备暂未同步）', 'error'); return; }
+    showToast('统计记录已删除（质检量 ' + (Number(rec.count) || 0) + ' 条），云端已同步', 'success');
+  }).catch(function() { showToast('记录已在当前页面删除，但云端保存失败，请恢复连接后重试', 'error'); });
+}
 function qcWeekRangeOf(dateStr) {
   var s = String(dateStr || '').trim();
   var d = new Date(s.replace(/-/g, '/'));
@@ -6652,9 +9145,13 @@ function deriveKeywords(item) { return kbExtractRequirements(item).keywords; }fu
   var changed = 0;
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) {
     var it = KNOWLEDGE_BASE[i];
-    var req = kbExtractRequirements(it);
-    if (!it.coreKeywords || !it.auxKeywords || JSON.stringify(it.keywords || []) !== JSON.stringify(req.keywords)) {
-      it.keywords = req.keywords; it.coreKeywords = req.core; it.auxKeywords = req.aux; changed++;
+    // 【20261125d】SOP 条目的关键词是判定清单里精心提取的违规短语，不能被标题分词重算覆盖
+    // （否则「保证送达」会被换成「预期管理」而永远匹配不到，SOP 判分规则整体失效）。
+    if (!it.sopDoc && !it.sopRule) {
+      var req = kbExtractRequirements(it);
+      if (!it.coreKeywords || !it.auxKeywords || JSON.stringify(it.keywords || []) !== JSON.stringify(req.keywords)) {
+        it.keywords = req.keywords; it.coreKeywords = req.core; it.auxKeywords = req.aux; changed++;
+      }
     }
     if (!it.dimensions || !it.dimensions.length) it.dimensions = parseKnowledgeDimensions(it.dimension);
     it.dimension = it.dimensions.join('\u3001');
@@ -6689,22 +9186,511 @@ function highlightSearchText(value, query) {
   return text;
 }
 function filterKnowledgeList(list, query) { if (!query) return list; var words = query.split(/\s+/).filter(function(w) { return w.length > 0; }); return list.filter(function(item) { var hay = knowledgeSearchText(item); for (var i = 0; i < words.length; i++) if (hay.indexOf(words[i]) < 0) return false; return true; }); }
+// ============================================================
+// 【20261125a·需求1】知识库：文件夹树 / 多选 / 拖拽 / 版本快照
+// ============================================================
+function qcKbFolderById(id) {
+  for (var i = 0; i < KNOWLEDGE_FOLDERS.length; i++) if (KNOWLEDGE_FOLDERS[i].id === id) return KNOWLEDGE_FOLDERS[i];
+  return null;
+}
+function qcKbFolderPath(id) {
+  var out = [], guard = 0, f = qcKbFolderById(id);
+  while (f && guard++ < 20) { out.unshift(f.name); f = qcKbFolderById(f.parentId); }
+  return out.join(' / ');
+}
+function qcKbFolderDepth(id) {
+  var d = 0, guard = 0, f = qcKbFolderById(id);
+  while (f && guard++ < 20) { d++; f = qcKbFolderById(f.parentId); }
+  return d;
+}
+function qcKbFolderDescendants(id, acc) {
+  acc = acc || {};
+  for (var i = 0; i < KNOWLEDGE_FOLDERS.length; i++) {
+    var f = KNOWLEDGE_FOLDERS[i];
+    if ((f.parentId || '') === id && !acc[f.id]) { acc[f.id] = true; qcKbFolderDescendants(f.id, acc); }
+  }
+  return acc;
+}
+function qcMergeKbFolders(arr) {
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  var added = 0;
+  for (var i = 0; i < arr.length; i++) {
+    var f = arr[i];
+    if (!f || !f.id || !f.name) continue;
+    var cur = qcKbFolderById(f.id);
+    if (!cur) { KNOWLEDGE_FOLDERS.push({ id: f.id, name: String(f.name), parentId: f.parentId || '', createdAt: f.createdAt || '', editedAt: f.editedAt || '' }); added++; }
+    else if (String(f.editedAt || '') > String(cur.editedAt || '')) { cur.name = String(f.name); cur.parentId = f.parentId || ''; cur.editedAt = f.editedAt || ''; }
+  }
+  return added;
+}
+function qcMergeKbVersions(arr) {
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  var seen = {}, added = 0;
+  for (var i = 0; i < KB_VERSIONS.length; i++) { var v = KB_VERSIONS[i]; if (v) seen[(v.t || '') + '|' + (v.digest || '')] = true; }
+  for (var j = 0; j < arr.length; j++) {
+    var n = arr[j];
+    if (!n || !n.t) continue;
+    var key = (n.t || '') + '|' + (n.digest || '');
+    if (seen[key]) continue;
+    seen[key] = true; KB_VERSIONS.push(n); added++;
+  }
+  KB_VERSIONS.sort(function(a, b) { return String(a.t) < String(b.t) ? 1 : -1; });
+  if (KB_VERSIONS.length > 60) KB_VERSIONS = KB_VERSIONS.slice(0, 60);
+  return added;
+}
+// ---------- 【20261125b】知识库合并内核：墓碑 + 逐条时间戳并集 ----------
+// 规则（顺序很重要）：
+// ① 墓碑优先：进过删除名单的 id，任何来源都不得重新出现；
+// ② 同 id 取 updatedAt/createdAt 更新的一条（时间相同保留本地，避免来回抖）；
+// ③ 两边独有的条目一律保留（并集）——这样「新增但从没写进云端」的条目不会因一次旧数据覆盖而消失；
+// ④ 输出按 createdAt + id 稳定排序，杜绝「知识跳来跳去」。
+function qcKbStamp(k) { return String((k && (k.updatedAt || k.createdAt)) || ''); }
+function qcKbLoadDeleted() {
+  try {
+    var raw = JSON.parse(localStorage.getItem(QC_KB_DELETED_KEY) || 'null');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) KB_DELETED = raw;
+  } catch (e) {}
+  return KB_DELETED;
+}
+function qcKbSaveDeleted() { try { localStorage.setItem(QC_KB_DELETED_KEY, JSON.stringify(KB_DELETED)); } catch (e) {} }
+function qcKbMergeDeleted(arr) {
+  if (!arr) return 0;
+  var added = 0, i;
+  if (Array.isArray(arr)) {
+    for (i = 0; i < arr.length; i++) { var id = String(arr[i] || ''); if (id && !KB_DELETED[id]) { KB_DELETED[id] = '1970-01-01T00:00:00.000Z'; added++; } }
+  } else if (typeof arr === 'object') {
+    for (var k in arr) if (Object.prototype.hasOwnProperty.call(arr, k) && !KB_DELETED[k]) { KB_DELETED[k] = String(arr[k] || ''); added++; }
+  }
+  if (added) qcKbSaveDeleted();
+  return added;
+}
+function qcKbMarkDeleted(id) { if (!id) return; KB_DELETED[String(id)] = new Date().toISOString(); qcKbSaveDeleted(); }
+function qcKbClearDeleted(id) { if (id && KB_DELETED[String(id)]) { delete KB_DELETED[String(id)]; qcKbSaveDeleted(); } }
+function qcKbIsDeleted(id) { return !!KB_DELETED[String(id || '')]; }
+function qcKbLocalAuthoritative() {
+  try { var a = JSON.parse(localStorage.getItem(QC_KB_AUTH_KEY) || 'null'); return Array.isArray(a) ? a : null; } catch (e) { return null; }
+}
+function qcKbMergeLists(base, incoming, deleted) {
+  var del = deleted || KB_DELETED;
+  var map = Object.create(null), order = [];
+  function push(it) {
+    if (!it || !it.id) return;
+    var id = String(it.id);
+    if (del[id]) return;
+    if (!map[id]) { map[id] = it; order.push(id); return; }
+    var a = qcKbStamp(map[id]), b = qcKbStamp(it);
+    if (b > a) map[id] = it;                    // 只接受时间更新的那条
+    else if (b === a && String(it.title || '') !== String(map[id].title || '')) map[id] = it;
+  }
+  (Array.isArray(base) ? base : []).forEach(push);
+  (Array.isArray(incoming) ? incoming : []).forEach(push);
+  var out = order.map(function(id) { return map[id]; });
+  out.sort(function(x, y) {
+    var a = String(x.createdAt || ''), b = String(y.createdAt || '');
+    if (a !== b) return a < b ? -1 : 1;
+    return String(x.id) < String(y.id) ? -1 : 1;
+  });
+  return out;
+}
+// 稳定排序（渲染前统一走一遍）
+function qcKbStableSort(list) {
+  return (list || []).slice().sort(function(x, y) {
+    var fa = String(x.folderId || ''), fb = String(y.folderId || '');
+    if (fa !== fb) return fa < fb ? -1 : 1;
+    var a = String(x.createdAt || ''), b = String(y.createdAt || '');
+    if (a !== b) return a < b ? -1 : 1;
+    return String(x.id) < String(y.id) ? -1 : 1;
+  });
+}
+function qcKbDigest() {
+  var s = KNOWLEDGE_BASE.map(function(k) { return k.id + '#' + (k.title || '') + '#' + (k.updatedAt || k.createdAt || ''); }).join('|');
+  var h = 5381;
+  for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+var QC_KB_SNAP_KEY = 'qc_kb_snapshots_v1';
+function qcKbReadLocalSnaps() {
+  try { var a = JSON.parse(localStorage.getItem(QC_KB_SNAP_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+// 记录一次知识库变更：云端只存元数据；本机另存完整快照（最多 8 份，便于回滚）
+function qcKbSnapshot(action, changedTitles) {
+  try {
+    var t = new Date().toISOString();
+    var digest = qcKbDigest();
+    var entry = { t: t, action: String(action || ''), user: (typeof AUTH !== 'undefined' && AUTH && AUTH.name) || '未知', count: KNOWLEDGE_BASE.length, digest: digest, changed: (changedTitles || []).slice(0, 12) };
+    KB_VERSIONS.unshift(entry);
+    if (KB_VERSIONS.length > 60) KB_VERSIONS = KB_VERSIONS.slice(0, 60);
+    var snaps = qcKbReadLocalSnaps();
+    snaps.unshift({ t: t, digest: digest, action: entry.action, user: entry.user, items: JSON.parse(JSON.stringify(KNOWLEDGE_BASE)), folders: JSON.parse(JSON.stringify(KNOWLEDGE_FOLDERS)) });
+    // 体积保护：单份超过 ~1.2MB 就不再存本地完整快照（只保留元数据）
+    var kept = [], total = 0;
+    for (var i = 0; i < snaps.length && kept.length < 8; i++) {
+      var sz = 0; try { sz = JSON.stringify(snaps[i]).length; } catch (e) { sz = 0; }
+      if (total + sz > 4 * 1024 * 1024) break;
+      kept.push(snaps[i]); total += sz;
+    }
+    localStorage.setItem(QC_KB_SNAP_KEY, JSON.stringify(kept));
+    return entry;
+  } catch (e) { return null; }
+}
+// ---------- 【20261125b】知识库独立云端行：只写知识（几十 KB），不再为改一条知识整包重写 4MB 主数据 ----------
+function qcKbPayload() {
+  return {
+    v: 1,
+    savedAt: new Date().toISOString(),
+    knowledgeBase: KNOWLEDGE_BASE,
+    kbFolders: KNOWLEDGE_FOLDERS,
+    kbVersions: KB_VERSIONS.slice(0, 60),
+    kbDeleted: KB_DELETED
+  };
+}
+// 把一份知识载荷并进内存（并集 + 墓碑 + 逐条时间戳），返回新增条数
+function qcKbApplyPayload(obj, opts) {
+  if (!obj || typeof obj !== 'object') return 0;
+  qcKbMergeDeleted(obj.kbDeleted);
+  try { qcMergeKbFolders(obj.kbFolders); } catch (e) {}
+  try { qcMergeKbVersions(obj.kbVersions); } catch (e) {}
+  var base = (opts && opts.useAuthoritative) ? (qcKbLocalAuthoritative() || []) : KNOWLEDGE_BASE;
+  var before = {};
+  for (var i = 0; i < KNOWLEDGE_BASE.length; i++) before[KNOWLEDGE_BASE[i].id] = true;
+  var merged = qcKbMergeLists(base, obj.knowledgeBase || []);
+  var added = 0;
+  for (var j = 0; j < merged.length; j++) if (!before[merged[j].id]) added++;
+  KNOWLEDGE_BASE = merged;
+  try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+  return added;
+}
+function qcKbFetchCloudRow() {
+  if (!cloudDb) return Promise.resolve(null);
+  return cloudDb.from('qc_dashboard_state').select('state_json,updated_at').eq('state_key', QC_KB_ROW_KEY).limit(1).then(function(res) {
+    if (res && res.error) throw res.error;
+    var row = res && res.data && res.data.length ? res.data[0] : null;
+    if (!row || !row.state_json) return null;
+    var obj = null;
+    try { obj = JSON.parse(row.state_json); } catch (e) { obj = null; }
+    if (obj) obj.__updatedAt = row.updated_at || '';
+    return obj;
+  });
+}
+// 保存：先读云端小行并并集（保住其他设备的改动），再整体写回
+function qcKbCloudSave(msg) {
+  if (!cloudDb) { if (msg) showToast('云端未初始化，知识仅存在本机', 'error'); return Promise.resolve(false); }
+  return qcKbFetchCloudRow().catch(function() { return null; }).then(function(row) {
+    if (row) { try { qcKbApplyPayload(row, { useAuthoritative: false }); } catch (e) {} }
+    var payload = { state_key: QC_KB_ROW_KEY, state_json: JSON.stringify(qcKbPayload()), updated_by: 'anonymous' };
+    return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' }).then(function(res) {
+      if (res && res.error) throw res.error;
+      try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+      renderKnowledgeBase();
+      if (msg) showToast(msg, 'success');
+      return true;
+    });
+  }).catch(function(err) {
+    if (msg) showToast(msg + '（本机已生效，云端保存失败：' + ((err && (err.message || err.code)) || '网络异常') + '）', 'error');
+    return false;
+  });
+}
+// 启动时拉知识库小行（云端优先，与本机权威副本并集）
+function qcKbCloudLoad() {
+  return qcKbFetchCloudRow().then(function(row) {
+    if (!row) return 0;
+    var added = qcKbApplyPayload(row, { useAuthoritative: true });
+    if (added > 0) { try { renderKnowledgeBase(); scheduleSensitiveWordsRefresh(); } catch (e) {} }
+    return added;
+  }).catch(function() { return 0; });
+}
+function qcKbSaveMeta(msg) {
+  renderKnowledgeBase();
+  try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+  return qcKbCloudSave(msg).then(function(ok) {
+    // 文件夹 / 目录结构只影响展示：顺带并入主数据行（成本低，仅结构字段），判分不依赖它
+    return ok;
+  });
+}
+// ---------- 文件夹操作 ----------
+function qcKbRefreshFolderParentOptions(selectedId, excludeId, targetId) {
+  var sel = document.getElementById(targetId || 'kbFolderParent');
+  if (!sel) return;
+  var exclude = excludeId ? qcKbFolderDescendants(excludeId) : {};
+  if (excludeId) exclude[excludeId] = true;
+  var opts = ['<option value="">根目录（最外层）</option>'];
+  var sorted = KNOWLEDGE_FOLDERS.slice().sort(function(a, b) { return qcKbFolderPath(a.id) < qcKbFolderPath(b.id) ? -1 : 1; });
+  for (var i = 0; i < sorted.length; i++) {
+    var f = sorted[i];
+    if (exclude[f.id]) continue;
+    var depth = Math.max(0, qcKbFolderDepth(f.id) - 1);
+    opts.push('<option value="' + escHtml(f.id) + '"' + (f.id === selectedId ? ' selected' : '') + '>' + new Array(depth + 1).join('　') + escHtml(f.name) + '</option>');
+  }
+  sel.innerHTML = opts.join('');
+}
+function qcKbOpenFolderModal(id, presetParent) {
+  if (!isAdminMode()) { showToast('文件夹管理需要管理员权限', 'error'); return; }
+  var f = id ? qcKbFolderById(id) : null;
+  document.getElementById('kbFolderEditId').value = f ? f.id : '';
+  document.getElementById('kbFolderModalTitle').textContent = f ? '重命名 / 移动文件夹' : '新建文件夹';
+  document.getElementById('kbFolderName').value = f ? f.name : '';
+  qcKbRefreshFolderParentOptions(f ? (f.parentId || '') : (presetParent || ''), f ? f.id : '');
+  document.getElementById('kbFolderModal').classList.add('show');
+}
+function qcKbCloseFolderModal() { var m = document.getElementById('kbFolderModal'); if (m) m.classList.remove('show'); }
+function qcKbSaveFolder() {
+  if (!isAdminMode()) { showToast('文件夹管理需要管理员权限', 'error'); return; }
+  var id = document.getElementById('kbFolderEditId').value;
+  var name = String(document.getElementById('kbFolderName').value || '').trim();
+  var parentId = String(document.getElementById('kbFolderParent').value || '');
+  if (!name) { showToast('请填写文件夹名称', 'error'); return; }
+  if (name.length > 40) { showToast('文件夹名称不能超过 40 个字', 'error'); return; }
+  var now = new Date().toISOString();
+  if (id) {
+    var f = qcKbFolderById(id);
+    if (!f) return;
+    if (parentId && (parentId === id || qcKbFolderDescendants(id)[parentId])) { showToast('不能把文件夹移动到它自己或它的子文件夹里', 'error'); return; }
+    f.name = name; f.parentId = parentId; f.editedAt = now;
+  } else {
+    KNOWLEDGE_FOLDERS.push({ id: 'kbf-' + Date.now() + '-' + Math.floor(Math.random() * 10000), name: name, parentId: parentId, createdAt: now, editedAt: now });
+  }
+  qcKbCloseFolderModal();
+  qcKbSaveMeta('文件夹已保存');
+}
+function qcKbDeleteFolder(id) {
+  if (!isAdminMode()) { showToast('文件夹管理需要管理员权限', 'error'); return; }
+  var f = qcKbFolderById(id);
+  if (!f) return;
+  var subs = qcKbFolderDescendants(id);
+  var nItems = 0;
+  for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].folderId === id) nItems++;
+  if (!window.confirm('删除文件夹「' + f.name + '」？\n\n· 里面的知识会移动到上一级，不会删除\n· 子文件夹会一起上移' + (nItems ? '\n· 本文件夹直接包含 ' + nItems + ' 条知识' : ''))) return;
+  for (var j = 0; j < KNOWLEDGE_BASE.length; j++) if (KNOWLEDGE_BASE[j].folderId === id) KNOWLEDGE_BASE[j].folderId = f.parentId || '';
+  for (var k = 0; k < KNOWLEDGE_FOLDERS.length; k++) if (KNOWLEDGE_FOLDERS[k].parentId === id) { KNOWLEDGE_FOLDERS[k].parentId = f.parentId || ''; KNOWLEDGE_FOLDERS[k].editedAt = new Date().toISOString(); }
+  KNOWLEDGE_FOLDERS = KNOWLEDGE_FOLDERS.filter(function(x) { return x.id !== id; });
+  qcKbSaveMeta('文件夹已删除，内容已上移');
+}
+function qcKbMoveItemToFolder(itemId, folderId, silent) {
+  if (!isAdminMode()) { showToast('移动知识需要管理员权限', 'error'); return; }
+  var item = findKnowledgeById(itemId);
+  if (!item) return;
+  if (folderId && !qcKbFolderById(folderId)) folderId = '';
+  item.folderId = folderId || '';
+  item.updatedAt = new Date().toISOString();
+  if (!silent) qcKbSaveMeta('已移动到「' + (qcKbFolderPath(folderId) || '未分类') + '」');
+  else qcKbSaveMeta(null);
+}
+function qcKbMoveFolderTo(folderId, parentId, silent) {
+  if (!isAdminMode()) { showToast('移动文件夹需要管理员权限', 'error'); return; }
+  var f = qcKbFolderById(folderId);
+  if (!f) return;
+  if (parentId && (parentId === folderId || qcKbFolderDescendants(folderId)[parentId])) { showToast('不能把文件夹移动到它自己或它的子文件夹里', 'error'); return; }
+  f.parentId = parentId || '';
+  f.editedAt = new Date().toISOString();
+  if (!silent) qcKbSaveMeta('文件夹已移动');
+  else qcKbSaveMeta(null);
+}
+// ---------- 拖拽 ----------
+function qcKbDragStart(e, type, id) {
+  if (!isAdminMode()) return;
+  var payload = { type: type, id: id };
+  window._kbDrag = payload;
+  try { e.dataTransfer.setData('text/plain', JSON.stringify(payload)); e.dataTransfer.effectAllowed = 'move'; } catch (x) {}
+  var tr = e && e.currentTarget; if (tr) { try { tr.style.opacity = '0.5'; } catch (x2) {} }
+}
+function qcKbDragEnd(e) { var tr = e && e.currentTarget; if (tr) { try { tr.style.opacity = ''; } catch (x) {} } window._kbDrag = null; }
+function qcKbAllowDrop(e) { if (!isAdminMode()) return; e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch (x) {} }
+function qcKbDropOnFolder(e, folderId) {
+  if (!isAdminMode()) return;
+  e.preventDefault(); e.stopPropagation();
+  var d = window._kbDrag;
+  try { var raw = e.dataTransfer.getData('text/plain'); if (raw) d = JSON.parse(raw); } catch (x) {}
+  window._kbDrag = null;
+  if (!d || !d.id) return;
+  if (d.type === 'item') qcKbMoveItemToFolder(d.id, folderId, true);
+  else if (d.type === 'folder') qcKbMoveFolderTo(d.id, folderId, true);
+}
+// ---------- 多选 / 批量 ----------
+function qcKbCanPick() { return isAdminMode(); }
+function qcKbTogglePick(id, on, ev) {
+  if (ev) ev.stopPropagation();
+  if (on) KB_SELECTED[id] = true; else delete KB_SELECTED[id];
+  qcKbUpdateBatchBar();
+}
+function qcKbTogglePickAll(on) {
+  var boxes = document.querySelectorAll('#knowledgeLibraryWrap input.kb-pick');
+  for (var i = 0; i < boxes.length; i++) {
+    boxes[i].checked = !!on;
+    var id = boxes[i].getAttribute('data-kb-id');
+    if (on) KB_SELECTED[id] = true; else delete KB_SELECTED[id];
+  }
+  qcKbUpdateBatchBar();
+}
+function qcKbSelectedIds() {
+  var out = [];
+  for (var k in KB_SELECTED) if (KB_SELECTED[k] && findKnowledgeById(k)) out.push(k);
+  return out;
+}
+function qcKbClearPicks() { KB_SELECTED = Object.create(null); renderKnowledgeBase(); }
+function qcKbUpdateBatchBar() {
+  var bar = document.getElementById('kbBatchBar');
+  if (!bar) return;
+  var ids = qcKbSelectedIds();
+  bar.style.display = ids.length ? 'flex' : 'none';
+  var n = document.getElementById('kbBatchCount'); if (n) n.textContent = ids.length;
+}
+function qcKbOpenBatchMove() {
+  if (!isAdminMode()) { showToast('批量移动需要管理员权限', 'error'); return; }
+  var ids = qcKbSelectedIds();
+  if (!ids.length) { showToast('请先勾选要移动的知识', 'error'); return; }
+  qcKbRefreshFolderParentOptions('', '', 'kbBatchTarget');
+  var hint = document.getElementById('kbBatchMoveHint');
+  if (hint) hint.textContent = '将把选中的 ' + ids.length + ' 条知识移动到：';
+  document.getElementById('kbBatchMoveModal').classList.add('show');
+}
+function qcKbCloseBatchMove() { var m = document.getElementById('kbBatchMoveModal'); if (m) m.classList.remove('show'); }
+function qcKbConfirmBatchMove() {
+  if (!isAdminMode()) { showToast('批量移动需要管理员权限', 'error'); return; }
+  var target = String((document.getElementById('kbBatchTarget') || {}).value || '');
+  var ids = qcKbSelectedIds();
+  if (!ids.length) { qcKbCloseBatchMove(); return; }
+  var now = new Date().toISOString();
+  for (var i = 0; i < ids.length; i++) { var it = findKnowledgeById(ids[i]); if (it) { it.folderId = target; it.updatedAt = now; } }
+  KB_SELECTED = Object.create(null);
+  qcKbCloseBatchMove();
+  qcKbSaveMeta('已移动 ' + ids.length + ' 条知识到「' + (qcKbFolderPath(target) || '未分类') + '」');
+}
+function qcKbBatchDelete() {
+  if (!isAdminMode()) { showToast('批量删除需要管理员权限', 'error'); return; }
+  var ids = qcKbSelectedIds();
+  if (!ids.length) { showToast('请先勾选要删除的知识', 'error'); return; }
+  if (!window.confirm('确认删除选中的 ' + ids.length + ' 条知识？\n\n删除后会立即按剩余知识重新质检全部明细。')) return;
+  for (var i = 0; i < ids.length; i++) {
+    var it = findKnowledgeById(ids[i]);
+    if (it && it.fileCloudPath && cloudApp && cloudApp.storage) { try { cloudApp.storage.from('qc-appeals').delete(it.fileCloudPath).catch(function(){}); } catch (e) {} }
+    qcKbMarkDeleted(ids[i]);   // 【20261125b】写墓碑，任何来源都不能再把它并回来
+  }
+  KNOWLEDGE_BASE = KNOWLEDGE_BASE.filter(function(k) { return ids.indexOf(k.id) < 0; });
+  KB_SELECTED = Object.create(null);
+  qcKbSnapshot('批量删除知识 ' + ids.length + ' 条', []);
+  try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+  renderKnowledgeBase(); scheduleSensitiveWordsRefresh();
+  qcKbCloudSave('已删除 ' + ids.length + ' 条知识并同步云端');
+  if (rawData.length) { runQualityCheck(); showToast('已删除 ' + ids.length + ' 条知识，正在重新质检全部数据', 'info'); }
+}
+// ---------- 行 / 表格 ----------
+function qcKbRowCells(item, query, editClass, opts) {
+  opts = opts || {};
+  var tone = item.type === 'case-good' ? 'var(--success)' : (item.type === 'case-bad' || item.kind === 'missed' ? 'var(--danger)' : 'var(--info)');
+  var srcBadge = item.sourceType === 'file' ? '📄 ' : (item.sourceType === 'url' ? '🔗 ' : '');
+  var srcActions = item.sourceType === 'file' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开</button><button class="btn-link" onclick="downloadKnowledgeFileById(\'' + item.id + '\')">下载</button>' : (item.sourceType === 'url' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开链接</button>' : '');
+  var nReq = (item.coreKeywords || []).length + (item.auxKeywords || []).length;
+  var row = '<tr id="knowledge-row-' + escHtml(item.id) + '" data-kb-id="' + escHtml(item.id) + '"'
+    + (opts.pick ? ' draggable="true" ondragstart="qcKbDragStart(event,\'item\',\'' + item.id + '\')" ondragend="qcKbDragEnd(event)"' : '') + '>';
+  if (opts.pick) row += '<td style="text-align:center;"><input type="checkbox" class="kb-pick" data-kb-id="' + escHtml(item.id) + '"' + (KB_SELECTED[item.id] ? ' checked' : '') + ' onclick="qcKbTogglePick(\'' + item.id + '\',this.checked,event)"></td>';
+  row += '<td style="color:' + tone + ';font-weight:600;">' + escHtml(knowledgeTypeLabel(item.type))
+    + '<br><span style="font-size:11px;font-weight:400;">' + escHtml(knowledgeKindLabel(item.kind, item.summaryKind))
+    + '<br><span style="font-size:11px;color:#0369a1;font-weight:600;">范围：' + escHtml(knowledgeBizOf(item)) + '</span></span></td>'
+    + '<td style="font-weight:600;">' + srcBadge + highlightSearchText(item.title, query)
+    + (opts.showFolder ? '<div style="font-size:11px;color:#64748b;font-weight:400;margin-top:2px;">📁 ' + escHtml(qcKbFolderPath(item.folderId) || '未分类') + '</div>' : '')
+    + '</td>'
+    + '<td>' + highlightSearchText(getKnowledgeDimensions(item).join('\u3001'), query) + '</td>'
+    + '<td style="font-size:12px;"><div style="max-height:150px;overflow:auto;line-height:1.55;">'
+    + ((item.coreKeywords && item.coreKeywords.length) ? '<div><span style="color:#b45309;font-weight:600;">明确要求(' + item.coreKeywords.length + ')：</span>' + highlightSearchText(item.coreKeywords.join('、'), query) + '</div>' : '')
+    + ((item.auxKeywords && item.auxKeywords.length) ? '<div style="margin-top:3px;color:var(--gray-500);"><span style="color:var(--gray-400);">参考词(' + item.auxKeywords.length + ')：</span>' + highlightSearchText(item.auxKeywords.join('、'), query) + '</div>' : '')
+    + '</div><div style="margin-top:4px;color:var(--gray-400);font-size:11px;">共 ' + nReq + ' 项要求</div></td>'
+    + '<td style="white-space:pre-wrap;line-height:1.6;">' + highlightSearchText(item.content, query) + '</td>'
+    + '<td class="' + editClass + '"><button class="btn-link" onclick="openKnowledgeModal(\'' + item.type + '\',\'' + item.id + '\')">修改</button>' + srcActions + '<button class="btn-link danger" onclick="deleteKnowledgeItem(\'' + item.id + '\')">删除</button></td>'
+    + '</tr>';
+  return row;
+}
+function qcKbTable(list, query, editClass, opts) {
+  opts = opts || {};
+  if (!list.length) return '<div style="padding:30px;text-align:center;color:var(--gray-400);">' + (query ? '没有找到匹配知识' : '暂无内容，点击右上角按钮新增') + '</div>';
+  var cols = opts.pick ? 7 : 6;
+  var h = '<table class="standard-table"><thead><tr>'
+    + (opts.pick ? '<th style="width:34px;"><input type="checkbox" title="全选当前列表" onclick="qcKbTogglePickAll(this.checked)"></th>' : '')
+    + '<th style="width:90px;">类型</th><th style="width:170px;">标题</th><th style="width:150px;">适用维度（可多选）</th><th style="width:220px;">判分依据（自动提取的全部要求）</th><th>内容 / 判断依据</th><th style="width:120px;">操作</th></tr></thead><tbody>';
+  for (var j = 0; j < list.length; j++) h += qcKbRowCells(list[j], query, editClass, opts);
+  return h + '</tbody></table>';
+}
+// 文件夹树（知识页）：文件夹行可折叠/改名/移动/删除/拖拽嵌套；知识行可拖入文件夹
+function qcKbTreeHtml(items) {
+  var pick = qcKbCanPick();
+  var editClass = 'admin-only';
+  var h = '<div id="kbBatchBar" class="kb-batch-bar" style="display:' + (qcKbSelectedIds().length ? 'flex' : 'none') + ';">'
+    + '<span>已选 <b id="kbBatchCount">' + qcKbSelectedIds().length + '</b> 条</span>'
+    + '<button class="btn btn-primary btn-sm" onclick="qcKbOpenBatchMove()">移动到文件夹</button>'
+    + '<button class="btn btn-danger btn-sm" onclick="qcKbBatchDelete()">批量删除</button>'
+    + '<button class="btn btn-outline btn-sm" onclick="qcKbClearPicks()">取消选择</button>'
+    + '<span style="font-size:12px;color:var(--gray-500);">提示：知识行可直接拖到文件夹上；文件夹也可拖进另一个文件夹做嵌套。</span></div>';
+  h += '<table class="standard-table kb-tree-table"><thead><tr>'
+    + (pick ? '<th style="width:34px;"></th>' : '')
+    + '<th style="width:90px;">类型</th><th style="width:170px;">标题</th><th style="width:150px;">适用维度（可多选）</th><th style="width:220px;">判分依据（自动提取的全部要求）</th><th>内容 / 判断依据</th><th style="width:120px;">操作</th></tr></thead><tbody>';
+  var emitted = {};
+  function itemRows(fid) {
+    var out = '';
+    for (var i = 0; i < items.length; i++) if ((items[i].folderId || '') === fid) out += qcKbRowCells(items[i], '', editClass, { pick: pick });
+    return out;
+  }
+  function folderRow(f) {
+    var depth = Math.max(0, qcKbFolderDepth(f.id) - 1);
+    var subs = KNOWLEDGE_FOLDERS.filter(function(x) { return (x.parentId || '') === f.id; });
+    var nItems = 0;
+    for (var i = 0; i < items.length; i++) if (items[i].folderId === f.id) nItems++;
+    var open = KB_OPEN_FOLDERS[f.id] !== false;
+    var caret = (subs.length || nItems) ? (open ? '▾' : '▸') : '·';
+    var pad = 10 + depth * 18;
+    var row = '<tr class="kb-folder-row" data-folder-id="' + escHtml(f.id) + '"'
+      + (pick ? ' draggable="true" ondragstart="qcKbDragStart(event,\'folder\',\'' + f.id + '\')" ondragend="qcKbDragEnd(event)"' : '')
+      + ' ondragover="qcKbAllowDrop(event)" ondrop="qcKbDropOnFolder(event,\'' + f.id + '\')">'
+      + '<td colspan="' + (pick ? 7 : 6) + '" style="padding-left:' + pad + 'px;background:#f8fafc;">'
+      + '<span class="kb-folder-line"><a href="#" class="kb-folder-caret" onclick="qcKbToggleFolder(\'' + f.id + '\');return false;">' + caret + '</a>'
+      + ' <span class="kb-folder-name" ondblclick="qcKbOpenFolderModal(\'' + f.id + '\')">📁 ' + escHtml(f.name) + '</span>'
+      + ' <span class="kb-folder-count">' + nItems + ' 条' + (subs.length ? ' · ' + subs.length + ' 个子文件夹' : '') + '</span>'
+      + '<span class="admin-only" style="margin-left:10px;display:inline-flex;gap:6px;">'
+      + '<button class="btn-link" onclick="qcKbOpenFolderModal(\'' + f.id + '\')">重命名/移动</button>'
+      + '<button class="btn-link" onclick="qcKbOpenFolderModal(\'\',\'' + f.id + '\')">新建子文件夹</button>'
+      + '<button class="btn-link danger" onclick="qcKbDeleteFolder(\'' + f.id + '\')">删除</button>'
+      + '</span></span></td></tr>';
+    if (open) {
+      for (var s = 0; s < subs.length; s++) { if (!emitted[subs[s].id]) { emitted[subs[s].id] = true; row += folderRow(subs[s]); } }
+      row += itemRows(f.id);
+    }
+    return row;
+  }
+  var roots = KNOWLEDGE_FOLDERS.filter(function(f) { return !f.parentId || !qcKbFolderById(f.parentId); });
+  roots.sort(function(a, b) { return String(a.name) < String(b.name) ? -1 : 1; });
+  for (var r = 0; r < roots.length; r++) { if (!emitted[roots[r].id]) { emitted[roots[r].id] = true; h += folderRow(roots[r]); } }
+  // 未分类（根目录）：拖到这一行 = 移出文件夹
+  var rootCount = 0;
+  for (var k = 0; k < items.length; k++) if (!items[k].folderId || !qcKbFolderById(items[k].folderId)) rootCount++;
+  h += '<tr class="kb-folder-row kb-root-row" ondragover="qcKbAllowDrop(event)" ondrop="qcKbDropOnFolder(event,\'\')">'
+    + '<td colspan="' + (pick ? 7 : 6) + '" style="padding-left:10px;background:#f1f5f9;">'
+    + '<span class="kb-folder-line"><a href="#" class="kb-folder-caret" onclick="qcKbToggleRoot();return false;">' + (KB_OPEN_FOLDERS.__root === false ? '▸' : '▾') + '</a>'
+    + ' <span class="kb-folder-name">🗂 未分类（根目录）</span> <span class="kb-folder-count">' + rootCount + ' 条</span>'
+    + '<span style="font-size:11.5px;color:var(--gray-400);margin-left:10px;">把知识或文件夹拖到这里可移出文件夹</span></span></td></tr>';
+  if (KB_OPEN_FOLDERS.__root !== false) {
+    for (var k2 = 0; k2 < items.length; k2++) if (!items[k2].folderId || !qcKbFolderById(items[k2].folderId)) h += qcKbRowCells(items[k2], '', editClass, { pick: pick });
+  }
+  if (!items.length && !KNOWLEDGE_FOLDERS.length) h += '<tr><td colspan="' + (pick ? 7 : 6) + '" style="padding:24px;text-align:center;color:var(--gray-400);">暂无知识：点右上角「新增质检知识」，或用「新建文件夹」先建目录。</td></tr>';
+  return h + '</tbody></table>';
+}
+function qcKbToggleFolder(id) { KB_OPEN_FOLDERS[id] = (KB_OPEN_FOLDERS[id] === false); renderKnowledgeBase(); }
+function qcKbToggleRoot() { KB_OPEN_FOLDERS.__root = (KB_OPEN_FOLDERS.__root === false); renderKnowledgeBase(); }
+// 【20261125c】按用户要求移除「知识库版本记录」卡片与「恢复本机旧知识」按钮：删除即真实删除（写墓碑），
+// 需要找回时重新导入对应文档即可；本机快照 qc_kb_snapshots_v1 仍会静默保留最近几份，作为运维兜底。
 function renderKnowledgeBase() {
   var cases = [], knowledges = [];
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) { if (KNOWLEDGE_BASE[i].type === 'knowledge') knowledges.push(KNOWLEDGE_BASE[i]); else cases.push(KNOWLEDGE_BASE[i]); }
   var caseQuery = getKnowledgeSearchQuery('case'), knowledgeQuery = getKnowledgeSearchQuery('knowledge');
   cases = filterKnowledgeList(cases, caseQuery); knowledges = filterKnowledgeList(knowledges, knowledgeQuery);
+  // 【20261125b】渲染前统一稳定排序：同一份数据每次打开顺序一致，不再「跳来跳去」
+  cases = qcKbStableSort(cases); knowledges = qcKbStableSort(knowledges);
   function updateHint(id, query, count) { var el = document.getElementById(id); if (!el) return; if (!query) { el.style.display = 'none'; return; } el.style.display = 'block'; el.textContent = '已按标题、维度、关键词和内容模糊搜索，匹配 ' + count + ' 条'; }
   updateHint('caseSearchHint', caseQuery, cases.length); updateHint('knowledgeSearchHint', knowledgeQuery, knowledges.length);
-  function renderRows(list, query, editClass) {
-    if (!list.length) return '<div style="padding:30px;text-align:center;color:var(--gray-400);">' + (query ? '没有找到匹配知识' : '暂无内容，点击右上角按钮新增') + '</div>';
-    var html = '<table class="standard-table"><thead><tr><th style="width:90px;">类型</th><th style="width:170px;">标题</th><th style="width:150px;">适用维度（可多选）</th><th style="width:220px;">判分依据（自动提取的全部要求）</th><th>内容 / 判断依据</th><th style="width:120px;">操作</th></tr></thead><tbody>';
-    for (var j = 0; j < list.length; j++) { var item = list[j]; var tone = item.type === 'case-good' ? 'var(--success)' : (item.type === 'case-bad' || item.kind === 'missed' ? 'var(--danger)' : 'var(--info)'); var srcBadge = item.sourceType === 'file' ? '📄 ' : (item.sourceType === 'url' ? '🔗 ' : ''); var srcActions = item.sourceType === 'file' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开</button><button class="btn-link" onclick="downloadKnowledgeFileById(\'' + item.id + '\')">下载</button>' : (item.sourceType === 'url' ? '<button class="btn-link" onclick="openKnowledgeFileById(\'' + item.id + '\')">打开链接</button>' : ''); html += '<tr id="knowledge-row-' + escHtml(item.id) + '"><td style="color:' + tone + ';font-weight:600;">' + escHtml(knowledgeTypeLabel(item.type)) + '<br><span style="font-size:11px;font-weight:400;">' + escHtml(knowledgeKindLabel(item.kind, item.summaryKind)) + '</span></td><td style="font-weight:600;">' + srcBadge + highlightSearchText(item.title, query) + '</td><td>' + highlightSearchText(getKnowledgeDimensions(item).join('\u3001'), query) + '</td><td style="font-size:12px;">' + '<div style="max-height:150px;overflow:auto;line-height:1.55;">' + ((item.coreKeywords && item.coreKeywords.length) ? '<div><span style="color:#b45309;font-weight:600;">明确要求(' + item.coreKeywords.length + ')：</span>' + highlightSearchText(item.coreKeywords.join('、'), query) + '</div>' : '') + ((item.auxKeywords && item.auxKeywords.length) ? '<div style="margin-top:3px;color:var(--gray-500);"><span style="color:var(--gray-400);">参考词(' + item.auxKeywords.length + ')：</span>' + highlightSearchText(item.auxKeywords.join('、'), query) + '</div>' : '') + '</div><div style="margin-top:4px;color:var(--gray-400);font-size:11px;">共 ' + ((item.coreKeywords || []).length + (item.auxKeywords || []).length) + ' 项要求</div>' + '</td><td style="white-space:pre-wrap;line-height:1.6;">' + highlightSearchText(item.content, query) + '</td><td class="' + editClass + '"><button class="btn-link" onclick="openKnowledgeModal(\'' + item.type + '\',\'' + item.id + '\')">修改</button>' + srcActions + '<button class="btn-link danger" onclick="deleteKnowledgeItem(\'' + item.id + '\')">删除</button></td></tr>'; }
-    return html + '</tbody></table>';
-  }
-  document.getElementById('caseLibraryWrap').innerHTML = renderRows(cases, caseQuery, 'case-edit-only');
-  document.getElementById('knowledgeLibraryWrap').innerHTML = renderRows(knowledges, knowledgeQuery, 'admin-only');
+  document.getElementById('caseLibraryWrap').innerHTML = qcKbTable(cases, caseQuery, 'case-edit-only', {});
+  // 搜索时用扁平列表（带所属文件夹）；无搜索时展示文件夹树
+  document.getElementById('knowledgeLibraryWrap').innerHTML = knowledgeQuery
+    ? qcKbTable(knowledges, knowledgeQuery, 'admin-only', { pick: qcKbCanPick(), showFolder: true })
+    : qcKbTreeHtml(knowledges);
   var badge = document.getElementById('knowledgeBadge'); if (badge) badge.textContent = KNOWLEDGE_BASE.length;
+  qcKbUpdateBatchBar();
 }
 function knowledgeItemMatches(text, item) {
   return !!knowledgeItemMatch(text, item);
@@ -6735,6 +9721,8 @@ function openKnowledgeModal(type, id) { if (!qcRequireKnowledgeEdit(type)) retur
   document.getElementById('knowledgeModalTitle').textContent = item ? '修改' + knowledgeTypeLabel(type) : '新增' + knowledgeTypeLabel(type);
   document.getElementById('knowledgeTitle').value = item ? item.title : '';
   document.getElementById('knowledgeKind').value = item ? (item.kind || 'can-do') : (type === 'case-bad' ? 'missed' : 'can-do');
+  var _bizSel = document.getElementById('knowledgeBiz');
+  if (_bizSel) _bizSel.value = qcNormBizScope(item ? item.biz : '邮件');
   setKnowledgeDimensionUI(item ? getKnowledgeDimensions(item) : ['综合']);
   document.getElementById('knowledgeContent').value = item ? item.content : '';
   var st = item ? (item.sourceType || 'text') : 'text';
@@ -6744,7 +9732,7 @@ function openKnowledgeModal(type, id) { if (!qcRequireKnowledgeEdit(type)) retur
   renderKnowledgeFileStatus(); onKnowledgeSourceChange();
   document.getElementById('knowledgeDuplicateHint').style.display = 'none';
   document.getElementById('knowledgeModal').classList.add('show');
-  ['knowledgeTitle', 'knowledgeContent', 'knowledgeDimension', 'knowledgeKind'].forEach(function(id) { document.getElementById(id).oninput = function(){ checkKnowledgeDuplicate(); previewKnowledgeHits(); }; document.getElementById(id).onchange = function(){ checkKnowledgeDuplicate(); previewKnowledgeHits(); }; });
+  ['knowledgeTitle', 'knowledgeContent', 'knowledgeDimension', 'knowledgeKind', 'knowledgeBiz'].forEach(function(id) { var el = document.getElementById(id); if (!el) return; el.oninput = function(){ checkKnowledgeDuplicate(); previewKnowledgeHits(); }; el.onchange = function(){ checkKnowledgeDuplicate(); previewKnowledgeHits(); }; });
   previewKnowledgeHits();
 }
 function closeKnowledgeModal() { document.getElementById('knowledgeModal').classList.remove('show'); }
@@ -6773,7 +9761,7 @@ function saveKnowledgeItem() { if (!qcRequireKnowledgeEdit(document.getElementBy
   var title = document.getElementById('knowledgeTitle').value.trim();
   var content = document.getElementById('knowledgeContent').value.trim();
   var dims = getSelectedKnowledgeDimensions();
-  var item = { id: id || 'kb-' + type + '-' + Date.now(), type: type, kind: document.getElementById('knowledgeKind').value || 'can-do', title: title, dimension: dims.join('\u3001'), dimensions: dims, keywords: [], coreKeywords: [], auxKeywords: [], content: content, sourceType: sourceType };
+  var item = { id: id || 'kb-' + type + '-' + Date.now(), type: type, kind: document.getElementById('knowledgeKind').value || 'can-do', biz: qcNormBizScope((document.getElementById('knowledgeBiz') || {}).value), title: title, dimension: dims.join('\u3001'), dimensions: dims, keywords: [], coreKeywords: [], auxKeywords: [], content: content, sourceType: sourceType };
   if (!title) { showToast('请填写标题', 'error'); return; }
   if (sourceType === 'file') {
     if (!pendingKnowledgeFile) { showToast('请先选择要上传的本地文档', 'error'); return; }
@@ -6793,25 +9781,36 @@ function saveKnowledgeItem() { if (!qcRequireKnowledgeEdit(document.getElementBy
   var similar = findSimilarKnowledge(item);
   if (similar.length && !window.confirm('发现 ' + similar.length + ' 条可能重合的知识，是否仍然保存？点击取消可返回查看相应知识。')) { showKnowledgeDuplicateHint(similar); return; }
   var oldItem = null; for (var oi = 0; oi < KNOWLEDGE_BASE.length; oi++) if (KNOWLEDGE_BASE[oi].id === id) oldItem = KNOWLEDGE_BASE[oi];
+  // 【20261125a·需求1】编辑时保留所属文件夹；记录更新时间供版本追溯
+  item.folderId = oldItem ? (oldItem.folderId || '') : '';
+  item.createdAt = oldItem ? (oldItem.createdAt || new Date().toISOString()) : new Date().toISOString();
+  item.updatedAt = new Date().toISOString();
   if (oldItem && oldItem.fileCloudPath && sourceType !== 'file') { try { if (cloudApp && cloudApp.storage) cloudApp.storage.from('qc-appeals').delete(oldItem.fileCloudPath).catch(function(){}); } catch (e) {} }
   var found = false;
   for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) { KNOWLEDGE_BASE[i] = item; found = true; break; }
   if (!found) KNOWLEDGE_BASE.push(item);
+  // 【20261125a·需求4】版本快照：每次保存知识都记一条（含变更标题）
+  qcKbSnapshot(oldItem ? '修改知识' : '新增知识', [title]);
   closeKnowledgeModal(); renderKnowledgeBase();
   try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
   scheduleSensitiveWordsRefresh();
+  // 【20261125b】先把知识落进云端独立小行（否则只重跑质检、知识没同步，刷新就丢）
+  qcKbCloudSave();
   if (rawData.length) { runQualityCheck(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求，正在重新质检全部数据', 'info'); }
-  else { cloudSaveState(); showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求', 'success'); }
+  else { showToast('知识已保存，提取 ' + item.coreKeywords.length + ' 项要求', 'success'); }
 }
 function deleteKnowledgeItem(id) { var _it = null; for (var _k = 0; _k < KNOWLEDGE_BASE.length; _k++) if (KNOWLEDGE_BASE[_k].id === id) _it = KNOWLEDGE_BASE[_k]; if (!_it) return; if (!qcRequireKnowledgeEdit(_it.type)) return;
   if (!requireCloudAdmin()) return;
   var item = null; for (var i = 0; i < KNOWLEDGE_BASE.length; i++) if (KNOWLEDGE_BASE[i].id === id) item = KNOWLEDGE_BASE[i];
   if (!item || !confirm('确认删除“' + item.title + '”？删除后会重新质检全部已有数据。')) return;
   if (item.fileCloudPath && cloudApp && cloudApp.storage) { try { cloudApp.storage.from('qc-appeals').delete(item.fileCloudPath).catch(function(){}); } catch (e) {} }
+  qcKbMarkDeleted(id);   // 【20261125b】写墓碑：删掉的不会被云端旧副本顶回来
   KNOWLEDGE_BASE = KNOWLEDGE_BASE.filter(function(k) { return k.id !== id; });
+  qcKbSnapshot('删除知识', [item.title || '']);
   try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
   renderKnowledgeBase(); scheduleSensitiveWordsRefresh();
-  if (rawData.length) { runQualityCheck(); showToast('知识已删除，正在重新质检全部数据', 'info'); } else { cloudSaveState(); showToast('知识已删除并同步云端', 'success'); }
+  qcKbCloudSave('知识已删除并同步云端');
+  if (rawData.length) { runQualityCheck(); showToast('知识已删除，正在重新质检全部数据', 'info'); }
 }
 function exportKnowledgeBase() {
   var blob = new Blob([JSON.stringify({ version: '1.0', exportTime: new Date().toISOString(), knowledgeBase: KNOWLEDGE_BASE }, null, 2)], { type: 'application/json' });
@@ -6829,7 +9828,8 @@ function uploadKnowledgeFile(file) {
   if (!cloudApp || !cloudApp.storage || typeof cloudApp.storage.from !== 'function') return Promise.reject(new Error('云端附件存储尚未初始化'));
   if (!file) return Promise.reject(new Error('未选择文件'));
   if (file.size > 20 * 1024 * 1024) return Promise.reject(new Error('单个文档不能超过 20MB'));
-  if (!/^image\/(png|jpeg|jpg|gif|webp)$/.test(file.type) && !/^application\/(pdf|msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.document|vnd\.ms-excel|vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet)$/.test(file.type) && file.type !== 'application/vnd.ms-excel' && file.type !== 'text/plain' && file.type !== '') return Promise.reject(new Error('仅支持 PDF/Word/Excel/图片/TXT'));
+  // 【20261125a·需求1】支持 Markdown / 纯文本知识（截图里的 S01_xx.md 场景包）
+  if (!/^image\/(png|jpeg|jpg|gif|webp)$/.test(file.type) && !/^text\//.test(file.type) && !/^application\/(pdf|msword|vnd\.openxmlformats-officedocument\.wordprocessingml\.document|vnd\.ms-excel|vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet)$/.test(file.type) && file.type !== 'application/vnd.ms-excel' && file.type !== '') return Promise.reject(new Error('仅支持 PDF/Word/Excel/图片/TXT/Markdown'));
   var bucket = cloudApp.storage.from('qc-appeals');
   var safeName = String(file.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
   var path = 'knowledge/' + Date.now() + '-' + safeName;
@@ -6863,6 +9863,77 @@ function downloadKnowledgeFile(item) {
 }
 function openKnowledgeFileById(id) { openKnowledgeFile(findKnowledgeById(id)); }
 function downloadKnowledgeFileById(id) { downloadKnowledgeFile(findKnowledgeById(id)); }
+
+// 【20261125a·需求1】批量导入知识文档：.md / .txt / .csv 直接读正文入库，PDF/Word/Excel/图片走附件；
+// 一次可选多个文件，统一归入指定文件夹（对应截图：01_场景包 / S01_…S18_*.md）
+function qcKbOpenImport() {
+  if (!isAdminMode()) { showToast('批量导入需要管理员权限', 'error'); return; }
+  qcKbRefreshFolderParentOptions('', '', 'kbImportFolder');
+  var inp = document.getElementById('kbImportFiles'); if (inp) inp.value = '';
+  var st = document.getElementById('kbImportStatus'); if (st) st.textContent = '';
+  document.getElementById('kbImportModal').classList.add('show');
+}
+function qcKbCloseImport() { var m = document.getElementById('kbImportModal'); if (m) m.classList.remove('show'); }
+function qcKbIsTextFile(file) { return /\.(md|markdown|txt|csv)$/i.test(String(file && file.name || '')) || /^text\//.test(String(file && file.type || '')); }
+function qcKbReadFileText(file) {
+  return new Promise(function(resolve, reject) {
+    try {
+      var r = new FileReader();
+      r.onload = function() { resolve(String(r.result || '')); };
+      r.onerror = function() { reject(new Error('读取失败')); };
+      r.readAsText(file, 'utf-8');
+    } catch (e) { reject(e); }
+  });
+}
+function qcKbImportFiles() {
+  if (!isAdminMode()) { showToast('批量导入需要管理员权限', 'error'); return; }
+  var inp = document.getElementById('kbImportFiles');
+  var files = (inp && inp.files) ? Array.prototype.slice.call(inp.files) : [];
+  if (!files.length) { showToast('请选择要导入的文档', 'error'); return; }
+  var folderId = String((document.getElementById('kbImportFolder') || {}).value || '');
+  var status = document.getElementById('kbImportStatus');
+  var titles = [], done = 0, failed = 0, now = new Date().toISOString();
+  function pushItem(base, file) {
+    var req = kbExtractRequirements({ title: base.title, content: [base.content || '', base.fileName || ''].join('\n') });
+    base.coreKeywords = req.core; base.auxKeywords = req.aux; base.keywords = req.keywords;
+    KNOWLEDGE_BASE.push(base);
+    titles.push(base.title); done++;
+  }
+  function step(i) {
+    if (i >= files.length) { finish(); return; }
+    var file = files[i];
+    if (status) status.textContent = '正在导入 ' + (i + 1) + ' / ' + files.length + '：' + file.name;
+    var title = String(file.name || '').replace(/\.[^.]+$/, '').trim() || ('知识-' + (i + 1));
+    var base = { id: 'kb-knowledge-' + Date.now() + '-' + Math.floor(Math.random() * 100000) + '-' + i, type: 'knowledge', kind: 'can-do', biz: '邮件', title: title, dimension: '综合', dimensions: ['综合'], keywords: [], coreKeywords: [], auxKeywords: [], folderId: folderId, createdAt: now, updatedAt: now };
+    if (qcKbIsTextFile(file)) {
+      qcKbReadFileText(file).then(function(text) {
+        base.sourceType = 'text';
+        base.content = text || '';
+        pushItem(base, file);
+        step(i + 1);
+      }).catch(function() { failed++; step(i + 1); });
+    } else {
+      uploadKnowledgeFile(file).then(function(meta) {
+        base.sourceType = 'file';
+        base.fileCloudPath = meta.path; base.fileName = meta.name; base.fileSize = meta.size; base.fileType = meta.type;
+        base.content = '【详见附件文档：' + (meta.name || '未命名文件') + '】';
+        pushItem(base, file);
+        step(i + 1);
+      }).catch(function() { failed++; step(i + 1); });
+    }
+  }
+  function finish() {
+    qcKbCloseImport();
+    if (!done) { showToast('导入失败：' + failed + ' 个文件无法读取', 'error'); return; }
+    qcKbSnapshot('批量导入知识 ' + done + ' 条', titles);
+    try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+    renderKnowledgeBase(); scheduleSensitiveWordsRefresh();
+    var msg = '已导入 ' + done + ' 条知识到「' + (qcKbFolderPath(folderId) || '未分类') + '」' + (failed ? '，失败 ' + failed + ' 个' : '');
+    qcKbCloudSave(msg);   // 【20261125b】导入即落云端小行
+    if (rawData.length) { runQualityCheck(); showToast(msg + '，正在重新质检全部数据', 'info'); }
+  }
+  step(0);
+}
 
 // ============================================================
 // 渲染：质检标准（可编辑）
@@ -7387,6 +10458,235 @@ function hideProgress() { document.getElementById('progressOverlay').classList.r
 // ============================================================
 // 数据导出/导入
 // ============================================================
+// ============================================================
+// 【R37】每日自动备份：IndexedDB 保留最近 7 天完整快照
+// ------------------------------------------------------------
+// 背景：云端停用期间数据只在浏览器里，误删/写坏无法恢复；且免费版后端普遍没有自动备份。
+// 做法：每天首次打开自动存一份完整快照（含回邮原文）到 IndexedDB，保留 7 天，
+//       与 localStorage 缓存（单份、最新）互补——缓存防丢，快照防写坏。
+//       IndexedDB 配额远大于 localStorage，不占用 5MB 缓存空间。
+// ============================================================
+var QC_SNAP_DB = 'qc_snapshot_db';
+var QC_SNAP_STORE = 'daily';
+var QC_SNAP_KEEP = 7;
+var QC_SNAP_LAST_KEY = 'qc_snap_last_day_v1';
+
+function qcSnapOpenDb() {
+  return new Promise(function (resolve, reject) {
+    if (!window.indexedDB) { reject(new Error('当前浏览器不支持 IndexedDB')); return; }
+    var req;
+    try { req = indexedDB.open(QC_SNAP_DB, 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = function (e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(QC_SNAP_STORE)) db.createObjectStore(QC_SNAP_STORE, { keyPath: 'day' });
+    };
+    req.onsuccess = function (e) { resolve(e.target.result); };
+    req.onerror = function (e) { reject((e.target && e.target.error) || new Error('打开备份库失败')); };
+  });
+}
+
+function qcSnapToday() {
+  var d = new Date();
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+
+// 打包当前内存数据（results 去回邮，与云端格式一致，避免体积翻倍）
+function qcSnapBuildJson() {
+  try {
+    var slim = results.map(function (r) {
+      var c = {};
+      for (var k in r) { if (k !== 'reply' && k !== '_part') c[k] = r[k]; }
+      return c;
+    });
+    return JSON.stringify({
+      schemaVersion: '3.2',
+      qcLogicVersion: QC_LOGIC_VERSION,
+      rawData: rawData,
+      results: slim,
+      orgData: ORG_DATA,
+      standards: STANDARDS,
+      gradeRules: GRADE_RULES,
+      knowledgeBase: KNOWLEDGE_BASE,
+      snapAt: Date.now()
+    });
+  } catch (e) { return ''; }
+}
+
+// 存当天快照；force=false 时同一天只存一次
+function qcSnapSave(force) {
+  var day = qcSnapToday();
+  if (!force) {
+    try { if (localStorage.getItem(QC_SNAP_LAST_KEY) === day) return Promise.resolve('skipped'); } catch (e) {}
+  }
+  if ((!results || !results.length) && (!rawData || !rawData.length)) return Promise.resolve('empty');
+  var json = qcSnapBuildJson();
+  if (!json) return Promise.resolve('empty');
+  var enc = json, plain = false;
+  try {
+    if (typeof LZString !== 'undefined') { enc = LZString.compressToBase64(json); plain = false; }
+    else { plain = true; }
+  } catch (e) { enc = json; plain = true; }
+  return qcSnapOpenDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(QC_SNAP_STORE, 'readwrite');
+      tx.objectStore(QC_SNAP_STORE).put({
+        day: day, at: Date.now(), count: (results || []).length,
+        size: enc.length, plain: plain, enc: enc
+      });
+      tx.oncomplete = function () { try { db.close(); } catch (e) {} resolve(day); };
+      tx.onerror = function (e) { try { db.close(); } catch (e2) {} reject((e.target && e.target.error) || new Error('写入失败')); };
+    });
+  }).then(function (d) {
+    try { localStorage.setItem(QC_SNAP_LAST_KEY, d); } catch (e) {}
+    try { qcSnapPrune(); } catch (e) {}
+    return d;
+  }).catch(function (e) { try { console.warn('[QC] 备份快照失败：' + ((e && e.message) || e)); } catch (e2) {} return 'fail'; });
+}
+
+function qcSnapList() {
+  return qcSnapOpenDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var out = [];
+      var tx = db.transaction(QC_SNAP_STORE, 'readonly');
+      var req = tx.objectStore(QC_SNAP_STORE).openCursor();
+      req.onsuccess = function (e) {
+        var c = e.target.result;
+        if (c) {
+          out.push({ day: c.value.day, at: c.value.at, count: c.value.count, size: c.value.size });
+          c.continue();
+        } else {
+          try { db.close(); } catch (e2) {}
+          out.sort(function (a, b) { return String(b.day).localeCompare(String(a.day)); });
+          resolve(out);
+        }
+      };
+      req.onerror = function () { try { db.close(); } catch (e3) {} reject(new Error('读取备份列表失败')); };
+    });
+  }).catch(function () { return []; });
+}
+
+function qcSnapPrune() {
+  return qcSnapList().then(function (list) {
+    if (!list || list.length <= QC_SNAP_KEEP) return 0;
+    var drop = list.slice(QC_SNAP_KEEP);
+    return qcSnapOpenDb().then(function (db) {
+      return new Promise(function (resolve) {
+        var tx = db.transaction(QC_SNAP_STORE, 'readwrite');
+        var st = tx.objectStore(QC_SNAP_STORE);
+        drop.forEach(function (x) { try { st.delete(x.day); } catch (e) {} });
+        tx.oncomplete = function () { try { db.close(); } catch (e) {} resolve(drop.length); };
+        tx.onerror = function () { try { db.close(); } catch (e) {} resolve(0); };
+      });
+    });
+  }).catch(function () { return 0; });
+}
+
+function qcSnapGet(day) {
+  return qcSnapOpenDb().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(QC_SNAP_STORE, 'readonly');
+      var req = tx.objectStore(QC_SNAP_STORE).get(day);
+      req.onsuccess = function (e) { try { db.close(); } catch (e2) {} resolve(e.target.result || null); };
+      req.onerror = function () { try { db.close(); } catch (e3) {} reject(new Error('读取快照失败')); };
+    });
+  });
+}
+
+function qcSnapDecode(rec) {
+  if (!rec || !rec.enc) return null;
+  var json = rec.enc;
+  if (!rec.plain) {
+    try { json = LZString.decompressFromBase64(rec.enc); } catch (e) { json = ''; }
+  }
+  if (!json) return null;
+  try { return JSON.parse(json); } catch (e) { return null; }
+}
+
+// 从快照恢复：先导出当前数据保底，再覆盖内存并尝试写云端
+function qcSnapRestore(day) {
+  if (typeof requireAdmin === 'function' && !requireAdmin('从备份恢复')) return;
+  var ok = false;
+  try { ok = window.confirm('要把 ' + day + ' 的备份恢复到当前吗？\n\n· 恢复前会先自动导出一份当前数据做保底\n· 恢复后页面数据会被替换成那天的状态'); } catch (e) { ok = false; }
+  if (!ok) return;
+  qcSnapGet(day).then(function (rec) {
+    var data = qcSnapDecode(rec);
+    if (!data || !data.results || !data.rawData) throw new Error('该备份无法解析或已损坏');
+    try { if (typeof exportAllData === 'function') exportAllData(); } catch (e) {}
+    try { importAllData(data, 'local'); } catch (e) { throw new Error('导入失败：' + ((e && e.message) || e)); }
+    try { renderDetailTable(); } catch (e) {}
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+    try { qcSaveCacheFromPayload(cloudStatePayload()); } catch (e) {}
+    try { cloudSaveState().catch(function () {}); } catch (e) {}
+    try { qcSnapRender(); } catch (e) {}
+    showToast('已恢复到 ' + day + ' 的备份（' + (data.results || []).length + ' 条）', 'success');
+  }).catch(function (e) {
+    showToast('恢复失败：' + ((e && e.message) || e), 'error');
+  });
+}
+
+function qcSnapFmtSize(n) {
+  if (!n) return '-';
+  return (n > 1048576) ? (n / 1048576).toFixed(2) + ' MB' : Math.round(n / 1024) + ' KB';
+}
+
+function qcSnapRender() {
+  var box = document.getElementById('snapBody');
+  if (!box) return;
+  box.innerHTML = '<div style="font-size:12px;color:var(--gray-600);line-height:1.8;margin-bottom:12px;">每天首次打开会自动存一份完整快照（含回邮原文），保留最近 ' + QC_SNAP_KEEP + ' 天。快照存在本机浏览器，用于误删或数据写坏时回滚；要防电脑故障，请另外定期点「导出数据」存文件。</div>';
+  qcSnapList().then(function (list) {
+    if (!list.length) {
+      box.innerHTML += '<div style="padding:16px;text-align:center;color:var(--gray-500);font-size:13px;border:1px dashed var(--gray-300);border-radius:6px;">还没有任何快照，点下方「立即备份当前数据」创建第一份</div>';
+      return;
+    }
+    var html = '<div style="display:flex;flex-direction:column;gap:8px;">';
+    list.forEach(function (x) {
+      html += '<div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--gray-200);border-radius:6px;font-size:13px;">'
+        + '<span style="font-weight:600;min-width:96px;">' + escHtml(x.day) + '</span>'
+        + '<span style="color:var(--gray-600);">' + x.count + ' 条</span>'
+        + '<span style="color:var(--gray-500);font-size:12px;">' + qcSnapFmtSize(x.size) + '</span>'
+        + '<span style="flex:1;"></span>'
+        + '<button class="btn btn-outline btn-sm" onclick="qcSnapRestore(\'' + x.day + '\')">恢复</button>'
+        + '</div>';
+    });
+    html += '</div>';
+    box.innerHTML += html;
+  });
+}
+
+function qcSnapOpenPanel() {
+  var m = document.getElementById('snapModal');
+  if (m) m.classList.add('active');
+  try { qcSnapRender(); } catch (e) {}
+}
+
+function qcSnapClose() {
+  var m = document.getElementById('snapModal');
+  if (m) m.classList.remove('active');
+}
+
+function qcSnapSaveNow() {
+  var b = document.getElementById('snapSaveBtn');
+  if (b) { b.disabled = true; b.textContent = '正在备份…'; }
+  qcSnapSave(true).then(function (r) {
+    if (b) { b.disabled = false; b.textContent = '立即备份当前数据'; }
+    if (r === 'empty') showToast('当前没有数据可备份', 'error');
+    else if (r === 'fail') showToast('备份失败，请检查浏览器存储空间', 'error');
+    else { showToast('已备份 ' + (results || []).length + ' 条数据（本机快照）', 'success'); try { qcSnapRender(); } catch (e) {} }
+  });
+}
+
+// 启动时自动执行：每天一次；延迟等首屏数据加载完
+function qcSnapAutoDaily() {
+  try {
+    setTimeout(function () {
+      qcSnapSave(false).then(function (r) {
+        if (r && r !== 'skipped' && r !== 'empty' && r !== 'fail') {
+          try { console.log('[QC] 今日快照已保存：' + r); } catch (e) {}
+        }
+      });
+    }, 6000);
+  } catch (e) {}
+}
 function exportAllData() {
   if (rawData.length === 0 && results.length === 0) {
     showToast('暂无数据可导出', 'error');
@@ -7443,6 +10743,25 @@ function importAllData(data, source) {
     // 回邮按稳定键从已对齐的 rawData 取（qcRealignData 已保证同索引同源），不再信任外部索引
     var _src = data.rawData[i];
     if (_src && typeof _src.reply === 'string') { r.reply = _src.reply; }
+    // 【R20】AI 主判分：云端旧规则分在未定型前一律显示「待AI判分」，绝不残留规则分。
+    // 例外：已有申诉终裁(appealAdjusted) / 参考案例保留原判（人工终裁优先于 AI）。
+    // 【R23 需求1】非考核单（是否考核=否）不参与 AI 判分，保留原结果，不标「待AI判分」。
+    if (typeof qcAiPrimaryEnabled === 'function' && qcAiPrimaryEnabled()
+        && (typeof isAssessedResult !== 'function' || isAssessedResult(r))
+        && !r.aiFinalized && !r.appealAdjusted && !isReferenceCaseResult(r) && r.grade !== '无法质检') {
+      var _pd = qcAiPendingResult(r);
+      // 保留身份/统计相关字段与申诉对象，仅清空分数
+      _pd.account = r.account; _pd.agent = r.agent; _pd.order = r.order; _pd.date = r.date; _pd.reply = r.reply;
+      _pd._index = i; _pd.bizType = r.bizType; _pd.socType = r.socType; _pd.qcWeek = r.qcWeek;
+      _pd.batchId = r.batchId; _pd.processCheck = r.processCheck; _pd.refundReg = r.refundReg;
+      _pd.issueFeedback = r.issueFeedback; _pd.replenishment = r.replenishment; _pd.orderAmount = r.orderAmount;
+      _pd.fbmDefectRate = r.fbmDefectRate; _pd.appeal = r.appeal; _pd.recordKey = r.recordKey;
+      _pd.returnInfo = r.returnInfo; _pd.azInfo = r.azInfo; _pd.negReview = r.negReview; _pd.custEmotion = r.custEmotion;
+      _pd.claimStatus = r.claimStatus; _pd.odrImpact = r.odrImpact; _pd.claimDate = r.claimDate;
+      _pd.buyerIssue = r.buyerIssue; _pd.buyerNote = r.buyerNote; _pd.reviewTime = r.reviewTime;
+      _pd.reviewContent = r.reviewContent; _pd.reviewRating = r.reviewRating; _pd.appealContent = r.appealContent;
+      r = _pd;
+    }
     return normalizeResultAppeal(r);
   });
   // 【需求4·配置保护】orgData 必须是非空数组才覆盖，空数组/空对象一律忽略，防止组织架构被清空。
@@ -7454,29 +10773,36 @@ function importAllData(data, source) {
   if (data.standards && data.standards.length) { STANDARDS = data.standards; }
   if (data.gradeRules && data.gradeRules.length) { GRADE_RULES = data.gradeRules; }
   // 【2026-11-23 周度统计】随主数据并线：按 id 合并统计记录，改过日期的以 editedAt 新者为准
-  try { qcMergeWeeklyStats(data.weeklyStats); qcApplyEditedBatchDates(results, rawData); } catch (e) {}
-  // 【需求4·知识库不回退】
-  // 云端权威来源：用云端知识库刷新内存，并写入本地权威副本。
-  // 本地来源（缓存/URL快照）：不信任其携带的知识库，优先用本地权威副本恢复内存，杜绝回退内置旧版。
-  if (__fromCloud && data.knowledgeBase && data.knowledgeBase.length) {
-    // 【20261122b·需求3】云端 KB 只有比本地权威副本"更新"才采纳：比较最新 updatedAt/createdAt，
-    // 其次条数。防止旧批次云端写入（如工具端只带 4 条旧知识）把本地新版知识库顶回旧版本。
-    function __kbStamp(arr) {
-      var t = '', c = 0;
-      try { for (var i = 0; i < arr.length; i++) { var it = arr[i] || {}; var s = String(it.updatedAt || it.createdAt || ''); if (s > t) t = s; c++; } } catch (e) {}
-      return { t: t, c: c };
-    }
-    var __kbCloud = __kbStamp(data.knowledgeBase), __kbLocal = { t: '', c: 0 };
-    try { var _authKb = JSON.parse(localStorage.getItem('qc_kb_authoritative_v1') || 'null'); if (Array.isArray(_authKb)) __kbLocal = __kbStamp(_authKb); } catch (e) {}
-    var __kbCloudNewer = (__kbLocal.c === 0) || (__kbCloud.t > __kbLocal.t) || (__kbCloud.t === __kbLocal.t && __kbCloud.c > __kbLocal.c);
-    if (__kbCloudNewer) {
-      KNOWLEDGE_BASE = data.knowledgeBase;
-      try { localStorage.setItem('qc_kb_authoritative_v1', JSON.stringify(KNOWLEDGE_BASE)); } catch (e) {}
-    }
+  // 【20261124e】先并线删除墓碑（weeklyDeleted），再合并统计记录
+  try { qcWsMergeDeleted(data.weeklyDeleted); qcMergeWeeklyStats(data.weeklyStats); qcApplyEditedBatchDates(results, rawData); } catch (e) {}
+  try { qcMergeKbFolders(data.kbFolders); qcMergeKbVersions(data.kbVersions); } catch (e) {}
+  // 【20261125b·知识库并集合并】旧逻辑用「最大时间戳 + 条数」判断谁新，删除没有时间戳 → 删掉的被云端旧副本顶回来；
+  // 条数多的一方还会把「刚新增、还没写进云端」的条目冲掉。现在改为：墓碑 + 逐条时间戳并集，只增不丢。
+  if (data.knowledgeBase && data.knowledgeBase.length) {
+    try {
+      qcKbMergeDeleted(data.kbDeleted);
+      var __baseKb = qcKbLocalAuthoritative();
+      if (!__baseKb) __baseKb = __fromCloud ? [] : KNOWLEDGE_BASE;
+      var __mergedKb = qcKbMergeLists(__baseKb, data.knowledgeBase);
+      // 本机权威副本/当轮会话里更新的条目必须保留（例如刚新增的敏感词、AZ SOP）
+      if (Array.isArray(KNOWLEDGE_BASE) && KNOWLEDGE_BASE.length) __mergedKb = qcKbMergeLists(__mergedKb, KNOWLEDGE_BASE);
+      var __beforeIds = {}, __i0;
+      for (__i0 = 0; __i0 < KNOWLEDGE_BASE.length; __i0++) __beforeIds[KNOWLEDGE_BASE[__i0].id] = true;
+      var __localOnly = 0;
+      for (__i0 = 0; __i0 < __mergedKb.length; __i0++) if (!__beforeIds[__mergedKb[__i0].id]) __localOnly++;
+      KNOWLEDGE_BASE = __mergedKb;
+      try { if (typeof qcPersistKbLocal === 'function') qcPersistKbLocal(); } catch (e) {}
+      // 云端缺了本机独有的知识 → 立刻补写云端，避免下次又被旧副本覆盖
+      var __cloudIds = {}, __ci;
+      for (__ci = 0; __ci < data.knowledgeBase.length; __ci++) if (data.knowledgeBase[__ci]) __cloudIds[data.knowledgeBase[__ci].id] = true;
+      var __needPush = __localOnly > 0;
+      for (__ci = 0; __ci < KNOWLEDGE_BASE.length && !__needPush; __ci++) if (!__cloudIds[KNOWLEDGE_BASE[__ci].id]) __needPush = true;
+      if (__needPush) setTimeout(function() { try { qcKbCloudSave(); } catch (e) {} }, 800);
+    } catch (e) {}
   } else if (!__fromCloud) {
     try {
-      var _kbLocal = localStorage.getItem('qc_kb_authoritative_v1');
-      if (_kbLocal) { var _kbObj = JSON.parse(_kbLocal); if (Array.isArray(_kbObj) && _kbObj.length) KNOWLEDGE_BASE = _kbObj; }
+      var _kbLocal = localStorage.getItem(QC_KB_AUTH_KEY);
+      if (_kbLocal) { var _kbObj = JSON.parse(_kbLocal); if (Array.isArray(_kbObj) && _kbObj.length) KNOWLEDGE_BASE = qcKbMergeLists(_kbObj, KNOWLEDGE_BASE); }
     } catch (e) {}
   }
   var kbBackfilled = ensureKnowledgeRequirements();
@@ -7495,6 +10821,8 @@ function importAllData(data, source) {
   // 「质检逻辑」板块的数字与当前明细 / 标准 / 知识库联动：重跑完成后同步刷新（若已渲染过）
   if (document.getElementById('qcLogicScoreTableWrap')) renderQcLogic();
   renderStandard();
+  try { qcAiProviderInit(); } catch (e) {}
+  try { qcOfflineBanner(); } catch (e) {}
   renderKnowledgeBase();
   if (kbBackfilled > 0 && rawData.length > 0) { showToast('已为 ' + kbBackfilled + ' 条知识自动补全判分依据，正在重跑质检', 'info'); runQualityCheck(); return; }
   // 质检引擎/质检标准升级迁移：云端明细由旧版判分逻辑或旧标准生成时，自动重跑全部质检（申诉记录保留），
@@ -7603,9 +10931,13 @@ document.addEventListener('DOMContentLoaded', function() {
   // 【20261122c·修复看板归零】先用本地缓存秒开渲染，看板立刻有真实数据（不再是 0）；
   // 随后单例拉云端：hash 相同不重绘（无跳动），不同才更新为最新。二者共用一次 main 下载。
   try { qcCleanupLegacyStorage(); } catch (e) {} // 【20261122e】清理旧版遗留键，释放 localStorage 空间
+  try { qcKbLoadDeleted(); } catch (e) {}       // 【20261125b】先恢复删除墓碑，避免旧副本把删掉的知识带回来
   try { qcLoadCacheFast(); } catch (e) {}
   try { setTimeout(function(){ qcFetchLatestAndRefresh(false); }, 60); } catch (e) {}
+  // 【20261125b】知识库独立小行：与主数据解耦，知识改动不再依赖 4MB 整包写入
+  try { setTimeout(function(){ qcKbCloudLoad(); }, 1200); } catch (e) {}
   try { qcAuthBoot(); } catch (e) { console.warn('auth boot failed', e); }
+  try { qcSnapAutoDaily(); } catch (e) {}
   document.getElementById('detailModal').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
   document.getElementById('recordModal').addEventListener('click', function(e) { if (e.target === this) closeRecordModal(); });
   document.getElementById('uploadModal').addEventListener('click', function(e) { if (e.target === this) closeUploadModal(); });
@@ -7764,10 +11096,16 @@ function qcRcBodyHtml(body) {
   }
   return html;
 }
-function rcBubbleHtml(x) {
-  var isCust = x.role === 'customer';
+function rcBubbleHtml(x, focus) {  var isCust = x.role === 'customer';
   var name = x.name || (isCust ? '客户' : '客服');
-  var isBot = /^(robot|机器人|自动回复)$/i.test(name);
+  var isBot = /^(robot|bot|机器人|自动回复|智能回复)$/i.test(String(name || '').trim());
+  // 【R30】只高亮定位到的那一封：不达标/平台禁忌=红，优秀=黄
+  var hl = '';
+  if (focus && focus.body) {
+    var _roleOk = !focus.role || (focus.role === '客户来信' ? isCust : !isCust);
+    if (_roleOk && qcReplyMsgMatch(x.body, focus.body)) hl = focus.kind === 'good' ? ' rc-hl-good' : ' rc-hl-bad';
+  }
+  var hlTag = hl ? '<span class="rc-hl-tag ' + (focus.kind === 'good' ? 'rc-hl-tag-good' : 'rc-hl-tag-bad') + '">' + (focus.kind === 'good' ? '🟡 优秀依据邮件' : '🔴 问题邮件') + '</span>' : '';
   var statusHtml = '';
   if (x.status === '未回复') statusHtml = '<span class="rc-status rc-unreplied">未回复</span>';
   else if (x.status === '已回复') statusHtml = '<span class="rc-status rc-replied">已回复</span>';
@@ -7775,15 +11113,28 @@ function rcBubbleHtml(x) {
   var metaTail = x.pullTime
     ? '（拉取时间：' + qcEsc(x.pullTime) + (statusHtml ? '，' + statusHtml : '') + '）'
     : (statusHtml ? ' ' + statusHtml : '');
-  return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + (isBot ? ' rc-bot' : '') + '">'
-    + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span> <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
+  return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + (isBot ? ' rc-bot' : '') + hl + '">'
+    + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span>' + hlTag + (isBot ? '<span style="margin-left:6px;font-size:11px;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;border-radius:4px;padding:1px 5px;">机器人自动回复 · 不参与质检</span>' : '') + ' <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
     + '<div class="rc-bubble">' + qcRcBodyHtml(x.body) + '</div></div>';
 }
-function renderReplyChatHtml(text, boxId, agentNames) {
+// 【20261125f·需求】robot 消息：正常展示（与人工邮件一样出现在会话气泡里），不再隐藏；
+//   但是否参与质检由质检层决定——extractAgentReplies/qcReplyWithoutRobot 仍整块剔除 robot，不计样本、不判分。
+function qcRcIsRobotMsg(x) {
+  return !!(x && x.role !== 'customer' && /^(robot|bot|机器人|自动回复|智能回复)$/i.test(String(x.name || '').trim()));
+}
+function renderReplyChatHtml(text, boxId, agentNames, focus) {
   boxId = boxId || 'replyChat';
   var arr = parseReplyChatFull(text, agentNames);
   if (!arr.length) return '<div class="detail-msg-box">' + qcEsc(text || '') + '</div>';
-  return '<div class="rc-wrap" id="' + boxId + '"><div class="rc-all">' + arr.map(rcBubbleHtml).join('') + '</div></div>';
+  // 【20261125f】不再 filter robot：机器人邮件正常展示；气泡上标注「不参与质检」，判定层仍跳过它
+  var bar = '';
+  if (focus) {
+    bar = '<div class="rc-focus-bar ' + (focus.kind === 'good' ? 'rc-focus-good' : 'rc-focus-bad') + '">'
+      + (focus.kind === 'good' ? '🟡 已定位优秀依据邮件（仅标这一封）：' : '🔴 已定位问题邮件（仅标这一封）：')
+      + qcEsc(focus.refText || '')
+      + (focus.sentence ? '　「' + qcEsc(String(focus.sentence).substring(0, 120)) + '」' : '') + '</div>';
+  }
+  return '<div class="rc-wrap" id="' + boxId + '">' + bar + '<div class="rc-all">' + arr.map(function(x) { return rcBubbleHtml(x, focus); }).join('') + '</div></div>';
 }
 
 function rcToggle(id) { var el = document.getElementById(id); if (!el) return; el.style.display = (el.style.display === 'none' || !el.style.display) ? 'block' : 'none'; }
@@ -7834,6 +11185,31 @@ function qcRoleLabel(u) {
   var g = qcLeaderGroup(u.name);
   if (g) return '组长（' + g + '）';
   return '客服';
+}
+// 【R31】重判标识分级展示：
+//   full  —— 管理员 / 组长：完整看到「🆕本次」「🆕重判」、判分批次、重判前→本次分数对比；
+//   badge —— 客服：只看到「已重判」这一事实标记，看不到重判前的等级/分数（避免前后分数对比外泄）；
+//   none  —— 未登录：保持原样全展示（兼容旧模式/公共看板）。
+function qcRebatchLevel() {
+  try {
+    if (typeof AUTH === 'undefined' || !AUTH) return 'none';
+    if (AUTH.role === 'admin' || AUTH.role === 'leader') return 'full';
+    return 'badge';
+  } catch (e) { return 'none'; }
+}
+function qcCanSeeRebatch() { return qcRebatchLevel() !== 'badge'; }
+// 【R31】明细表等级列的重判角标：
+//   full/none → 「🆕本次」/「🆕重判」，title 带「重判前→本次」完整对比；
+//   badge     → 只有「已重判」，不带任何旧等级/旧分数（客服只看到最新结果）。
+function qcRebatchBadgeHtml(r) {
+  if (!r || !r.aiFinalized) return '';
+  var lv = qcRebatchLevel();
+  if (lv === 'badge') {
+    if (!r.aiPrev) return '';
+    return '<span class="ai-batch-tag" style="display:inline-block;margin-left:4px;padding:1px 5px;border-radius:4px;background:#f1f5f9;color:#475569;font-size:10px;white-space:nowrap;" title="该单已被重新判定，此处显示的是最新结果">已重判</span>';
+  }
+  if (!qcAiIsRecentBatch(r.aiBatch)) return '';
+  return '<span class="ai-batch-tag" style="display:inline-block;margin-left:4px;padding:1px 5px;border-radius:4px;background:#fee2e2;color:#b91c1c;font-size:10px;white-space:nowrap;" title="' + escHtml(qcAiPrevSummary(r)) + '">' + (r.aiPrev ? '🆕重判' : '🆕本次') + '</span>';
 }
 function qcCan(perm) {
   if (!AUTH) return false;
@@ -8713,7 +12089,7 @@ function qcOpenAppealInbox(bucket) {
   if (bucket === 'passed' || bucket === 'rejected') qcAppealMarkRead(qcAppealList(bucket), bucket);
   qcRenderAppealInbox();
   qcRefreshAppealBadges();
-  qcSyncAppealsFromCloud();   // 跨设备：拉一次云端最新申诉状态（节流 + 静默）
+  qcAppealDailyTick();   // 打开消息中心：仅在「今天 9 点后还没同步过」时才真正拉取，其余情况零流量
 }
 function qcCloseAppealInbox() {
   var box = document.getElementById('appealInboxModal');
@@ -8836,12 +12212,90 @@ function qcWithdrawAppeal(idx) {
   cloudSaveState().catch(function () {});
 }
 
-// ---------- 跨设备：打开消息中心时拉一次云端最新申诉状态 ----------
-// 只把 appeal 字段合并进本地 results（不重跑质检、不写回 main、不重绘表格），带节流与静默失败
-function qcSyncAppealsFromCloud() {
-  if (typeof cloudDb === 'undefined' || !cloudDb) return;
+// ---------- 跨设备：申诉数据「每天 9 点后同步一次」 ----------
+// 业务规则（2026-11-24 需求1）：
+//   · 申诉数据（待审核 / 申诉通过 / 申诉失败）不做实时刷新，一天只在 09:00 之后同步一次；
+//   · 当天已同步过就不再重复下载（不论成功与否都只尝试一次），
+//   · 若云端 updated_at 未变化（当天没有新增申诉）→ 连整包都不下载，次日也等于"无需刷新"。
+// 这样把申诉相关的出口流量从「每 20 秒 2.6MB」压到「每天 1 次探针 +（有变化才）1 次整包」。
+var QC_APPEAL_SYNC_PROMISE = null;
+var QC_APPEAL_DAY_KEY = 'qc_appeal_sync_day_v1';
+var QC_APPEAL_LAST_RESULT = '';        // 'ok' | 'fail'
+var QC_APPEAL_MAX_TRIES = 3;           // 同一天最多尝试 3 次（失败也不无限重试，避免把云端流量打穿）
+var QC_APPEAL_RETRY_GAP = 10 * 60 * 1000;
+function qcAppealTodayStr() {
+  var d = new Date();
+  return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2);
+}
+// 当天同步状态：{ date, tries, at, ok }（兼容旧的纯日期字符串）
+function qcAppealDayState() {
+  try {
+    var raw = localStorage.getItem(QC_APPEAL_DAY_KEY);
+    if (!raw) return { date: '', tries: 0, at: 0, ok: false };
+    if (raw.charAt(0) === '{') {
+      var o = JSON.parse(raw) || {};
+      return { date: String(o.date || ''), tries: parseInt(o.tries, 10) || 0, at: parseInt(o.at, 10) || 0, ok: !!o.ok };
+    }
+    return { date: String(raw), tries: 1, at: 0, ok: true };
+  } catch (e) { return { date: '', tries: 0, at: 0, ok: false }; }
+}
+function qcAppealDaySave(st) {
+  try { localStorage.setItem(QC_APPEAL_DAY_KEY, JSON.stringify(st)); } catch (e) {}
+}
+// 是否到了「今天的同步窗口」：09:00 之后，且今天还没成功同步过
+function qcAppealDailyDue() {
+  try {
+    if (new Date().getHours() < 9) return false;
+    var st = qcAppealDayState();
+    if (st.date !== qcAppealTodayStr()) return true;        // 新的一天：今天第一次
+    if (st.ok) return false;                                 // 今天已成功：当天不再同步
+    if (st.tries >= QC_APPEAL_MAX_TRIES) return false;       // 今天已尝试满 3 次：不再重试
+    return (Date.now() - st.at) >= QC_APPEAL_RETRY_GAP;      // 失败后间隔 10 分钟再试一次
+  } catch (e) { return false; }
+}
+// 每天只跑一次：同步申诉 + 审计日志（两者都是申诉相关数据）
+var QC_APPEAL_DAILY_BUSY = false;
+function qcAppealDailyTick(force) {
+  if (!force && !qcAppealDailyDue()) return Promise.resolve(false);
+  if (QC_APPEAL_DAILY_BUSY) return Promise.resolve(false);
+  QC_APPEAL_DAILY_BUSY = true;
+  var today = qcAppealTodayStr();
+  QC_APPEAL_LAST_RESULT = '';
+  function finish() {
+    // 无论成功失败都要记一次「今天试过了」，否则每分钟重试会把出口流量再次打爆
+    var st = qcAppealDayState();
+    if (st.date !== today) st = { date: today, tries: 0, at: 0, ok: false };
+    st.tries = (st.tries || 0) + 1;
+    st.at = Date.now();
+    if (QC_APPEAL_LAST_RESULT === 'ok') st.ok = true;
+    qcAppealDaySave(st);
+    QC_APPEAL_DAILY_BUSY = false;
+    // 同步后按新数据重算角标（本地计算，零流量）
+    try { qcRefreshAppealBadges(); } catch (e) {}
+    return QC_APPEAL_LAST_RESULT === 'ok';
+  }
+  return Promise.resolve(qcSyncAppealsFromCloud(true)).then(function () {
+    // 审计日志：能 await 就等它，等不到（同步短路）立即收尾
+    var p2 = null;
+    try { p2 = qcAuditRestoreFromCloud(); } catch (e) {}
+    if (p2 && typeof p2.then === 'function') {
+      return Promise.resolve(p2).then(finish, finish);
+    }
+    return finish();
+  }).catch(finish);
+}
+// 标记「今天已经拿到最新申诉」：强制同步后调用，避免 9 点闸门再下载一次
+function qcAppealMarkSyncedToday() {
+  var st = qcAppealDayState();
+  var today = qcAppealTodayStr();
+  if (st.date !== today) st = { date: today, tries: 0, at: 0, ok: false };
+  st.ok = true; st.at = Date.now(); if (!st.tries) st.tries = 1;
+  qcAppealDaySave(st);
+}
+function qcSyncAppealsFromCloud(force) {
+  if (typeof cloudDb === 'undefined' || !cloudDb) { QC_APPEAL_LAST_RESULT = 'fail'; return Promise.resolve(false); }
   var now = Date.now();
-  if (APPEAL_SYNC_BUSY || now - APPEAL_SYNC_AT < 9000) return;
+  if (!force && (APPEAL_SYNC_BUSY || now - APPEAL_SYNC_AT < 9000)) return Promise.resolve(false);
   APPEAL_SYNC_AT = now;
   APPEAL_SYNC_BUSY = true;
   // 【20261123g·出口流量根因修复】此前这里每 9 秒把整包 main（约 2.6MB）完整下载一遍，
@@ -8850,17 +12304,18 @@ function qcSyncAppealsFromCloud() {
   // 现在先查几十字节的 updated_at 探针：云端主数据没变就直接返回，不再下载整包。
   var known = QC_LAST_SEEN_UPD;
   if (!known) { try { known = localStorage.getItem(QC_MAIN_UPD_KEY); } catch (e) { known = null; } }
-  qcProbeMainUpd(true).catch(function() { return 'UNKNOWN'; }).then(function(upd) {
+  QC_APPEAL_SYNC_PROMISE = qcProbeMainUpd(true).catch(function() { return 'UNKNOWN'; }).then(function(upd) {
     if (upd && upd !== 'EMPTY' && upd !== 'UNKNOWN' && known && upd === known) {
       APPEAL_SYNC_BUSY = false;
-      return true;   // 云端未变化：零下载
+      QC_APPEAL_LAST_RESULT = 'ok';
+      return false;   // 云端未变化：零下载（当天没有新增申诉 → 次日无需刷新）
     }
     return cloudDb.from('qc_dashboard_state').select('state_json').eq('state_key', 'main').limit(1)
       .then(function (res) {
         var row = res && res.data && res.data.length ? res.data[0] : null;
-        if (!row || !row.state_json) return;
+        if (!row || !row.state_json) { APPEAL_SYNC_BUSY = false; QC_APPEAL_LAST_RESULT = 'ok'; return false; }
         var d = qcDecodeStateJson(row.state_json);
-        if (!d || !d.results || typeof results === 'undefined' || !results) return;
+        if (!d || !d.results || typeof results === 'undefined' || !results) { APPEAL_SYNC_BUSY = false; QC_APPEAL_LAST_RESULT = 'ok'; return false; }
         var map = {}, i;
         for (i = 0; i < d.results.length; i++) map[qcAppealStableKey(d.results[i])] = d.results[i];
         var changed = false;
@@ -8874,12 +12329,19 @@ function qcSyncAppealsFromCloud() {
             if (os !== ns) { r.appeal = cr.appeal; changed = true; }
           }
         }
-        if (changed) { try { renderDetailTable(); } catch (e) {} qcRefreshAppealBadges(); }
+        if (changed) {
+          try { renderDetailTable(); } catch (e) {}
+          try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) {}
+          try { qcRefreshAppealBadges(); } catch (e) {}
+        }
         var box = document.getElementById('appealInboxModal');
         if (box && box.classList.contains('show')) qcRenderAppealInbox();
         APPEAL_SYNC_BUSY = false;
+        QC_APPEAL_LAST_RESULT = 'ok';
+        return changed;
       });
-  }).catch(function () { APPEAL_SYNC_BUSY = false; });
+  }).catch(function () { APPEAL_SYNC_BUSY = false; QC_APPEAL_LAST_RESULT = 'fail'; return false; });
+  return QC_APPEAL_SYNC_PROMISE;
 }
 
 // ---------- 登录 / 会话恢复 / 权限切换后立即按新身份重算角标 ----------
@@ -8891,6 +12353,8 @@ function qcSyncAppealsFromCloud() {
       window[name] = function () {
         var ret = orig.apply(this, arguments);
         try { qcRefreshAppealBadges(); } catch (e) {}
+        // 【20261124·需求1】登录/切身份后刷新「强制同步」按钮的剩余次数（含跨设备合并）
+        try { qcForceLimitRefresh(); } catch (e) {}
         return ret;
       };
     } catch (e) {}
@@ -8900,35 +12364,27 @@ function qcSyncAppealsFromCloud() {
   wrap('qcAfterUsersChanged'); // 人员/角色变更
 })();
 
-// ---------- 启动兜底：本地已读 + 云端已读 + 定时重算/跨设备同步 ----------
+// ---------- 启动兜底：本地已读 + 云端已读 + 每天一次申诉同步 ----------
 (function () {
   function boot() {
     qcAppealLoadLocal();
     try { qcRefreshAppealBadges(); } catch (e) {}
+    try { qcRefreshForceSyncBtn(); } catch (e) {}
     setTimeout(function () { try { qcCloudLoadAppealReads(); } catch (e) {} }, 1600);
-    // 登录后拉一次云端最新申诉状态（组员刚提交 / 组长刚审核，另一台设备较快看到）
+    // 【20261124·需求1】申诉数据（待审核 / 申诉通过 / 申诉被拒）不再实时同步：
+    // 每天 09:00 之后只同步一次；当天已同步过就不再重复；云端无变化则零下载。
+    // 这样既满足「当天的申诉次日早上 9 点统一刷新」，又把申诉流量压到每天最多 1 次。
     setTimeout(function () {
-      try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
+      try {
+        if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcAppealDailyTick();
+      } catch (e) {}
     }, 3200);
-    // 从云端申诉审计日志恢复：即使主数据 main 曾被旧设备回退，也能找回别人申诉/审核的结果
-    setTimeout(function () {
-      try { if (typeof cloudDb !== 'undefined' && cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
-    }, 2600);
-    // 2026-11-21g 多人实时协作：每 4s 拉一次云端 main，用内容 hash 对比——
-    // 无变化则零渲染成本短路，有变化则全量以云端为准刷新（申诉/审核/质检结果/新增数据一并同步）。
-    // qcFetchLatestAndRefresh(true) 内部有 hash 短路 + 并发保护，高频调用安全。
-    // 【20261122b·需求2】后台轮询不再拉取云端 main 主数据（此前每 4s 整包覆盖一次，
-    // 云端若是旧批次就会把本地新数据顶掉，这是"数据来回跳动/突然变成其他数据"的直接根因）。
-    // 主数据刷新只由：打开页面 / 手动「🔄 强制同步」/ 导入保存后 三个入口触发。
-    // 申诉与角标走独立云端行（qc_appeal_*），带合并逻辑，保持同步。
-    // 【20261123g·出口流量优化】① 页面在后台时不轮询（切走标签页零流量）；
-    // ② 轮询间隔 4s → 20s（申诉不是秒级场景，20s 完全够用，流量降 5 倍）。
+    // 每分钟只做本地时间判断（不产生任何网络请求），到点才真正同步一次
     setInterval(function () {
       try { if (document.hidden) return; } catch (e) {}
-      try { qcRefreshAppealBadges(); } catch (e) {}
-      try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcSyncAppealsFromCloud(); } catch (e) {}
-      try { if (cloudDb) qcAuditRestoreFromCloud(); } catch (e) {}
-    }, 20000);
+      try { qcRefreshAppealBadges(); } catch (e) {}     // 纯本地计算，零流量
+      try { if (typeof AUTH !== 'undefined' && AUTH && cloudDb) qcAppealDailyTick(); } catch (e) {}
+    }, 60000);
     // 【20261122f】看板归零看门狗（正常时零开销）：明细有数据但结果集意外清空 → 自动回滚最近有效结果并重绘
     setInterval(function () {
       try {
