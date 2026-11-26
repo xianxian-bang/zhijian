@@ -3116,7 +3116,7 @@ function renderAiDimensionReasonHtml(dim, detail, result, title) {
       html += '<div class="reason-basis"><b>问题邮件：</b>无（按当前规则复核，未在客服回邮中定位到违规邮件）</div>';
       html += '<div class="reason-basis"><b>【结论】</b>该单原被判「平台禁忌红线」，整单 0 分；但按<b>当前规则</b>复核这份回邮，<b>未再命中任何平台禁忌红线</b>。</div>';
       html += '<div class="reason-basis"><b>【原因】</b>这是修复前的历史判定残留：旧版规则会把亚马逊官方系统信、客户来信里的链接/评价字样误当成客服违规，因此出现无具体原因的 0 分，不是当前模型判定的结果。</div>';
-      html += '<div class="reason-basis" style="color:#b45309;"><b>【建议】</b>勾选「重新判定已定型单」后重判本单，分数会按当前规则重新计算；本单不在回邮数据中标红（当前无违规邮件可指）。</div>';
+      html += '<div class="reason-basis" style="color:#b45309;"><b>【建议】</b>这是历史遗留的 0 分，已定型不再重判；如需修正请走人工申诉；本单不在回邮数据中标红（当前无违规邮件可指）。</div>';
     }
     if (m.clause) html += '<div class="reason-basis"><b>对照标准：</b>' + escHtml(m.clause) + '</div>';
     html += '<div class="reason-basis" style="color:#b91c1c;">该封邮件已在下方「回邮数据」中<b>标红</b>，可直接核对触发红线的原句。</div>';
@@ -5589,10 +5589,10 @@ function showDetail(index) {
       + (r.aiPrev && qcRebatchLevel() === 'badge' ? '<div style="font-size:12px;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px 9px;margin-top:6px;">该单已被重新判定，此处显示的是最新结果。</div>' : '')
       + '<div style="font-size:12px;color:var(--gray-500);margin-top:6px;">' + (r.aiPending ? '尚未执行大模型质检；管理员在「质检标准」页点「AI 全量重判」后定型。' : '本单分数由智谱 GLM 盲审判定，已写云端定型，其他设备打开一致。') + '</div></div>';
   }
-  // 【R32】详情底部：单条 AI 模型重跑（与质检标准页 AI 主判分同一套判定，仅本单）
-  if (typeof isAdminMode === 'function' && isAdminMode()) {
+  // 【R32】详情底部：单条 AI 模型重跑（仅未定型单；已定型单永久锁定，不显示入口）
+  if (typeof isAdminMode === 'function' && isAdminMode() && !r.aiFinalized) {
     html += '<div class="detail-section" id="qcAiRerunBox"><h4>AI 模型重跑</h4>'
-      + '<div style="font-size:12px;color:var(--gray-600);line-height:1.7;margin-bottom:8px;">对<b>当前这一单</b>单独跑一次 AI 主判分（与「质检标准 → AI 主判分」同一套判定依据与档位分）。判定后立即定型并同步云端，本单会带「🆕重判」标识，详情可看「重判前 → 本次」对比。</div>'
+      + '<div style="font-size:12px;color:var(--gray-600);line-height:1.7;margin-bottom:8px;">对<b>当前这一单</b>单独跑一次 AI 主判分（与「质检标准 → AI 主判分」同一套判定依据：实时链接知识库＋质检标准）。判定后立即定型并同步云端；已定型单不可再跑。</div>'
       + '<button class="btn btn-primary btn-sm" id="qcAiRerunBtn" onclick="qcAiRerunOne(' + index + ')">🤖 AI 模型重跑（仅本单）</button>'
       + (r.aiPending ? ' <button class="btn btn-outline btn-sm" onclick="qcDoubaoOpen(' + index + ')" title="免费模型判分失败时用">🟡 豆包兜底</button>' : '')
       + ' <span id="qcAiRerunStatus" style="font-size:12px;color:var(--gray-500);"></span></div>';
@@ -6881,6 +6881,92 @@ function qcAiGradeAllSpeed() {
   try { var se = document.getElementById('qcAiSpeedSel'); var v = parseInt(se && se.value, 10); if (v === 1 || v === 3 || v === 5) return v; } catch (e) {}
   return 3;
 }
+// ============================================================
+// 【20261127】AI 全量判分·云端互斥锁：同一时刻只允许一个人跑
+//   - 锁存独立小行 qc_ai_bulk_lock（几十字节，不碰 4MB 主数据行）
+//   - 抢锁：无锁/锁过期才写入自己 → 读回确认 owner 是自己才算拿到
+//   - 心跳：判分期间定时续期 updated_at；崩溃无心跳超过 5 分钟自动过期，别人可接手
+//   - 释放：完成/中止时仅当 owner 是自己才清空，绝不误删别人的锁
+// ============================================================
+var QC_AI_LOCK_ROW = 'qc_ai_bulk_lock';
+var QC_AI_LOCK_TTL = 5 * 60 * 1000;   // 5 分钟无心跳视为崩溃，锁自动失效
+var QC_AI_LOCK_HEARTBEAT = null;
+function qcAiLockOwner() {
+  var name = (typeof AUTH !== 'undefined' && AUTH && AUTH.name) ? AUTH.name : '管理员';
+  var dev = 'unknown';
+  try { dev = localStorage.getItem('qc_ai_device_id_v1') || ''; if (!dev) { dev = 'd' + Date.now() + Math.random().toString(36).slice(2, 6); localStorage.setItem('qc_ai_device_id_v1', dev); } } catch (e) {}
+  return String(name) + '@' + dev;
+}
+function qcAiLockRead() {
+  if (!cloudDb) return Promise.resolve(null);
+  return cloudDb.from('qc_dashboard_state').select('state_json,updated_at').eq('state_key', QC_AI_LOCK_ROW).limit(1)
+    .then(function(res) {
+      if (res && res.error) throw res.error;
+      var row = res && res.data && res.data.length ? res.data[0] : null;
+      if (!row || !row.state_json) return null;
+      var o = null; try { o = JSON.parse(row.state_json); } catch (e) { return null; }
+      o._updatedAt = row.updated_at || '';
+      return o;
+    }).catch(function() { return null; });
+}
+// 抢锁：返回 Promise<{ok:boolean, holder?:string}>
+function qcAiLockAcquire() {
+  var me = qcAiLockOwner();
+  return qcAiLockRead().then(function(cur) {
+    if (cur && cur.owner && cur.owner !== me) {
+      var upd = Date.parse(cur._updatedAt || '');
+      var live = !isNaN(upd) && (Date.now() - upd) < QC_AI_LOCK_TTL && cur.at && (Date.now() - Date.parse(cur.at) < QC_AI_LOCK_TTL);
+      if (live) return { ok: false, holder: cur.name || cur.owner };
+      // 锁已过期（持有人崩溃/关页），可抢占
+    }
+    var payload = { state_key: QC_AI_LOCK_ROW, state_json: JSON.stringify({ owner: me, name: (typeof AUTH !== 'undefined' && AUTH && AUTH.name) || '管理员', at: new Date().toISOString() }), updated_by: 'ai-bulk-lock' };
+    if (!cloudDb) return { ok: true, holder: me, offline: true };
+    return cloudDb.from('qc_dashboard_state').upsert(payload, { onConflict: 'state_key' })
+      .then(function(res) {
+        if (res && res.error) throw res.error;
+        // 读回确认：防止两人同时抢，只有读回 owner 是自己才算拿到
+        return qcAiLockRead().then(function(back) {
+          if (back && back.owner === me) return { ok: true, holder: me };
+          return { ok: false, holder: (back && back.name) || '另一位管理员' };
+        });
+      }).catch(function(e) { return { ok: false, holder: '', reason: String((e && e.message) || e) }; });
+  });
+}
+function qcAiLockTouch() {
+  if (!cloudDb) return;
+  try {
+    cloudDb.from('qc_dashboard_state').update({ state_json: JSON.stringify({ owner: qcAiLockOwner(), name: (typeof AUTH !== 'undefined' && AUTH && AUTH.name) || '管理员', at: new Date().toISOString() }), updated_by: 'ai-bulk-lock' })
+      .eq('state_key', QC_AI_LOCK_ROW).then(function() {}, function() {});
+  } catch (e) {}
+}
+function qcAiLockStartHeartbeat() {
+  qcAiLockStopHeartbeat();
+  qcAiLockTouch();
+  QC_AI_LOCK_HEARTBEAT = setInterval(qcAiLockTouch, 60 * 1000);
+}
+function qcAiLockStopHeartbeat() {
+  if (QC_AI_LOCK_HEARTBEAT) { clearInterval(QC_AI_LOCK_HEARTBEAT); QC_AI_LOCK_HEARTBEAT = null; }
+}
+function qcAiLockRelease() {
+  qcAiLockStopHeartbeat();
+  if (!cloudDb) return;
+  var me = qcAiLockOwner();
+  // 仅当锁仍是自己的才清空（不误删他人后来抢到的锁）
+  qcAiLockRead().then(function(cur) {
+    if (cur && cur.owner === me) {
+      return cloudDb.from('qc_dashboard_state').update({ state_json: '', updated_by: 'ai-bulk-lock-release' }).eq('state_key', QC_AI_LOCK_ROW);
+    }
+  }).then(function() {}, function() {});
+}
+// 【20261127】判分前强制刷新知识库小行：保证每次判分依据都链接到云端最新知识库
+//   - 质检标准 STANDARDS / GRADE_RULES 存于 main 主数据，页面加载时已取最新，判分上下文每次从运行时变量拼装
+//   - 知识库是独立小行 qc_kb，可能他人在本机登录后改过，开跑前主动拉一次并应用
+function qcAiRefreshKnowledgeBeforeRun() {
+  if (typeof qcKbFetchCloudRow !== 'function' || typeof qcKbApplyPayload !== 'function' || !cloudDb) return Promise.resolve();
+  return qcKbFetchCloudRow().then(function(row) {
+    if (row) { try { qcKbApplyPayload(row, { useAuthoritative: false }); } catch (e) {} }
+  }).catch(function() {});
+}
 function qcAiGradeAll() {
   if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
   if (QC_AI_BULK.running) { showToast('AI 判分正在进行中，请等待完成', 'error'); return; }
@@ -6897,11 +6983,12 @@ function qcAiGradeAll() {
   var _mirror = document.getElementById('qcAiKey'); if (_mirror) _mirror.value = key;
   if (!_prov.direct && !qcAiGetProxyUrl()) { showToast('当前服务商需云函数代理，但代理不可用；请改选「直连」服务商（SiliconFlow / 阿里百炼 / OpenRouter）', 'error'); return; }
   // 【R23 需求1】只判「是否考核=是」的单；非考核单不调用 AI、不改动原结果
-  var force = (function(){ try { var f=document.getElementById('qcAiForceChk'); return !!(f && f.checked); } catch(e){ return false; } })();
+  // 【20261127 硬约束】AI 只处理从未判过的单：aiFinalized 一律跳过，不再提供「重判已定型单」开关。
+  //   已定型单若有疑问，只能走规则引擎 / 豆包 / 人工申诉改，绝不再次调用大模型。
   var targets = [];
   for (var t = 0; t < results.length; t++) {
     if (typeof isAssessedResult === 'function' && !isAssessedResult(results[t])) continue; // 非考核单跳过
-    if (!force && results[t].aiFinalized) continue; // 断点续判：已定型跳过；force 则连已定型一起重判
+    if (results[t].aiFinalized) continue; // 已定型永久锁定：任何情况下都不重判
     targets.push(t);
   }
   // 【R28】可选"本次重判条数"：>0 时只取前 N 条目标（按明细表顺序）
@@ -6921,6 +7008,7 @@ function qcAiGradeAll() {
     if (QC_AI_BULK.finished) return;
     QC_AI_BULK.finished = true;
     QC_AI_BULK.running = false;
+    qcAiLockRelease(); // 释放云端互斥锁，允许下一个人接手
     log(msg);
     try { renderDetailTable(); } catch (e) {}
     try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); } catch (e) {}
@@ -6979,7 +7067,7 @@ function qcAiGradeAll() {
       setTimeout(worker, 120);  // 失败worker稍作间隔再领下一条
     });
   }
-  log('AI 判分开始（批次 ' + batchId + ' · 并发 ' + conc + '），本次 ' + total + ' 条' + (limit > 0 ? '（上限 ' + limit + ' 条）' : '（全部）') + (force ? ' · 含已定型重新判定' : '') + '…');
+  log('AI 判分开始（批次 ' + batchId + ' · 并发 ' + conc + '），本次 ' + total + ' 条' + (limit > 0 ? '（上限 ' + limit + ' 条）' : '（全部）') + '，仅未判分单（依据实时链接知识库＋质检标准）…');
   if (total === 0) { finish('没有需要 AI 判分的考核单（仅有未定型单才会判）。'); return; }
   // 启动 min(conc,total) 个 worker；错峰 120ms 启动，避免瞬间并发尖峰
   var startN = Math.min(conc, total);
@@ -7017,7 +7105,7 @@ function qcDoubaoOpen(index) {
   if (typeof requireAdmin === 'function' && !requireAdmin('豆包兜底判分')) return;
   var r = results[index];
   if (!r) { showToast('找不到本单数据', 'error'); return; }
-  if (r.aiFinalized) { showToast('本单已定型，如需用豆包改判请先勾选「重新判定已定型单」', 'error'); return; }
+  if (r.aiFinalized) { showToast('本单已 AI 定型，不允许用豆包改判；如需更改请走规则引擎 / 人工申诉', 'error'); return; }
   _qcDoubaoIndex = index;
   var m = document.getElementById('doubaoModal');
   if (!m) return;
@@ -7283,6 +7371,8 @@ function qcAiRerunOne(index) {
   if (typeof requireAdmin === 'function' && !requireAdmin('AI 模型重跑（单条）')) return;
   var r = results[index];
   if (!r) { showToast('未找到这一单', 'error'); return; }
+  // 【20261127 硬约束】已定型单禁止任何形式再调用大模型；如需更改请走规则/豆包/人工申诉
+  if (r.aiFinalized) { showToast('本单已 AI 定型，不允许重跑；如需更改请用规则引擎 / 豆包 / 人工申诉', 'error'); return; }
   if (QC_AI_ONE_RUNNING) { showToast('正在判定中，请稍候…', 'error'); return; }
   // 无法质检 / 参考案例：主判分不会判这类单，先确认再跑
   var _nonAssessed = (r.totalScore === -1) || (typeof isReferenceCaseResult === 'function' && isReferenceCaseResult(r));
@@ -7303,10 +7393,13 @@ function qcAiRerunOne(index) {
   var _btn = document.getElementById('qcAiRerunBtn');
   var _st = document.getElementById('qcAiRerunStatus');
   if (_btn) { _btn.disabled = true; _btn.textContent = '🤖 判定中…'; }
-  if (_st) { _st.style.color = '#1d4ed8'; _st.textContent = '正在调用大模型对当前这一单判分，约需 10–30 秒…'; }
+  if (_st) { _st.style.color = '#1d4ed8'; _st.textContent = '正在加载最新知识库与质检标准…'; }
   var batchId = qcAiBatchNow();
-  // 与全量重判一致：保留重判前快照，供「🆕重判」角标与详情对比使用
-  var prevSnap = r.aiFinalized ? { grade: r.grade, totalScore: r.totalScore, aiBatch: r.aiBatch || '', aiJudgeAt: r.aiJudgeAt || '' } : null;
+  // 已定型单已被上方拦截，此处 prevSnap 恒为 null（保留变量避免下方引用报错）
+  var prevSnap = null;
+  // 【20261127】单条判定同样先刷新知识库，保证依据链接云端最新知识+标准
+  qcAiRefreshKnowledgeBeforeRun().then(function() {
+  if (_st) { _st.textContent = '正在调用大模型对当前这一单判分，约需 10–30 秒…'; }
   qcAiJudgeOne(r, key).then(function(judged) {
     var appealKeep = r.appeal, adjustKeep = r.appealAdjusted;
     for (var f in judged) if (Object.prototype.hasOwnProperty.call(judged, f)) r[f] = judged[f];
@@ -7334,12 +7427,13 @@ function qcAiRerunOne(index) {
     if (s2) { s2.style.color = '#b91c1c'; s2.textContent = '判定失败：' + String((e && e.message) || e) + '（本单原结果未改动）'; }
     try { showToast('AI 重跑失败：' + String((e && e.message) || e), 'error'); } catch (e2) {}
   });
+  });
 }
 function qcAiGradeAllStop() {
   QC_AI_BULK.aborted = true;
   // 中止时若所有 worker 都已停止领任务但尚有在途请求，等它们回来后由 cursor>=total 分支收尾；
   // 这里兜底：若已无 active worker 立即给出中止提示
-  try { if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) { QC_AI_BULK.finished = true; QC_AI_BULK.running = false; var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = '已中止。已完成 ' + QC_AI_BULK.done + ' 条。'; } } catch (e) {}
+  try { if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) { QC_AI_BULK.finished = true; QC_AI_BULK.running = false; qcAiLockRelease(); var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = '已中止。已完成 ' + QC_AI_BULK.done + ' 条。'; } } catch (e) {}
 }
 // 【R21】中途落盘：每 20 条写一次云端，防止跑一半崩掉/关页面全部丢失
 var _qcAiBulkSavedAt = 0;
@@ -7362,6 +7456,7 @@ function qcAiPrimaryToggle(on) {
 // 【R20】从质检标准页面板启动全量重判：把 Key 传入弹窗输入框供 qcAiGradeAll 读取
 function qcAiGradeAllStart() {
   if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
+  if (QC_AI_BULK.running) { showToast('AI 判分正在进行中，请等待完成', 'error'); return; }
   var _prov = qcAiProvider();
   var bulkKey = document.getElementById('qcAiBulkKey');
   var modalKey = document.getElementById('qcAiKey');
@@ -7371,7 +7466,22 @@ function qcAiGradeAllStart() {
   qcAiSaveKey(key, _prov.id);
   if (modalKey) modalKey.value = key;
   if (bulkKey) bulkKey.value = key;
-  qcAiGradeAll();
+  // 【20261127】云端互斥锁：先抢锁，成功才开跑，防止多人同时判分互相覆盖
+  var st = document.getElementById('qcAiBulkStatus');
+  if (st) st.textContent = '正在检查是否有其他人在判分…';
+  qcAiLockAcquire().then(function(r) {
+    if (!r.ok) {
+      if (st) st.textContent = '';
+      showToast('已有「' + (r.holder || '其他管理员') + '」正在跑 AI 判分；同一时刻只允许一人判分，请等对方完成后再试。', 'error');
+      return;
+    }
+    qcAiLockStartHeartbeat();
+    if (st) st.textContent = '正在从云端加载最新知识库与质检标准…';
+    qcAiRefreshKnowledgeBeforeRun().then(function() {
+      if (st) st.textContent = '';
+      qcAiGradeAll();
+    });
+  });
 }
 
 
