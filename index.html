@@ -1015,7 +1015,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
     <b style="font-size:14px;color:#1e40af;">🤖 AI 主判分（大模型直接覆盖规则判分）</b>
     <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:#1e3a8a;"><input type="checkbox" id="qcAiPrimaryChk" checked onchange="qcAiPrimaryToggle(this.checked)"> 启用（关闭则回退规则引擎）</label>
   </div>
-  <div style="font-size:12px;color:#334155;line-height:1.7;margin-bottom:10px;">启用后：新明细不再用规则引擎打分，由智谱 GLM 按质检标准 V2.0＋等级规则＋敏感词＋SOP 场景包<b>盲审</b>判定，判一次即定型写入云端，所有设备打开一致。<b>只对「是否考核=是」的订单判分</b>；不考核单保留原结果、不计入统计。各维度给分理由已清空规则历史、改为 AI 逐项理由。订单已全额退款、或顾客来信后人工第一封即给退款方案的，不得判优秀（本地硬校验）。<b>Key 只存本机浏览器，不上传云端。</b>⚡ <b>已提速</b>：默认 3 条并发判分（比原来串行快约 3 倍）；若频繁出现 429/失败，把「速度」调低到 1×；红线单本地直接判、不耗 AI 额度。<br>🎯 <b>本次条数</b>：填正整数即只判前 N 条（想小批量试跑或只重判部分单时用），0=全部。每次判分生成一个<b>批次号</b>，本次判过的单在明细表等级列标「🆕本次」/「🆕重判」，点「查看详情」可看到"重判前→本次"的等级/总分对比，新旧判定一眼区分。</div>
+  <div style="font-size:12px;color:#334155;line-height:1.7;margin-bottom:10px;">启用后：新明细不再用规则引擎打分，由大模型按质检标准 V2.0＋等级规则＋敏感词＋SOP 场景包<b>盲审</b>判定，判一次即定型写入云端，所有设备打开一致。<b>只对「是否考核=是」的订单判分</b>；不考核单保留原结果、不计入统计。<b style="color:#b91c1c;">三条硬规则：① 已 AI 定型的单永久锁定，不再重判，如需更改只能走规则引擎 / 豆包 / 人工申诉；② 同一时刻只允许一人跑判分（云端互斥锁，别人正在判时会拦截）；③ 每次判分前自动从云端拉取最新知识库，判分依据实时链接知识库＋质检标准。</b>各维度给分理由已清空规则历史、改为 AI 逐项理由。订单已全额退款、或顾客来信后人工第一封即给退款方案的，不得判优秀（本地硬校验）。<b>Key 只存本机浏览器，不上传云端。</b>⚡ <b>已提速</b>：默认 3 条并发判分；若频繁出现 429/失败，把「速度」调低到 1×；红线单本地直接判、不耗 AI 额度。<br>🎯 <b>本次条数</b>：填正整数即只判前 N 条（小批量试跑用），0=全部（仅未判分单）。每次判分生成<b>批次号</b>，本次判过的单在明细表标「🆕本次」。</div>
   <div id="qcAiProviderBar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;padding:9px 11px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;">
     <b style="font-size:12.5px;color:#075985;">模型服务商：</b>
     <select id="qcAiProviderSel" onchange="qcAiProviderChanged()" style="padding:5px 7px;border:1px solid #7dd3fc;border-radius:5px;font-size:12.5px;background:#fff;"></select>
@@ -1024,7 +1024,6 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
   </div>
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
     <input type="password" id="qcAiBulkKey" placeholder="粘贴所选服务商的 API Key" style="flex:1;min-width:220px;padding:7px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;">
-    <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#1e3a8a;white-space:nowrap;"><input type="checkbox" id="qcAiForceChk"> 重新判定已定型单</label>
     <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#1e3a8a;white-space:nowrap;">速度：<select id="qcAiSpeedSel" title="并发越高越快；若频繁出现 429/失败请调低" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;"><option value="1">1× 稳妥（不易限流）</option><option value="3" selected>3× 推荐（默认）</option><option value="5">5× 最快（可能限流）</option></select></label>
     <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#1e3a8a;white-space:nowrap;">本次条数：<input type="number" id="qcAiLimitInput" min="0" step="1" value="0" title="填正整数=只判前N条；0=全部（默认）" style="width:66px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;"></label>
     <button class="btn btn-primary btn-sm" onclick="qcAiGradeAllStart()">🚀 AI 全量重判</button>
