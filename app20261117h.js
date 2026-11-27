@@ -3247,6 +3247,15 @@ function isRegYes(v) {
   if (s.indexOf('申请退款') >= 0 || s.indexOf('问题反馈') >= 0 || s.indexOf('补件') >= 0 || s.indexOf('补发') >= 0) return true;
   return /^是/.test(s);
 }
+// 【20261127】详情页「是否类」登记字段统一展示口径：是 / 否（只按语义判断，不展示原始长文本）
+function qcYesNo(v) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s) return '否';
+  if (/^(无|没|不|未|非|否|不需要)/.test(s)) return '否';
+  if (/^(是|有|yes|y|true|1)/i.test(s)) return '是';
+  if (/^需要/.test(s)) return '是'; // 「需要流程操作」这类登记值按肯定处理
+  return isRegYes(s) ? '是' : '否';
+}
 function isRegNo(v) {
   var s = String(v == null ? '' : v).trim();
   if (!s) return false;
@@ -5478,14 +5487,7 @@ function buildReplyDataBlockHtml(r, boxId) {
   var _bt0 = rcBizType(r);
   if (_bt0 === 'AZ' || _bt0 === '中差评') return buildAppealDataBlockHtml(r, boxId, _bt0);
   var html = '<div class="detail-section">';
-  // 回邮数据区顶部：账号 / 平台订单号 / 订单金额 / 客服 / 总分（数据与基本信息一致）
-  var _sb = '<span class="score-badge ';
-  if (r.totalScore === -1) _sb += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
-  else if (isReferenceCaseResult(r)) _sb += 'score-na">参考案例（不参与统计）';
-  else if (r.grade === '优秀') _sb += 'score-excellent">' + r.totalScore + ' 分（优秀）';
-  else if (r.grade === '达标') _sb += 'score-pass">' + r.totalScore + ' 分（达标）';
-  else _sb += 'score-fail">' + r.totalScore + ' 分（不达标）';
-  _sb += '</span>';
+  // 回邮数据区顶部：账号 / 平台订单号 / 订单金额 / 客服（总分已移至「各维度质检结果」表格底部，此处不再重复展示）
   html += '<div class="rc-card">';
   html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
   html += '<div class="rc-card-body">';
@@ -5496,11 +5498,10 @@ function buildReplyDataBlockHtml(r, boxId) {
         + '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
         + '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + (function(){ var _a = rcOrderAmount(r); return _a !== '' ? escHtml(_a) : '-'; })() + '</span></div>'
         + '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
-        + '<div class="rc-base"><span class="rc-base-l">总分</span>' + _sb + '</div>'
         + '</div>';
-  // 【20261123e·需求5】回邮数据分两行：第一行固定 4 项登记字段，其余业务属性放第二行，两行间留白
-  var _regMain = [['是否需要检查流程操作', r.processCheck], ['是否有退款登记', r.refundReg], ['是否有问题反馈', r.issueFeedback], ['是否有补件', r.replenishment]];
-  var _regSub = [['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)]];
+  // 【20261127】是否类登记字段统一映射为「是/否」，三项并排同一列（值只作是否判断，不再展示原始长文本）
+  var _regMain = [['是否需要检查流程操作', qcYesNo(r.processCheck)], ['是否有退款登记', qcYesNo(r.refundReg)], ['是否有问题反馈', qcYesNo(r.issueFeedback)]];
+  var _regSub = [['是否有补件', qcYesNo(r.replenishment)], ['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)]];
   function _regRowHtml(list, cls) {
     var h = '<div class="rc-reg-row ' + cls + '">';
     for (var _i = 0; _i < list.length; _i++) {
@@ -5542,6 +5543,13 @@ function qcQualityResultHtml(r) {
     }
     html += '</tr>';
   }
+  // 【20261127】表格底部汇总行：总分 + 总等级（总分不再在回邮数据区重复展示）
+  var _tg = r.grade || '-';
+  var _tc = _tg === '优秀' ? 'score-excellent' : (_tg === '达标' ? 'score-pass' : (_tg === '不达标' ? 'score-fail' : 'score-na'));
+  var _tv = (r.totalScore === -1 || r.totalScore === undefined || r.totalScore === null) ? '-' : String(r.totalScore) + ' 分';
+  html += '<tr style="background:var(--gray-50);font-weight:700;border-top:2px solid var(--gray-300);"><td>总分</td>'
+        + '<td><span class="score-badge ' + _tc + '">' + escHtml(_tv) + '</span></td>'
+        + '<td><span class="score-badge ' + _tc + '">' + escHtml(_tg) + '</span></td></tr>';
   html += '</tbody></table>';
   // 综合判定结论：新判单优先 AI 结构化三段；老单由展示层从 aiRaw + 回邮原文组装，不重判。
   var _cc = null;
@@ -5573,6 +5581,15 @@ function qcQualityResultHtml(r) {
   }
   return html + '</div>';
 }
+// 【20261127】SOP 质检依据默认折叠：点标题展开/收起，避免详情页过长
+function qcSopToggle(h) {
+  var body = h && h.nextElementSibling;
+  if (!body || !body.classList || !body.classList.contains('qc-sop-body')) return;
+  var open = body.style.display === 'block';
+  body.style.display = open ? 'none' : 'block';
+  var arrow = h.querySelector('.qc-sop-arrow');
+  if (arrow) arrow.textContent = open ? '▸ 展开' : '▾ 收起';
+}
 function showDetail(index) {
   var r = results[index];
   if (!r) return;
@@ -5603,7 +5620,7 @@ function showDetail(index) {
     try {
       var _sopDocs = qcSopApplicableDocs(String(r.reply || '') + '\n' + String(r.customer || ''));
       if (_sopDocs.length) {
-        html += '<div class="detail-section"><h4>本单适用的 SOP 质检依据（邮件 · v2）</h4><div class="detail-msg-box">';
+        html += '<div class="detail-section"><h4 onclick="qcSopToggle(this)" style="cursor:pointer;user-select:none;">本单适用的 SOP 质检依据（邮件 · v2）<span class="qc-sop-arrow" style="float:right;font-size:12px;color:var(--gray-500);font-weight:400;">▸ 展开</span></h4><div class="detail-msg-box qc-sop-body" style="display:none;">';
         html += '<div style="margin-bottom:8px;color:var(--gray-600);font-size:12px;">以下 SOP 文档为本次判分的规则来源；扣分点来自其判定清单中 P0/P1 的违规表述命中，未命中不扣分。</div>';
         for (var sd = 0; sd < _sopDocs.length; sd++) {
           var sod = _sopDocs[sd];
@@ -5647,7 +5664,7 @@ function showDetail(index) {
 
 // ============================================================
 // 【20261127】详情页内申诉：展开填写理由 + 附件，形成申请记录；同意/拒绝仅管理员可用。
-// 申诉面板直接复用 qcQualityResultHtml(r)，保证「申诉里的结论」与「查看详情里的质检结果」完全一致。
+// 【20261127】申诉面板只保留申请入口（理由/模块/附件/审核），不再重复展示质检结果表格与综合结论。
 // ============================================================
 function qcDetailAppealToggle(index) {
   var panel = document.getElementById('detailAppealPanel');
@@ -5668,9 +5685,8 @@ function qcDetailAppealRender(index) {
   if (!r || !panel) return;
   normalizeResultAppeal(r);
   var a = r.appeal;
-  var h = '<div style="font-size:12px;color:#64748b;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:10px;line-height:1.7;">下方质检结果与「查看详情」使用同一份数据；提交申请后管理员可在本页同意或拒绝。</div>';
-  h += qcQualityResultHtml(r);
-  h += '<div class="detail-section"><h4>申请记录</h4>';
+  // 【20261127】申诉面板只保留申请入口：不再重复展示质检结果表格与综合结论，避免详情页过长
+  var h = '<div class="detail-section"><h4>申请记录</h4>';
   if (a.status === '无申诉') {
     h += '<div style="font-size:12px;color:#94a3b8;">暂无申请记录</div>';
   } else {
@@ -5691,28 +5707,38 @@ function qcDetailAppealRender(index) {
     }
     if (a.status === '待审核' && AUTH && AUTH.role === 'admin') {
       h += '<div style="margin-top:10px;display:flex;gap:8px;">'
-        + '<button class="btn btn-success btn-sm" onclick="qcDetailAppealDecide(' + index + ',\'approve\')">同意</button>'
+        + '<button class="btn btn-success btn-sm" onclick="qcDetailAppealApproveAsk(' + index + ')">同意</button>'
         + '<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fca5a5;" onclick="qcDetailAppealDecide(' + index + ',\'reject\')">拒绝</button></div>';
     }
     h += '</div>';
   }
   h += '</div>';
   if (a.status === '无申诉') {
+    // 【20261127】仅「不达标」模块提供申诉入口；达标/优秀/已核查模块一律不出现
     var mods = getAppealSubmitModules(r);
-    if (!mods.length) mods = getAppealModules(r);
-    h += '<div class="detail-section"><h4>新增申诉</h4>'
-      + '<textarea id="detailAppealReason" rows="4" placeholder="请输入申诉理由（必填）" style="width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;line-height:1.6;resize:vertical;"></textarea>'
-      + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">申诉模块（默认全选未达标模块）</label><div id="detailAppealModuleList" style="display:flex;flex-wrap:wrap;gap:8px;">';
-    for (var mi = 0; mi < mods.length; mi++) {
-      var md = mods[mi], det = (r.details && r.details[md]) || {}, sc = r.scores ? r.scores[md] : undefined;
-      h += '<label style="font-size:12px;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;">'
-        + '<input type="checkbox" name="detailAppealModules" value="' + escHtml(md) + '" checked> ' + escHtml(md)
-        + ' <span style="color:#64748b;">' + (sc === undefined || sc === null || Number(sc) < 0 ? '-' : sc) + ' 分 / ' + escHtml(det.grade || '-') + '</span></label>';
+    var badMods = [];
+    for (var bi = 0; bi < mods.length; bi++) {
+      var bd = (r.details && r.details[mods[bi]]) || {};
+      if (bd.grade === '不达标') badMods.push(mods[bi]);
     }
-    h += '</div></div>'
-      + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">附件（可选，最多5个，每个不超过10MB）</label>'
-      + '<input type="file" id="detailAppealFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div>'
-      + '<div style="margin-top:12px;"><button class="btn btn-primary btn-sm" id="detailAppealSubmitBtn" onclick="qcDetailAppealSubmit(' + index + ')">提交申诉</button></div></div>';
+    mods = badMods;
+    if (!mods.length) {
+      h += '<div class="detail-section"><h4>新增申诉</h4><div style="font-size:12px;color:#94a3b8;">本单无不达标模块，不支持申诉</div></div>';
+    } else {
+      h += '<div class="detail-section"><h4>新增申诉</h4>'
+        + '<textarea id="detailAppealReason" rows="4" placeholder="请输入申诉理由（必填）" style="width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;line-height:1.6;resize:vertical;"></textarea>'
+        + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">申诉模块（默认勾选所有不达标模块）</label><div id="detailAppealModuleList" style="display:flex;flex-wrap:wrap;gap:8px;">';
+      for (var mi = 0; mi < mods.length; mi++) {
+        var md = mods[mi], det = (r.details && r.details[md]) || {}, sc = r.scores ? r.scores[md] : undefined;
+        h += '<label style="font-size:12px;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;">'
+          + '<input type="checkbox" name="detailAppealModules" value="' + escHtml(md) + '" checked> ' + escHtml(md)
+          + ' <span style="color:#64748b;">' + (sc === undefined || sc === null || Number(sc) < 0 ? '-' : sc) + ' 分 / ' + escHtml(det.grade || '-') + '</span></label>';
+      }
+      h += '</div></div>'
+        + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">附件（可选，最多5个，每个不超过10MB）</label>'
+        + '<input type="file" id="detailAppealFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div>'
+        + '<div style="margin-top:12px;"><button class="btn btn-primary btn-sm" id="detailAppealSubmitBtn" onclick="qcDetailAppealSubmit(' + index + ')">提交申诉</button></div></div>';
+    }
   }
   panel.innerHTML = h;
 }
@@ -5749,7 +5775,38 @@ function qcDetailAppealSubmit(index) {
     showToast((err && err.message) || '申诉提交失败，请重试', 'error');
   }).finally(function() { if (btn) btn.disabled = false; });
 }
-function qcDetailAppealDecide(index, action) {
+// 【20261127】同意前弹窗确认：要改为达标的模块 + 是否同步到质检知识库
+function qcDetailAppealApproveAsk(index) {
+  if (!AUTH || AUTH.role !== 'admin') { showToast('只有管理员可以同意或拒绝申诉', 'error'); return; }
+  var r = results[index];
+  if (!r) return;
+  normalizeResultAppeal(r);
+  if (r.appeal.status !== '待审核') { showToast('只有「待审核」状态可以处理', 'error'); return; }
+  var mods = (r.appeal.modules && r.appeal.modules.length) ? r.appeal.modules : getAppealModules(r);
+  var dlg = document.getElementById('qcAppealApproveDialog');
+  if (!dlg) {
+    dlg = document.createElement('div');
+    dlg.id = 'qcAppealApproveDialog';
+    dlg.style.cssText = 'display:none;position:fixed;inset:0;z-index:1500;background:rgba(0,0,0,.35);align-items:center;justify-content:center;';
+    dlg.innerHTML = '<div style="background:#fff;border-radius:10px;padding:20px 22px;width:420px;max-width:92vw;box-shadow:0 16px 48px rgba(0,0,0,.25);font-size:13px;color:#334155;">'
+      + '<div style="font-size:15px;font-weight:700;color:#1e293b;margin-bottom:10px;">同意申诉</div>'
+      + '<div id="qcAppealApproveInfo" style="line-height:1.8;margin-bottom:12px;"></div>'
+      + '<label style="display:flex;align-items:center;gap:7px;margin-bottom:16px;cursor:pointer;"><input type="checkbox" id="qcAppealSyncKb" checked> 同时同步到质检知识库</label>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;">'
+      + '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'qcAppealApproveDialog\').style.display=\'none\'">取消</button>'
+      + '<button class="btn btn-success btn-sm" id="qcAppealApproveOk">确认同意</button></div></div>';
+    document.body.appendChild(dlg);
+  }
+  document.getElementById('qcAppealApproveInfo').innerHTML = '确认后以下模块的判定将改为「达标」：<b>' + escHtml(mods.join('、')) + '</b>，总分会同步重算。';
+  var ok = document.getElementById('qcAppealApproveOk');
+  ok.onclick = function() {
+    var syncKb = !!(document.getElementById('qcAppealSyncKb') && document.getElementById('qcAppealSyncKb').checked);
+    dlg.style.display = 'none';
+    qcDetailAppealDecide(index, 'approve', syncKb);
+  };
+  dlg.style.display = 'flex';
+}
+function qcDetailAppealDecide(index, action, syncKb) {
   if (!AUTH || AUTH.role !== 'admin') { showToast('只有管理员可以同意或拒绝申诉', 'error'); return; }
   var r = results[index];
   if (!r) return;
@@ -5774,6 +5831,10 @@ function qcDetailAppealDecide(index, action) {
     r.appeal.status = Number(r.totalScore) > beforeTotal ? '申诉通过' : '申诉被拒';
   } else {
     r.appeal.status = '申诉被拒';
+  }
+  // 【20261127】弹窗勾选「同步到质检知识库」时才沉淀案例，且仅在申诉通过后写入
+  if (action === 'approve' && syncKb && (r.appeal.status === '申诉通过' || r.appeal.status === '部分通过')) {
+    try { addAppealReferenceKnowledge(r); } catch (e) {}
   }
   renderDetailTable();
   try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
