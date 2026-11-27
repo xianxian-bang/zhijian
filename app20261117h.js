@@ -5550,19 +5550,36 @@ function showDetail(index) {
     html += '</tr>';
   }
   html += '</tbody></table>';
-  var _finalWhy = '';
-  if (r.aiV2why) _finalWhy = String(r.aiV2why).replace(/\s+/g, ' ').trim();
-  // 【20261127】历史定型单 aiV2why 为空时，从 aiRaw 提取 AI 当时的判定依据（纯展示兜底，不重判）
-  if (!_finalWhy && r.aiFinalized && r.aiRaw && typeof qcAiFinalWhyFromRaw === 'function') {
-    try { _finalWhy = qcAiFinalWhyFromRaw(r.aiRaw); } catch (e) {}
+  // 【20261127】综合判定结论：回邮概况 / 为什么判此等级 / 最终结论（纯展示组装，不重判、不改分数）
+  // 计算口径不体现在界面，只保留对本单具体事实的说明；口径写在源码注释里便于回溯。
+  var _cc = null;
+  // 新判单：AI 已直接给出三段结构化结论，优先用；老单：由展示层从 aiRaw + 回邮原文组装
+  if (r.aiCaseSummary && (r.aiCaseSummary.reply || r.aiCaseSummary.gradeWhy || r.aiCaseSummary.final)) {
+    _cc = r.aiCaseSummary;
+  } else if (typeof qcBuildCaseConclusion === 'function') {
+    try { _cc = qcBuildCaseConclusion(r); } catch (e) { _cc = null; }
   }
-  if (!_finalWhy && r.issues && r.issues.length) {
-    var _iw = [];
-    for (var _ii = 0; _ii < r.issues.length; _ii++) if (typeof r.issues[_ii] === 'string' && r.issues[_ii]) _iw.push(r.issues[_ii]);
-    _finalWhy = _iw.join('；');
+  if (_cc && (_cc.reply || _cc.gradeWhy || _cc.final)) {
+    html += '<div style="margin-top:12px;padding:11px 13px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.8;">'
+      + '<div style="font-weight:600;color:#1e293b;margin-bottom:6px;font-size:13px;">综合判定结论</div>';
+    if (_cc.reply) html += '<div style="margin-bottom:5px;"><b>回邮概况：</b>' + escHtml(_cc.reply) + '</div>';
+    if (_cc.gradeWhy) html += '<div style="margin-bottom:5px;"><b>为什么判「' + escHtml(r.grade || '') + '」：</b>' + escHtml(_cc.gradeWhy) + '</div>';
+    if (_cc.final) html += '<div><b>最终结论：</b>' + escHtml(_cc.final) + '</div>';
+    html += '</div>';
+  } else {
+    var _finalWhy = '';
+    if (r.aiV2why) _finalWhy = String(r.aiV2why).replace(/\s+/g, ' ').trim();
+    if (!_finalWhy && r.aiFinalized && r.aiRaw && typeof qcAiFinalWhyFromRaw === 'function') {
+      try { _finalWhy = qcAiFinalWhyFromRaw(r.aiRaw); } catch (e) {}
+    }
+    if (!_finalWhy && r.issues && r.issues.length) {
+      var _iw = [];
+      for (var _ii = 0; _ii < r.issues.length; _ii++) if (typeof r.issues[_ii] === 'string' && r.issues[_ii]) _iw.push(r.issues[_ii]);
+      _finalWhy = _iw.join('；');
+    }
+    if (!_finalWhy && r.exGate && r.exGate.reasons && r.exGate.reasons.length) _finalWhy = '优秀门槛未达：' + r.exGate.reasons.join('；');
+    if (_finalWhy) html += '<div style="margin-top:10px;padding:8px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.7;"><b>最终判断依据：</b>' + escHtml(String(_finalWhy).slice(0, 600)) + '</div>';
   }
-  if (!_finalWhy && r.exGate && r.exGate.reasons && r.exGate.reasons.length) _finalWhy = '优秀门槛未达：' + r.exGate.reasons.join('；');
-  if (_finalWhy) html += '<div style="margin-top:10px;padding:8px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.7;"><b>最终判断依据：</b>' + escHtml(String(_finalWhy).slice(0, 600)) + '</div>';
   html += '</div>';
   // 【20261125d】邮件类型：展示本次质检参照的 SOP 依据（总则 + 命中的场景包），并注明判分规则来自判定清单
   if (typeof qcBizTypeOf === 'function' && qcBizTypeOf(r) === '邮件' && typeof qcSopApplicableDocs === 'function') {
@@ -6104,7 +6121,15 @@ function qcAiBuildResultFromContent(_r, content, modelLabel) {
         var result = qcAiPendingResult(_r);
         result.scores = {};
         result.details = {};
-        var v2why = (function(){ try { var fs=String.fromCharCode(96); var t=String(content||''); while(t.indexOf(fs)>=0) t=t.replace(fs,''); var jj=qcAiExtractJsonObj(t); var o=jj?JSON.parse(jj):{}; return String(o._v2why||'').replace(/\s+/g,' ').trim().slice(0,240); } catch(e){ return ''; } })();
+        var _aiObj = (function(){ try { var fs=String.fromCharCode(96); var t=String(content||''); while(t.indexOf(fs)>=0) t=t.replace(fs,''); var jj=qcAiExtractJsonObj(t); return jj?JSON.parse(jj):{}; } catch(e){ return {}; } })();
+        var v2why = String(_aiObj._v2why||'').replace(/\s+/g,' ').trim().slice(0,240);
+        // 【20261127】综合判定结论三段：AI 直接给结构化文本，展示层优先用；老单没有时由 qcBuildCaseConclusion 从 aiRaw 组装
+        var _caseSummary = {
+          reply: String(_aiObj._reply||'').replace(/\s+/g,' ').trim().slice(0,500),
+          gradeWhy: String(_aiObj._gradeWhy||'').replace(/\s+/g,' ').trim().slice(0,600),
+          final: String(_aiObj._final||'').replace(/\s+/g,' ').trim().slice(0,500)
+        };
+        if (!_caseSummary.reply && !_caseSummary.gradeWhy && !_caseSummary.final) _caseSummary = null;
         for (var d = 0; d < DIM_NAMES.length; d++) {
           var dn = DIM_NAMES[d];
           if (dn === '平台禁忌') {
@@ -6152,6 +6177,7 @@ function qcAiBuildResultFromContent(_r, content, modelLabel) {
         result.aiJudgeModel = modelLabel || QC_AI_MODEL;
         result.aiV2grade = (excl.length && v2g === '优秀') ? '达标' : (v2g || finalGrade);
         result.aiV2why = v2why;
+        result.aiCaseSummary = _caseSummary;
         result.aiExclude = excl.length ? excl : null;
         result.aiRaw = String(content).slice(0, 6000);
         result.aiPending = false;
@@ -6194,6 +6220,147 @@ function qcAiFinalWhyFromRaw(raw) {
   if (conclusion) out += '结论：' + conclusion;
   if (why) out += (out ? '｜依据：' : '') + why;
   return out.slice(0, 600);
+}
+
+// ===== 【2026-11-27】综合判定结论：回邮概况 / 为什么判此等级 / 最终结论 =====
+// 纯展示层组装，不重判、不改分数、不改 aiFinalized：老单读取 aiRaw + details + 回邮原文即可显示有内容的结论。
+// 口径说明只写进源码注释，界面不展示任何口径脚注。
+function qcCaseBrief(s, max) {
+  return String(s == null ? '' : s).replace(/\*\*/g, '').replace(/\s+/g, ' ').trim().slice(0, max || 120);
+}
+function qcBuildCaseConclusion(r) {
+  var out = { reply: '', gradeWhy: '', final: '' };
+  if (!r) return out;
+  var grade = String(r.grade || '');
+  var score = (r.totalScore != null && r.totalScore >= 0) ? r.totalScore : null;
+  var fs = String.fromCharCode(96);
+  var raw = String(r.aiRaw || '');
+  while (raw.indexOf(fs) >= 0) raw = raw.replace(fs, '');
+  var jp = raw.indexOf('QC_SCORES_JSON');
+  var prose = jp >= 0 ? raw.slice(0, jp) : raw;
+
+  // 1) 回邮概况：从完整会话里抽客户诉求 + 客服动作（已排除机器人/系统信的干扰行）
+  var reply = String(r.reply || '');
+  if (reply && reply !== '无联客记录') {
+    var ex = extractAgentReplies(reply, true);
+    var cust = String(ex.customerText || '');
+    var agent = String(ex.agentText || '');
+    var custBrief = '';
+    // 客户来信优先（extractAgentReplies 按「拉取时间」标记切分）；迁移老单没有该标记，
+    // 抬头段里只有邮箱与主题、正文在客服回邮里，无法可靠区分，故不硬猜客户诉求，交给新判单的 AI _reply 补齐。
+    var custTrusted = !!cust.trim();
+    var cs = getReasonSentences(cust);
+    var askLine = '', plainLine = '';
+    for (var ci = 0; ci < cs.length; ci++) {
+      var line = String(cs[ci]);
+      if (isMetaLine(line) || line.length < 12) continue;
+      if (/^(?:回复[:：])+/.test(line)) line = line.replace(/^(?:回复[:：])+/, '');
+      // 剥离邮箱/单号/系统抬头，保留抬头之后的正文；整行只有抬头则跳过
+      if (/@/.test(line) || /订单号|Commande\s*:/.test(line)) {
+        line = line.replace(/^\S*@\S+\s*/, '').replace(/^\d{3}-\d+[-\d]*\s*/, '')
+          .replace(/^(?:回复[:：]|\d{3}-\d+[-\d]*|咨询|Consulta|Demande[^\s]*|来自亚马逊客户[^（]*（[^）]*）)\s*/gi, '').trim();
+        if (line.length < 12 || /@/.test(line)) continue;
+      }
+      if (/^\d{3}-\d+/.test(line) || /robot\d{4}-\d{2}-\d{2}/.test(line)) continue;
+      if (/^Dear (?:Buyer|Customer|Client)/i.test(line) || /^Estimado/i.test(line)) continue; // 客服模板开头
+      // 明显客服话术：让客户回复/提供信息/说明问题，不是客户诉求
+      if (/(?:please reply|请您|merci de nous|inform us of your|we are contacting you|如果您|vous contacter|kontaktieren wir)/i.test(line)) continue;
+      // 抱怨/问题/诉求特征优先
+      var isAsk = /[?？]|缺|未收到|不符|问题|投诉|退款|退货|complain|missing|not receive|wrong|damaged|problem|refund|return|manquant|differ|defect|reklamation|fehlt|problema|faltan/i.test(line);
+      if (isAsk && !askLine) askLine = line;
+      if (!plainLine) plainLine = line;
+      if (askLine && plainLine) break;
+    }
+    custBrief = (askLine || plainLine || '').slice(0, 110);
+    var acts = [];
+    var both = (agent + ' ' + cust).toLowerCase();
+    if (/refund|退款|退还/.test(both)) acts.push('退款');
+    if (/resend|replacement|replace|补发|换货/.test(both)) acts.push('补发/换货');
+    if (/return label|退货标签|退货地址|退回/.test(both)) acts.push('退货指引');
+    if (/cancel|取消订单/.test(both)) acts.push('取消订单');
+    if (/sorry|apologi|抱歉|理解|遗憾/.test(both)) acts.push('道歉安抚');
+    if (/follow up|跟进|will update|持续更新/.test(both)) acts.push('跟进处理');
+    if (/cannot|unable|无法|不能/.test(both)) acts.push('说明无法处理');
+    var rounds = (reply.match(/\[发送成功\]/g) || []).length;
+    // 只有可信的客户来信段才写诉求；老单没有客户来信标记时不硬编，避免把客服话术当客户诉求
+    out.reply = (custTrusted && custBrief ? ('客户诉求：' + qcCaseBrief(custBrief, 110) + '。') : '')
+      + '客服处理：' + (rounds ? ('共 ' + rounds + ' 封回邮') : '已有回邮')
+      + (acts.length ? ('，涉及' + acts.slice(0, 5).join('、')) : '')
+      + '；' + (rounds >= 2 ? '多轮跟进后闭环' : '单封答复') + '。';
+  }
+
+  // 2) AI 原始判定依据段（门槛/增量/阻断），老单也有
+  var basis = '';
+  var mb = prose.match(/(?:\*\*)?(?:判定依据|总等级判定)(?:\*\*)?\s*[:：]?([\s\S]*)/);
+  if (mb && mb[1]) {
+    basis = mb[1].split(/(?:\*\*)?(?:改进建议|机器可读结果|档位铁律)(?:\*\*)?/)[0].split('判定依据(')[0];
+    basis = basis.split('\n').map(function (x) {
+      return String(x).replace(/^\s*(?:[-*•]|\d+[.、])\s*/, '').replace(/\*\*/g, '').trim();
+    }).filter(function (x) { return x && x.length > 3; }).join('；');
+    basis = qcCaseBrief(basis, 420);
+  }
+  var advice = '';
+  var ma = prose.match(/(?:\*\*)?改进建议(?:\*\*)?\s*[:：]\s*([^\n]+)/);
+  if (ma && ma[1]) advice = qcCaseBrief(ma[1].replace(/^\s*[-*•]\s*/, ''), 140);
+
+  // 3) 从 AI 逐维理由里抽具体证据（老单 details 为空时用）
+  var rawReason = {};
+  var re = /(?:[①②③④⑤]|\d+[.、])\s*\*{0,2}(语言语法表达|方案合理性|流程&操作完整性|服务技巧|服务态度)\*{0,2}\s*[:：]\s*([^\n]+)/g;
+  var mm;
+  while ((mm = re.exec(prose)) !== null) {
+    var parts = String(mm[2]).split('+');
+    rawReason[mm[1]] = qcCaseBrief(parts.length > 1 ? parts[parts.length - 1] : mm[2], 110);
+  }
+
+  // 4) 为什么判这个等级：按 V2.0 门槛/增量/阻断/硬伤/优秀排除，落到本单具体情况
+  var exGate = r.exGate || {};
+  var excl = r.aiExclude || [];
+  var whyParts = [];
+  var problems = [];
+  for (var di = 0; di < DIM_NAMES.length; di++) {
+    var dn = DIM_NAMES[di];
+    if (dn === '平台禁忌') continue;
+    var det = (r.details && r.details[dn]) || {};
+    if (String(det.grade || '') === '不达标') {
+      var txt = qcCaseBrief(det.aiWhy || det.reason || rawReason[dn] || '', 100);
+      txt = txt.replace(/^[-*•]\s*/, '').replace(/^建议分数[：:]\s*\S+\s*/, '');
+      problems.push(dn + (txt && txt.length > 6 ? ('：' + txt) : ''));
+    }
+  }
+  if (grade === '优秀') {
+    whyParts.push('全程闭环门槛成立');
+    var inc = [];
+    if (/超预期|超出预期/.test(basis)) inc.push('超预期服务');
+    if (/主动跟进|跟进/.test(basis)) inc.push('主动跟进');
+    if (/客户认可|感谢|认同/.test(basis)) inc.push('客户认可');
+    whyParts.push('命中增量：' + (inc.length ? inc.join('、') : '超预期 / 主动跟进 / 客户认可之一'));
+    whyParts.push('无阻断条件');
+    if (excl.length) whyParts.push('但命中优秀排除：' + excl.join('、'));
+    if (/未命中任一增量|无增量/.test(String(r.aiV2why || '')) && !inc.length) {
+      whyParts.push('原判定依据与优秀等级不一致，以各维度等级为准');
+    }
+  } else if (grade === '达标') {
+    if (excl.length) whyParts.push('命中优秀排除：' + excl.join('、') + '，不得判优秀，最高达标');
+    else if (/门槛不成立|门槛未达|封顶/.test(basis)) whyParts.push('门槛未完全成立，封顶达标');
+    else whyParts.push('门槛成立，但未命中任一增量（无超预期、主动跟进、客户认可）');
+    if (exGate.reasons && exGate.reasons.length) whyParts.push('优秀门槛未达：' + exGate.reasons.join('、'));
+    if (problems.length) whyParts.push('仍需改进：' + problems.join('；'));
+    else whyParts.push('无硬伤与阻断条件');
+  } else if (grade === '不达标') {
+    whyParts.push(problems.length ? ('关键不达标维度 — ' + problems.join('；')) : '本职基线 / 门槛未通过');
+    if (/阻断|负面|不满/.test(basis)) whyParts.push('命中阻断条件（客户明确负面）');
+  } else if (basis) {
+    whyParts.push(qcCaseBrief(basis, 200));
+  }
+  out.gradeWhy = whyParts.length ? (whyParts.join('；') + '。') : String(r.aiV2why || '');
+
+  // 5) 最终结论
+  var tail = grade === '优秀' ? '客户诉求全程闭环且服务超出本职预期，符合优秀标准。'
+    : (grade === '达标' ? '客户诉求已得到合规处理，但缺少超预期表现，未达优秀。'
+      : (grade === '不达标' ? '存在影响客户体验的实质问题，未达质检标准。' : ''));
+  out.final = '本单最终判定为「' + (grade || '未定') + '」' + (score != null ? ('（' + score + ' 分）') : '') + '。' + tail
+    + (advice ? (' 改进建议：' + advice.replace(/[。.；;]+$/, '') + '。') : '');
+  return out;
 }
 
 // 【R20】单条 AI 判分核心：盲审 → 调用智谱 → 解析分数/等级 → 返回定型 result（Promise）
@@ -6559,8 +6726,8 @@ function qcAiBuildMessages(ctx) {
     + '②严格按 V2.0 四步流程判定总等级：第1步查红线（平台禁忌：站外链接/邮箱/电话/社媒/PayPal/评价操纵/敏感词库）→第2步查硬伤（不达标）→第3步查门槛（全程闭环）→第4步先过本职基线测试再查增量②超预期/③主动跟进/④客户认可（OR），并检查阻断条件。总分只用于同档内排序、不决定等级；优秀＝门槛成立且命中任一增量且无阻断；门槛不通过封顶达标；客户明确负面则阻断、最高达标。两条优秀额外排除：甲、订单已成功办理全额退款；乙、顾客来信后客服人工第一封即提供退款方案（机器人不算、先做实质处理后续再提退款不算）。命中任一不得优秀、最高达标，但这两条不是红线、不整单0分。'
     + '③【平台禁忌维度也要给理由】：即使未发现违规，也要用一句话写明你核查了哪些红线项、结论是什么，例如「已核查站外联系方式、站外交易引导、评价操纵与敏感词库，未发现违规」。若发现违规则指出具体哪一个链接/邮箱/词/句及出自哪一封邮件。（注意：整单红线由系统本地硬检测，你只需给核查理由。）'
     + '④【档位铁律】每个维度的分数只能是【档位固定分清单】里的分数，禁止任何中间值（方案只给40/32/15，流程只给25/10，技巧只给15/10/5，态度只给15/10/5，语言只给5/0）。判定为哪一档就给该档对应固定分。'
-    + '⑤正文写完后【必须】另起一行输出机器可读结果，只输出 JSON 对象本身，不要代码块、不要多余文字。格式：QC_SCORES_JSON:{"语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判达标：回邮有完整问候与落款、语法通顺；依据质检标准语言语法表达-达标：表达完整、语气礼貌。","方案合理性":"判达标：客服回邮第2封明确答复退款并闭环；依据质检标准方案合理性-达标：给出有效方案。"},"_mail":{"语言语法表达":{"role":"客服回邮","quote":"Best regards 落款原句"},"方案合理性":{"role":"客服回邮","quote":"我们已为您办理退款的原句"}},"_v2grade":"达标","_v2why":"门槛成立但未命中任一增量"}'
-    + '字段说明：_why 每维用【一句中肯的话】写明结论(判哪档)+最关键的回邮证据+依据条款，会写入质检明细替换旧理由，务必具体、别空泛，每维控制在 90 字以内；_grade 填中文等级（优秀/达标/不达标）；_mail 每维给出该判定依据的邮件线索（role 填「客服回邮」或「客户来信」，quote 填该邮件里最有辨识度的原句片段15-60字，用于精确定位是哪一封；禁止所有维度都填同一封或同一句，证据确实来自同一封时可相同）；_v2grade/_v2why 填 V2.0 四步判定的总等级与一句依据。若命中优秀排除甲乙，_v2grade 不得填优秀、最高达标。'
+    + '⑤正文写完后【必须】另起一行输出机器可读结果，只输出 JSON 对象本身，不要代码块、不要多余文字。格式：QC_SCORES_JSON:{"语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判达标：回邮有完整问候与落款、语法通顺；依据质检标准语言语法表达-达标：表达完整、语气礼貌。","方案合理性":"判达标：客服回邮第2封明确答复退款并闭环；依据质检标准方案合理性-达标：给出有效方案。"},"_mail":{"语言语法表达":{"role":"客服回邮","quote":"Best regards 落款原句"},"方案合理性":{"role":"客服回邮","quote":"我们已为您办理退款的原句"}},"_v2grade":"达标","_v2why":"门槛成立但未命中任一增量","_reply":"客户来信反馈收到的商品缺少测量仪等配件、与描述不符；客服在第1封回邮即致歉并说明全额退款流程，第2封跟进确认退款已提交，整个诉求已闭环。","_gradeWhy":"门槛成立（客服全程跟进、诉求已实质解决）；未命中任一增量（无超预期补偿、无主动回访、客户未明确认可）；无阻断，客户未表达强烈负面，故封顶达标。","_final":"本单判定为达标：客诉已妥善闭环、流程无缺失，但服务止于本职、缺少超预期表现，未达优秀；建议在处理同类缺件场景时主动提供补发选项并确认客户是否满意。"}'
+    + '字段说明：_why 每维用【一句中肯的话】写明结论(判哪档)+最关键的回邮证据+依据条款，会写入质检明细替换旧理由，务必具体、别空泛，每维控制在 90 字以内；_grade 填中文等级（优秀/达标/不达标）；_mail 每维给出该判定依据的邮件线索（role 填「客服回邮」或「客户来信」，quote 填该邮件里最有辨识度的原句片段15-60字，用于精确定位是哪一封；禁止所有维度都填同一封或同一句，证据确实来自同一封时可相同）；_v2grade/_v2why 填 V2.0 四步判定的总等级与一句依据。_v2why 仍是一句依据（不要展开）；_reply 用 1~2 句概括整个客诉回邮过程（客户诉求→客服各封如何处理→是否闭环），必须综合全部回邮、不能只写第一封；_gradeWhy 用 2~3 句说明为什么判这个等级：优秀要写清命中哪条增量、达标要写清门槛是否成立及为何未达优秀、不达标要写清是哪条硬伤/阻断/本职基线未过；_final 用 1~2 句给出最终结论并附一句改进建议。这三段的口径属于内部判定，不要写"依据标准第X条"这类条目编号，只写本单具体事实。若命中优秀排除甲乙，_v2grade 不得填优秀、最高达标。'
     + '注意：无客服回邮或仅有机器人自动回复的单不参与质检；敏感词须在评价操纵语境才判违规；SOP标注「质检不判/后台真值NA」的项不得据此扣分。用中文、结构化。';
   var m = [{ role: 'system', content: sys }];
   // 拆成多条 user 消息，每条控制在云函数 16000 字清洗上限内
@@ -7313,7 +7480,8 @@ function qcDoubaoBatchPrompt(indices) {
   var out = ruleParts.join('\n\n') + '\n' + table
     + '\n【输出要求（必须严格遵守，否则无法回填）】\n'
     + '对上表每一条独立打分。先逐条写 2~4 句中文理由，再在最后输出一个 JSON 数组，每行一个对象，格式严格如下：\n'
-    + 'DUOBAO_BATCH_JSON:[{"序号":1,"单号":"表里对应平台单号","语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判X档：理由…","方案合理性":"…","流程&操作完整性":"…","服务技巧":"…","服务态度":"…"},"_v2grade":"达标","_v2why":"V2.0四步一句依据"}]'
+    + 'DUOBAO_BATCH_JSON:[{"序号":1,"单号":"表里对应平台单号","语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判X档：理由…","方案合理性":"…","流程&操作完整性":"…","服务技巧":"…","服务态度":"…"},"_v2grade":"达标","_v2why":"V2.0四步一句依据","_reply":"客户诉求→客服各封处理→是否闭环，1~2句","_gradeWhy":"为什么判这个等级，2~3句具体事实","_final":"最终结论+一句改进建议"}]'
+    + '\n_v2why 仍填一句依据；_reply 概括整个客诉回邮过程（综合全部回邮，不只第一封）、_gradeWhy 说明为什么判该等级、_final 给最终结论与改进建议，三段都只写本单具体事实，不写条款编号。'
     + '\n分数只能用【档位固定分清单】里的值，禁止中间值；等级按【等级判定规则 V2.0】四步独立判定。必须覆盖表里全部 ' + indices.length + ' 条，单号必须与表中一致。';
   return out;
 }
