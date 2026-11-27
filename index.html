@@ -1015,7 +1015,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
     <b style="font-size:14px;color:#1e40af;">🤖 AI 主判分（大模型直接覆盖规则判分）</b>
     <label style="display:flex;align-items:center;gap:5px;font-size:13px;color:#1e3a8a;"><input type="checkbox" id="qcAiPrimaryChk" checked onchange="qcAiPrimaryToggle(this.checked)"> 启用（关闭则回退规则引擎）</label>
   </div>
-  <div style="font-size:12px;color:#334155;line-height:1.7;margin-bottom:10px;">启用后：新明细不再用规则引擎打分，由大模型按质检标准 V2.0＋等级规则＋敏感词＋SOP 场景包<b>盲审</b>判定，判一次即定型写入云端，所有设备打开一致。<b>只对「是否考核=是」的订单判分</b>；不考核单保留原结果、不计入统计。<b style="color:#b91c1c;">三条硬规则：① 已 AI 定型的单永久锁定，不再重判，如需更改只能走规则引擎 / 豆包 / 人工申诉；② 同一时刻只允许一人跑判分（云端互斥锁，别人正在判时会拦截）；③ 每次判分前自动从云端拉取最新知识库，判分依据实时链接知识库＋质检标准。</b>各维度给分理由已清空规则历史、改为 AI 逐项理由。订单已全额退款、或顾客来信后人工第一封即给退款方案的，不得判优秀（本地硬校验）。<b>Key 只存本机浏览器，不上传云端。</b>⚡ <b>已提速</b>：默认 3 条并发判分；若频繁出现 429/失败，把「速度」调低到 1×；红线单本地直接判、不耗 AI 额度。<br>🎯 <b>本次条数</b>：填正整数即只判前 N 条（小批量试跑用），0=全部（仅未判分单）。每次判分生成<b>批次号</b>，本次判过的单在明细表标「🆕本次」。</div>
+  <div style="font-size:12px;color:#334155;line-height:1.7;margin-bottom:10px;">启用后：新明细不再用规则引擎打分，由大模型按质检标准 V2.0＋等级规则＋敏感词＋SOP 场景包<b>盲审</b>判定，判一次即定型写入云端，所有设备打开一致。<b>只对「是否考核=是」的订单判分</b>；不考核单保留原结果、不计入统计。<b style="color:#b91c1c;">三条硬规则：① 已 AI 定型的单默认永久锁定，不再重判，如需更改只能走规则引擎 / 豆包 / 人工申诉；② 同一时刻只允许一人跑判分（云端互斥锁，别人正在判时会拦截）；③ 每次判分前自动从云端拉取最新知识库，判分依据实时链接知识库＋质检标准。</b><b style="color:#0f766e;">测试阶段例外：管理员可用「🧪 测试重跑」按当前口径重判最多 20 条已定型单（强制 1 并发、自动备份、可一键撤销）；默认「🚀 AI 全量重判」仍只处理未判分单。</b>各维度给分理由已清空规则历史、改为 AI 逐项理由。订单已全额退款、或顾客来信后人工第一封即给退款方案的，不得判优秀（本地硬校验）。<b>Key 只存本机浏览器，不上传云端。</b>⚡ <b>已提速</b>：默认 3 条并发判分；若频繁出现 429/失败，把「速度」调低到 1×；红线单本地直接判、不耗 AI 额度。<br>🎯 <b>本次条数</b>：填正整数即只判前 N 条（小批量试跑用），0=全部（仅未判分单）；测试重跑请填 1~20，填 0 时按 20 条处理。每次判分生成<b>批次号</b>，本次判过的单在明细表标「🆕本次」。</div>
   <div id="qcAiProviderBar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;padding:9px 11px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:6px;">
     <b style="font-size:12.5px;color:#075985;">模型服务商：</b>
     <select id="qcAiProviderSel" onchange="qcAiProviderChanged()" style="padding:5px 7px;border:1px solid #7dd3fc;border-radius:5px;font-size:12.5px;background:#fff;"></select>
@@ -1028,6 +1028,8 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
     <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:#1e3a8a;white-space:nowrap;">本次条数：<input type="number" id="qcAiLimitInput" min="0" step="1" value="0" title="填正整数=只判前N条；0=全部（默认）" style="width:66px;padding:4px 6px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;"></label>
     <button class="btn btn-primary btn-sm" onclick="qcAiGradeAllStart()">🚀 AI 全量重判</button>
     <button class="btn btn-outline btn-sm" onclick="qcAiGradeAllStop()">⏹ 中止</button>
+    <button class="btn btn-outline btn-sm" onclick="qcAiTestRerunStart()" title="测试阶段：按当前知识库+质检标准重判前N条已定型单，自动备份可撤销" style="color:#0f766e;border-color:#5eead4;">🧪 测试重跑（≤20）</button>
+    <button class="btn btn-outline btn-sm" onclick="qcAiTestRerunUndo()" title="恢复上次测试重跑前的判定" style="color:#0f766e;border-color:#5eead4;">↩ 撤销测试</button>
     <button class="btn btn-outline btn-sm" onclick="qcShowAiBasis()" title="查看模型判分所用全部依据，优秀依据单独列出">📖 判分依据</button>
     <button class="btn btn-outline btn-sm" onclick="qcDoubaoOpenFirstPending()" title="免费模型全部失败时：复制判分指令→豆包→粘回结果" style="color:#b45309;border-color:#fbbf24;">🟡 豆包兜底（待判分单）</button>
     <button class="btn btn-outline btn-sm" onclick="qcDoubaoBatchOpen()" title="表格批量：规则写一次+多条回邮成表→豆包→粘回结果表批量回填" style="color:#b45309;border-color:#fbbf24;">🟡 豆包批量（表格）</button>
