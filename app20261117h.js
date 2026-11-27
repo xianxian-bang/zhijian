@@ -5552,6 +5552,10 @@ function showDetail(index) {
   html += '</tbody></table>';
   var _finalWhy = '';
   if (r.aiV2why) _finalWhy = String(r.aiV2why).replace(/\s+/g, ' ').trim();
+  // 【20261127】历史定型单 aiV2why 为空时，从 aiRaw 提取 AI 当时的判定依据（纯展示兜底，不重判）
+  if (!_finalWhy && r.aiFinalized && r.aiRaw && typeof qcAiFinalWhyFromRaw === 'function') {
+    try { _finalWhy = qcAiFinalWhyFromRaw(r.aiRaw); } catch (e) {}
+  }
   if (!_finalWhy && r.issues && r.issues.length) {
     var _iw = [];
     for (var _ii = 0; _ii < r.issues.length; _ii++) if (typeof r.issues[_ii] === 'string' && r.issues[_ii]) _iw.push(r.issues[_ii]);
@@ -6152,6 +6156,44 @@ function qcAiBuildResultFromContent(_r, content, modelLabel) {
         result.aiRaw = String(content).slice(0, 6000);
         result.aiPending = false;
   return result;
+}
+// 【20261127】历史定型单「最终判断依据」兜底：从 aiRaw 提取 AI 当时的判定理由。
+// 背景：老版本判分只把 issues 写成「AI 盲审判定：X 分」一句空话、aiV2why 为空，
+// 详情页因此显示不出理由；但 aiRaw 完整保留了「判定依据」段落 + QC_SCORES_JSON._v2why。
+// 这里纯展示层回填——不重判、不改 aiFinalized、不动云端数据。
+function qcAiFinalWhyFromRaw(raw) {
+  var t = String(raw || '');
+  if (!t) return '';
+  var fs = String.fromCharCode(96);
+  while (t.indexOf(fs) >= 0) t = t.replace(fs, '');
+  var jsonPos = t.indexOf('QC_SCORES_JSON');
+  var prose = jsonPos >= 0 ? t.slice(0, jsonPos) : t;
+  // 1) 结论：优先取 JSON 里的 _v2why（一句）
+  var conclusion = '';
+  var jj = qcAiExtractJsonObj(t);
+  if (jj) {
+    try { conclusion = String((JSON.parse(jj) || {})._v2why || '').replace(/\s+/g, ' ').trim(); } catch (e) {}
+  }
+  // 2) 依据：抽「判定依据 / 判定结论」整段（老版本带 ** 加粗标记）
+  var why = '';
+  var m = prose.match(/(?:\*\*)?判定(?:依据|结论)(?:\*\*)?\s*[:：]?([\s\S]*)/);
+  if (m && m[1]) {
+    var seg = m[1].split(/(?:\*\*)?(?:机器可读结果|改进建议|档位铁律)(?:\*\*)?/)[0];
+    why = seg.split('\n').map(function (x) {
+      return String(x).replace(/^\s*(?:[-*•]|\d+[.、])\s*/, '').replace(/\*\*/g, '').replace(/[；;]+$/, '').trim();
+    }).filter(function (x) { return x && x.length > 3; }).join('；');
+    why = why.replace(/\s+/g, ' ').trim();
+  }
+  if (!why) {
+    // 3) 兜底：取前几行自然语言要点
+    why = prose.split('\n').map(function (x) {
+      return String(x).replace(/^\s*(?:[-*•]|\d+[.、])\s*/, '').replace(/\*\*/g, '').trim();
+    }).filter(function (x) { return x && x.length > 8; }).slice(0, 4).join('；').replace(/\s+/g, ' ').trim();
+  }
+  var out = '';
+  if (conclusion) out += '结论：' + conclusion;
+  if (why) out += (out ? '｜依据：' : '') + why;
+  return out.slice(0, 600);
 }
 
 // 【R20】单条 AI 判分核心：盲审 → 调用智谱 → 解析分数/等级 → 返回定型 result（Promise）
@@ -11246,7 +11288,7 @@ function renderReplyChatHtml(text, boxId, agentNames, focus) {
   var bar = '';
   if (focus) {
     bar = '<div class="rc-focus-bar ' + (focus.kind === 'good' ? 'rc-focus-good' : 'rc-focus-bad') + '">'
-      + (focus.kind === 'good' ? '🟡 已定位优秀依据邮件（仅标这一封）：' : '🔴 已定位问题邮件（仅标这一封）：')
+      + (focus.kind === 'good' ? '🟡 重点优秀依据邮件（判定已综合整个回邮过程）：' : '🔴 重点问题邮件（判定已综合整个回邮过程）：')
       + qcEsc(focus.refText || '')
       + (focus.sentence ? '　「' + qcEsc(String(focus.sentence).substring(0, 120)) + '」' : '') + '</div>';
   }
