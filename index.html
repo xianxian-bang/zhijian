@@ -970,6 +970,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
           <div class="filter-item"><label>是否考核：</label><select id="detailFilterAssessed" onchange="renderDetailTable()"><option value="">全部</option><option value="是">是</option><option value="否">否</option></select></div>
           <div class="filter-item" style="display:none;"><label>维度：</label><select id="detailFilterDim" onchange="renderDetailTable()"><option value="">全部</option></select></div>
           <div class="filter-item"><label>申诉状态：</label><select id="detailFilterAppeal" onchange="renderDetailTable()"><option value="">全部</option><option value="无申诉">无申诉</option><option value="待审核">待审核</option><option value="部分通过">部分通过</option><option value="申诉通过">申诉通过</option><option value="申诉被拒">申诉被拒</option></select></div>
+          <div class="filter-item"><label>机器人回邮：</label><select id="detailFilterRobot" onchange="renderDetailTable()"><option value="">全部</option><option value="yes">含 robot 回邮</option><option value="no">不含 robot 回邮</option></select></div>
         </div>
         <span class="fdivider"></span>
         <div class="fblock fops">
@@ -995,7 +996,6 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
       <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-outline btn-sm" onclick="exportDashboard('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDashboard('excel')">导出Excel</button></div>
     </div>
     <div class="kpi-grid" id="kpiGrid"></div>
-    <div class="card" id="weeklyKpiCard" style="margin-bottom:14px;display:none;"><div id="weeklyKpiWrap"></div></div>
     <div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>组别统计</h3></div><div class="table-wrap" id="groupStatsWrap"></div></div>
     <div class="chart-grid">
       <div class="chart-card"><h4>客服绩效对比</h4><div class="chart-scroll"><div class="chart-container" id="wrap-chartDimScores"><canvas id="chartDimScores"></canvas></div></div></div>
@@ -1036,7 +1036,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
   </div>
   <div id="qcAiBulkStatus" style="font-size:12px;color:#1e3a8a;"></div>
 </div>
-<div id="stdNotice" style="margin-top:16px;padding:12px 16px;background:var(--warning-bg);border-radius:6px;font-size:13px;color:var(--warning);">⚠️ 修改标准后请点击「保存标准」，保存后立即按新标准重新质检全部明细（历史与新上传数据同步生效、申诉保留）；也可点击「刷新数据」随时按当前标准重新质检。</div><div id="weeklyStatsAdminWrap" style="margin-top:16px;"></div></div>
+<div id="stdNotice" style="margin-top:16px;padding:12px 16px;background:var(--warning-bg);border-radius:6px;font-size:13px;color:var(--warning);">⚠️ 修改标准后请点击「保存标准」，保存后立即按新标准重新质检全部明细（历史与新上传数据同步生效、申诉保留）；也可点击「刷新数据」随时按当前标准重新质检。</div></div>
   </div>
 </div>
 <div class="tab-content admin-only" id="tab-qclogic">
@@ -1067,7 +1067,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
       <div class="ql-flow">
         <div class="ql-step"><b>① 上传 / 导入</b><small>账号 · 客服 · 平台单号 · 回邮数据（+ 四列登记）</small></div>
         <div class="ql-arrow">→</div>
-        <div class="ql-step"><b>② 抽取客服回邮</b><small>按「收起」拆封、排除亚马逊系统来信；robot 机器人回邮整块跳过；无客服回邮即判无法质检</small></div>
+        <div class="ql-step"><b>② 抽取客服回邮</b><small>按「收起」拆封、排除亚马逊系统来信；robot 机器人回邮正常参与质检；无客服回邮即判无法质检</small></div>
         <div class="ql-arrow">→</div>
         <div class="ql-step stop"><b>③ 平台禁忌预检（仅邮件）</b><small>命中即整单 0 分，后五维不再判；AZ / 中差评不做此判定</small></div>
         <div class="ql-arrow">→</div>
@@ -1355,7 +1355,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 承运商域名：17track · yunexpress · yw56 · yanwen · 4px · DHL · FedEx · UPS · USPS · RoyalMail · Correos · GLS · DPD · Yodel · Evri · Hermes · OnTrac · CanadaPost · AusPost · JapanPost · DeutschePost · LaPoste · Colissimo · bpost · PostNL · Purolator · Aramex · SingPost · SF-Express · ChinaPost · TrackingMore · AfterShip · TNT …</div>
       <div class="ql-sub">⑧ 敏感词红线（2026-11-17 新增 · 语境化执行）</div>
       <div class="ql-kv">词表来自「质检知识库」中<b>适用类型 = 邮件</b>、维度含<b>平台禁忌</b>且上传了表格文件的知识条目（当前：敏感词 / 禁用词11月17.xlsx，283 词，覆盖英德法意荷捷日）。页面加载数据后自动解析最新表格并生效，解析失败时使用内置词表兜底；在知识库重新上传表格即完成换表，无需改代码。<b>AZ / 中差评 的 SOP 即使勾了平台禁忌维度，也不会进入敏感词库。</b></div>
-      <div class="ql-kv">判定口径（避免误伤正常客服用语）：只扫<b>客服回邮</b>，不扫顾客来信与亚马逊来信；<b>标记 robot 的机器人自动回复整块跳过</b>；扫描前<b>剔除中文</b>（回邮常带中文译文，日文汉字词会把译文误伤）；单词命中需满足方向性语境——命中词之后 40 字符内出现评价对象词（review / rating / feedback / Bewertung / évaluation / recensione / valutazione / beoordeling / hodnocení / 評価 / レビュー 等），即「动作 → 评价对象」同句（如 change your review）；多语种操纵短语（give us a second chance / share your experience 等）出现即命中。命中任一 → 平台禁忌红线，整单 0 分。</div>
+      <div class="ql-kv">判定口径（避免误伤正常客服用语）：只扫<b>客服回邮</b>，不扫顾客来信与亚马逊来信；<b>标记 robot 的机器人自动回复照常扫描</b>；扫描前<b>剔除中文</b>（回邮常带中文译文，日文汉字词会把译文误伤）；单词命中需满足方向性语境——命中词之后 40 字符内出现评价对象词（review / rating / feedback / Bewertung / évaluation / recensione / valutazione / beoordeling / hodnocení / 評価 / レビュー 等），即「动作 → 评价对象」同句（如 change your review）；多语种操纵短语（give us a second chance / share your experience 等）出现即命中。命中任一 → 平台禁忌红线，整单 0 分。</div>
       <div class="ql-warn" style="margin-top:12px;">红线是全看板唯一的「整单归零」规则：<b>邮件类型</b>命中后 <b>总分 0、等级不达标、六维度全部 0 分</b>，不再执行后面的语言 / 方案 / 流程 / 技巧 / 态度判定，也不会被知识库保底。AZ / 中差评 不触发这条红线。</div>
       <div class="ql-kv" style="margin-top:10px;" id="qlLandProh"><b>本批数据落点：</b>进入本页时实时统计。</div>
     </div>
@@ -1459,29 +1459,29 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
   </div>
 
   <div class="card ql-sec" id="ql-new2026" style="margin-bottom:16px;">
-    <div class="card-header"><h3>10 · 2026-11-25 新增规则：敏感词范围 / robot 过滤 / 知识库目录与版本</h3><span style="font-size:12px;color:var(--gray-500);">与本次上线代码一一对应</span></div>
+    <div class="card-header"><h3>10 · 敏感词范围 / robot 参与质检 / 知识库目录与版本</h3><span style="font-size:12px;color:var(--gray-500);">与本次上线代码一一对应</span></div>
     <div class="card-body">
       <div class="ql-sub">① 平台禁忌敏感词：只对「邮件」类型生效</div>
       <table class="ql-table">
         <thead><tr><th style="width:150px;">质检明细类型</th><th style="width:150px;">敏感词扫描</th><th>说明</th></tr></thead>
         <tbody>
-          <tr><td><b>邮件</b></td><td><span class="ql-tag t-pass">执行</span></td><td>扫描客服回邮（robot 块先剔除）；命中即平台禁忌红线，整单 0 分。词库 = 知识库中「适用类型=邮件 + 维度含平台禁忌」的表格附件，换表即生效。</td></tr>
+          <tr><td><b>邮件</b></td><td><span class="ql-tag t-pass">执行</span></td><td>扫描客服回邮（含 robot 机器人回邮）；命中即平台禁忌红线，整单 0 分。词库 = 知识库中「适用类型=邮件 + 维度含平台禁忌」的表格附件，换表即生效。</td></tr>
           <tr><td>AZ</td><td><span class="ql-tag t-hard">不执行</span></td><td>不再跑任何敏感词 / 平台禁忌判定；该维度记 -1「不适用」，不参与总分与等级，也不叠加平台禁忌类知识。</td></tr>
           <tr><td>中差评</td><td><span class="ql-tag t-hard">不执行</span></td><td>同上。原中差评 / AZ 敏感词逻辑已撤销，判分只看 AZ SOP / 中差评 SOP。</td></tr>
         </tbody>
       </table>
 
-      <div class="ql-sub">② robot 机器人回邮：整块隐藏 + 跳过质检</div>
+      <div class="ql-sub">② robot 机器人回邮：正常展示 + 正常参与质检</div>
       <div class="ql-flow">
         <div class="ql-step"><b>拆「收起」成块</b><small>逐块看发件人/来源前缀</small></div>
         <div class="ql-arrow">→</div>
-        <div class="ql-step stop"><b>来源 = robot</b><small>robot / bot / 机器人 / 自动回复 / 智能回复</small></div>
+        <div class="ql-step ok"><b>来源 = robot</b><small>robot / bot / 机器人 / 自动回复 / 智能回复</small></div>
         <div class="ql-arrow">→</div>
-        <div class="ql-step"><b>整块丢弃</b><small>不计样本、不判分、不参与流程交叉校验</small></div>
+        <div class="ql-step"><b>纳入质检文本</b><small>参与维度判分、流程交叉校验与平台禁忌检测</small></div>
         <div class="ql-arrow">→</div>
-        <div class="ql-step ok"><b>其余客服回复照常质检</b><small>同会话人工回复不受影响</small></div>
+        <div class="ql-step"><b>可在搜索栏筛选</b><small>「机器人回邮」= 含 robot 回邮 / 不含 robot 回邮</small></div>
       </div>
-      <div class="ql-kv">详情页「回邮数据」里 robot 气泡<b>直接隐藏</b>，只显示「已隐藏 N 条 robot 机器人自动回复（不参与质检）」。若整条会话只有 robot 回复 → 判「无法质检」，不计入质检量 / 达标率。</div>
+      <div class="ql-kv">详情页「回邮数据」里 robot 气泡正常展示，标注「机器人自动回复 · 参与质检」。若整条会话没有任何客服/robot 回邮 → 判「无法质检」，不计入质检量 / 达标率。</div>
 
       <div class="ql-sub">③ 知识库：文件夹树 / 多选 / 拖拽</div>
       <div class="ql-kv">知识库支持<b>多级文件夹</b>（新增 / 重命名 / 移动 / 嵌套 / 删除），知识可拖拽归入文件夹；支持勾选多条做<b>批量移动 / 批量删除</b>；搜索时自动切回扁平列表并显示所属文件夹。<b>文件夹只影响展示与检索，不改变任何判分结果</b>——判分只认知识的适用类型、适用维度、明确要求与内容。</div>
@@ -1648,6 +1648,6 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 .emotion-chip.e-violate { background:#fff2df; color:#a05a00; }
 .emotion-chip.e-threat { background:#f3e8ff; color:#7e22ce; }
 </style>
-<script src="app20261117h.js?v=20261127b1"></script>
+<script src="app20261117h.js?v=20261127c1"></script>
 </body>
 </html>
