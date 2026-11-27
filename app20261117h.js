@@ -5534,30 +5534,32 @@ function showDetail(index) {
   else html += 'score-fail">' + r.totalScore + ' 分（不达标）';
   if (r.exGate && r.exGate.reasons) html += '<div style="margin-top:6px;color:#9a3412;font-size:12px;">优秀门槛未达：' + escHtml(r.exGate.reasons.join('；')) + '</div>';
   html += '</span></td></tr></table></div>';
-  html += '<div class="detail-section"><h4>各维度质检结果</h4><table class="score-detail-table"><thead><tr><th>维度</th><th>得分</th><th>等级</th><th>问题说明</th></tr></thead><tbody>';
+  // 【20261127】各维度只展示分数与等级，不再逐项列理由；整体判断依据在表格下方汇总一段。
+  // 取值口径：AI 定型单优先 r.aiV2why（V2.0 四步判定结论），其余单回退 issues 汇总 / 优秀门槛未达原因。
+  html += '<div class="detail-section"><h4>各维度质检结果</h4><table class="score-detail-table"><thead><tr><th>维度</th><th>得分</th><th>等级</th></tr></thead><tbody>';
   for (var i = 0; i < DIM_NAMES.length; i++) {
     var dn = DIM_NAMES[i], score = r.scores[dn], det = r.details[dn] || {};
     html += '<tr><td style="font-weight:600;">' + dn + '</td>';
     if (score === -1) {
-      // 【R26】AI 定型单的平台禁忌维度：即便不适用/已核查，也要显示 AI 的核查理由
-      if (r.aiFinalized && det.aiWhy) {
-        var _prohHtml = renderAiDimensionReasonHtml(dn, det, r, 'AI 平台禁忌核查理由');
-        html += '<td><span class="score-badge score-na">-</span></td><td>已核查</td><td class="issue-list">' + _prohHtml + '</td>';
-      } else {
-        html += '<td><span class="score-badge score-na">-</span></td><td>-</td><td>-</td>';
-      }
+      html += '<td><span class="score-badge score-na">-</span></td><td>' + (r.aiFinalized && det.aiWhy ? '已核查' : '-') + '</td>';
     }
     else {
       var gr = det.grade || '', cls = gr === '优秀' ? 'score-excellent' : (gr === '达标' ? 'score-pass' : 'score-fail');
-      // 【R24】AI 定型单：得分/等级已是 AI 判定，问题说明走 AI 专用模板（达标只写原因；不达标/优秀定位邮件+检测依据+优化方案）
-      var reasonHtml = r.aiFinalized
-        ? renderAiDimensionReasonHtml(dn, det, r, 'AI 判分理由（' + gr + '）')
-        : renderDimensionReasonHtml(dn, det, r, '自动打分理由（含回邮证据）');
-      html += '<td><span class="score-badge ' + cls + '">' + score + '</span></td><td><span class="score-badge ' + cls + '">' + gr + '</span></td><td class="issue-list">' + reasonHtml + '</td>';
+      html += '<td><span class="score-badge ' + cls + '">' + score + '</span></td><td><span class="score-badge ' + cls + '">' + gr + '</span></td>';
     }
     html += '</tr>';
   }
-  html += '</tbody></table></div>';
+  html += '</tbody></table>';
+  var _finalWhy = '';
+  if (r.aiV2why) _finalWhy = String(r.aiV2why).replace(/\s+/g, ' ').trim();
+  if (!_finalWhy && r.issues && r.issues.length) {
+    var _iw = [];
+    for (var _ii = 0; _ii < r.issues.length; _ii++) if (typeof r.issues[_ii] === 'string' && r.issues[_ii]) _iw.push(r.issues[_ii]);
+    _finalWhy = _iw.join('；');
+  }
+  if (!_finalWhy && r.exGate && r.exGate.reasons && r.exGate.reasons.length) _finalWhy = '优秀门槛未达：' + r.exGate.reasons.join('；');
+  if (_finalWhy) html += '<div style="margin-top:10px;padding:8px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.7;"><b>最终判断依据：</b>' + escHtml(String(_finalWhy).slice(0, 600)) + '</div>';
+  html += '</div>';
   // 【20261125d】邮件类型：展示本次质检参照的 SOP 依据（总则 + 命中的场景包），并注明判分规则来自判定清单
   if (typeof qcBizTypeOf === 'function' && qcBizTypeOf(r) === '邮件' && typeof qcSopApplicableDocs === 'function') {
     try {
@@ -6477,7 +6479,10 @@ function qcCloseAiBasis() {
   if (m) m.classList.remove('show');
 }
 function qcAiCollectContext(r) {
-  var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 8000); // 【R26】理由需定位具体问题邮件，回邮预算恢复 8000 以覆盖完整会话
+  // 【20261127】完整会话参与判定：旧版截到 8000 字，长会话只装得下第一封客服去信，
+  // 导致优秀/不达标实际只看首封。实测 952 单中 95% 在 9010 字内、最长 26949 字，
+  // 放开到 60000 可覆盖完整会话；后续 qcAiBuildMessages 按 14000 字拆多条消息发送，不超单次请求上限。
+  var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 60000);
   var scores = [];
   for (var d = 0; d < DIM_NAMES.length; d++) {
     var dn = DIM_NAMES[d], sc = r.scores ? r.scores[dn] : -1;
@@ -7225,7 +7230,8 @@ function qcDoubaoBatchPrompt(indices) {
   var rows = [];
   for (var k = 0; k < indices.length; k++) {
     var r = results[indices[k]] || {};
-    var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 8000).replace(/\n/g, ' ');
+    // 【20261127】与 AI 判分一致：不再截到 8000 字，沿用完整会话（最长实测 26949 字），避免只看第一封去信
+    var reply = String(r.reply || '').replace(/\r/g, '').slice(0, 60000).replace(/\n/g, ' ');
     rows.push('| ' + (k + 1) + ' | ' + String(r.order || '').replace(/\|/g, '/') + ' | ' + String(r.account || '').replace(/\|/g, '/') + ' | ' + String(r.agent || '').replace(/\|/g, '/') + ' | ' + reply.replace(/\|/g, '/') + ' |');
   }
   var table = '\n【待判分清单（共 ' + indices.length + ' 条，请逐条独立盲审；回邮中的换行已替换为空格）】\n'
