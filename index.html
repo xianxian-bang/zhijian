@@ -928,6 +928,18 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
   </div>
   <div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="qcCloseUserModal()">取消</button><button class="btn btn-primary btn-sm" onclick="qcSubmitUser()">保存</button></div>
 </div></div>
+<div class="modal-overlay" id="qcExportModal"><div class="modal modal-sm"><div class="modal-header"><h3>导出数据</h3><button class="modal-close" onclick="qcCloseExportModal()">&times;</button></div><div class="modal-body">
+  <div style="font-size:12px;color:var(--gray-500);margin-bottom:8px;">选择要导出的模块，确认后直接下载。默认 Excel 格式。</div>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="detail" checked><span><b>质检明细</b><br><span style="color:var(--gray-500);font-size:12px;">当前筛选结果，六维度分数 / 等级 / 问题说明等</span></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="dashboard"><span><b>质检汇总报表</b><br><span style="color:var(--gray-500);font-size:12px;">数据看板同口径的组别 / 客服 / 账号汇总</span></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="standard"><span><b>质检标准</b></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="knowledge"><span><b>质检知识库</b></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="org"><span><b>客服组织架构</b></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="all"><span><b>全部数据备份（JSON）</b><br><span style="color:var(--gray-500);font-size:12px;">含回邮原文与申诉记录，用于跨设备恢复</span></span></label>
+  <label class="qc-export-opt"><input type="radio" name="qcExportModule" value="template"><span><b>下载上传模板</b><br><span style="color:var(--gray-500);font-size:12px;">空白 Excel 模板，字段与上传要求一致</span></span></label>
+  <div style="margin-top:10px;font-size:13px;font-weight:600;color:var(--gray-600);">文件格式</div>
+  <div style="margin-top:6px;"><label style="font-size:13px;margin-right:16px;"><input type="radio" name="qcExportFormat" value="excel" checked> Excel（默认）</label><label style="font-size:13px;"><input type="radio" name="qcExportFormat" value="csv"> CSV（仅明细 / 汇总）</label></div>
+</div><div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="qcCloseExportModal()">取消</button><button class="btn btn-primary btn-sm" onclick="qcDoExport()">确认导出</button></div></div></div>
 <div class="header">
   <div class="header-left"><div class="header-logo">Q</div><h1>邮件质检看板</h1></div>
   <div class="header-actions">
@@ -937,8 +949,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
     <button class="btn btn-outline btn-sm admin-only" id="forceSyncBtn" onclick="qcForceResync()" title="仅管理员可用：清除本机旧缓存，强制用云端最新数据刷新（含他人申诉/审核）">🔄 强制同步</button>
     <span class="admin-badge" id="adminBadge" style="display:none;">🔒 管理模式</span><span class="user-chip" id="userChip" style="display:none;"></span>
 <button class="btn btn-outline btn-sm" id="pwdBtn" style="display:none;" onclick="qcOpenPwdModal(false)">修改密码</button><button class="btn btn-outline btn-sm" id="logoutBtn" style="display:none;" onclick="qcLogout()">退出登录</button>
-    <button class="btn btn-outline btn-sm" onclick="downloadTemplate()">下载模板</button>
-    <button class="btn btn-outline btn-sm" onclick="exportAllData()">导出数据</button>
+    <button class="btn btn-outline btn-sm" id="qcExportBtn" onclick="qcOpenExportModal()" title="选择模块导出数据，默认 Excel">导出数据</button>
     <button class="btn btn-outline btn-sm" onclick="qcSnapOpenPanel()" title="查看最近 7 天的本机自动备份">备份与恢复</button>
     <div class="header-info" id="urlDataStatus" style="display:none;font-size:12px;color:var(--success);">数据已保存到完整网址（请复制地址栏网址）</div>
     <button class="btn btn-primary btn-sm admin-only" onclick="openUploadModal()">上传数据</button>
@@ -979,7 +990,6 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
         </div>
       <!-- 申诉状态三色角标（筛选栏独立项：清空 与 导出CSV 之间；无范围标签、三项居中） -->
       <div class="appeal-badge-bar" id="appealBadgeBar" style="display:none;"><div class="ab-chip ab-pending" id="abPending" onclick="qcOpenAppealInbox('pending')" title="待审核：待处理的申诉"><span class="ab-dot"></span><span>待审核</span><span class="ab-num" id="abNumPending">0</span></div><div class="ab-chip ab-passed" id="abPassed" onclick="qcOpenAppealInbox('passed')" title="申诉通过：点击查看结果，看过数字即清除"><span class="ab-dot"></span><span>申诉通过</span><span class="ab-num" id="abNumPassed">0</span></div><div class="ab-chip ab-rejected" id="abRejected" onclick="qcOpenAppealInbox('rejected')" title="申诉被拒：点击查看结果，看过数字即清除"><span class="ab-dot"></span><span>申诉被拒</span><span class="ab-num" id="abNumRejected">0</span></div></div>
-      <div class="btn-row export-row"><button class="btn btn-outline btn-sm" onclick="exportDetail('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDetail('excel')">导出Excel</button></div>
     </div>
     <div id="detailOverview" class="detail-overview"></div>
     <div class="card"><div class="table-wrap" style="max-height:600px;overflow-y:auto;"><table class="data-table" id="detailTable"><thead></thead><tbody></tbody></table></div></div>
@@ -993,8 +1003,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
       <div class="filter-item"><label>组别：</label><select id="dashFilterGroup" onchange="onDashFilterChange()"><option value="">全部组别</option></select></div>
       <div class="filter-item"><label>账号：</label><select id="dashFilterAccount" onchange="renderDashboard()"><option value="">全部账号</option></select></div>
       <div class="filter-item"><label>客服：</label><select id="dashFilterAgent" onchange="renderDashboard()"><option value="">全部客服</option></select></div>
-      <div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-outline btn-sm" onclick="exportDashboard('csv')">导出CSV</button><button class="btn btn-outline btn-sm" onclick="exportDashboard('excel')">导出Excel</button></div>
-    </div>
+          </div>
     <div class="kpi-grid" id="kpiGrid"></div>
     <div class="card" style="margin-bottom:14px;"><div class="card-header"><h3>组别统计</h3></div><div class="table-wrap" id="groupStatsWrap"></div></div>
     <div class="chart-grid">
@@ -1009,7 +1018,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 </div>
 <div class="tab-content" id="tab-standard">
   <div class="card">
-    <div class="card-header"><div style="display:flex;align-items:center;gap:10px;"><h3>亚飞客服质检标准-V1.0</h3><button class="btn btn-outline btn-sm" id="adminQuickLoginBtn" style="display:none;" onclick="qcAdminQuickLogin()" title="使用管理员密码登录，开启全部管理权限">🔐 管理员登录</button></div><div style="display:flex;gap:8px;"><button class="btn btn-outline btn-sm admin-only" onclick="resetStandard()">重置标准</button><button class="btn btn-success btn-sm admin-only" onclick="saveStandard()">保存标准</button><button class="btn btn-outline btn-sm admin-only" onclick="qcRefreshData()" title="按当前质检标准重新质检全部明细（历史数据一并应用，申诉保留）">🔄 刷新数据</button><button class="btn btn-outline btn-sm" onclick="exportStandard()">导出标准</button></div></div>
+    <div class="card-header"><div style="display:flex;align-items:center;gap:10px;"><h3>亚飞客服质检标准-V1.0</h3><button class="btn btn-outline btn-sm" id="adminQuickLoginBtn" style="display:none;" onclick="qcAdminQuickLogin()" title="使用管理员密码登录，开启全部管理权限">🔐 管理员登录</button></div><div style="display:flex;gap:8px;"><button class="btn btn-outline btn-sm admin-only" onclick="resetStandard()">重置标准</button><button class="btn btn-success btn-sm admin-only" onclick="saveStandard()">保存标准</button><button class="btn btn-outline btn-sm admin-only" onclick="qcRefreshData()" title="按当前质检标准重新质检全部明细（历史数据一并应用，申诉保留）">🔄 刷新数据</button></div></div>
     <div class="card-body"><div id="standardTableWrap"></div><div id="gradeRulesWrap" style="margin-top:20px;"></div><div id="aiPrimaryPanel" class="admin-only" style="margin-top:16px;padding:14px 16px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
     <b style="font-size:14px;color:#1e40af;">🤖 AI 主判分（大模型直接覆盖规则判分）</b>
@@ -1504,7 +1513,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
   <div class="filter-bar">
     <div class="filter-item"><label style="font-size:15px;font-weight:600;">质检知识库</label></div>
     <div style="margin-left:auto;display:flex;gap:8px;">
-      <button class="btn btn-outline btn-sm" onclick="exportKnowledgeBase()">导出知识库</button>
+      
       <button class="btn btn-outline btn-sm admin-only" onclick="qcKbOpenFolderModal()">📁 新建文件夹</button>
       <button class="btn btn-outline btn-sm admin-only" onclick="qcKbOpenImport()">📥 批量导入文档</button>
       <button class="btn btn-primary btn-sm case-edit-only" onclick="openKnowledgeModal('case-good')">新增好案例</button>
@@ -1527,7 +1536,7 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 <div class="modal-overlay" id="kbBatchMoveModal"><div class="modal modal-sm"><div class="modal-header"><h3>批量移动到文件夹</h3><button class="modal-close" onclick="qcKbCloseBatchMove()">&times;</button></div><div class="modal-body"><div id="kbBatchMoveHint" style="font-size:13px;color:var(--gray-600);margin-bottom:10px;"></div><select id="kbBatchTarget" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></select></div><div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="qcKbCloseBatchMove()">取消</button><button class="btn btn-primary btn-sm" onclick="qcKbConfirmBatchMove()">移动</button></div></div></div>
 <div class="modal-overlay" id="kbImportModal"><div class="modal modal-sm"><div class="modal-header"><h3>批量导入知识文档</h3><button class="modal-close" onclick="qcKbCloseImport()">&times;</button></div><div class="modal-body"><div style="font-size:13px;color:var(--gray-600);line-height:1.7;margin-bottom:12px;">支持一次选多个文件：<b>.md / .txt / .csv</b> 直接读取正文入库（文件名作为标题）；PDF / Word / Excel / 图片按附件入库。导入后按当前知识规则自动重跑全部明细。</div><div style="margin-bottom:12px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">导入到文件夹</label><select id="kbImportFolder" style="width:100%;padding:8px 12px;border:1px solid var(--gray-300);border-radius:6px;font-size:14px;"></select></div><div style="margin-bottom:10px;"><label style="font-size:14px;font-weight:500;color:var(--gray-600);display:block;margin-bottom:8px;">选择文件（可多选）</label><input type="file" id="kbImportFiles" multiple accept=".md,.markdown,.txt,.csv,.pdf,.doc,.docx,.xls,.xlsx,image/*" style="width:100%;font-size:13px;"></div><div id="kbImportStatus" style="font-size:12px;color:var(--gray-500);min-height:18px;"></div></div><div class="modal-footer"><button class="btn btn-outline btn-sm" onclick="qcKbCloseImport()">取消</button><button class="btn btn-primary btn-sm" onclick="qcKbImportFiles()">开始导入</button></div></div></div>
 <div class="tab-content" id="tab-org">
-  <div class="filter-bar"><div class="filter-item"><label style="font-size:15px;font-weight:600;">客服组织架构映射</label></div><div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-primary btn-sm admin-only" onclick="openAmzSyncModal()">从 AMZ 同步</button><button class="btn btn-outline btn-sm admin-only" onclick="document.getElementById('orgFileInput').click()">导入架构</button><input type="file" id="orgFileInput" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleOrgFileSelect(event)"><button class="btn btn-outline btn-sm" onclick="exportOrg()">导出架构</button><button class="btn btn-primary btn-sm admin-only" onclick="showAddGroupModal()">添加组别</button></div></div>
+  <div class="filter-bar"><div class="filter-item"><label style="font-size:15px;font-weight:600;">客服组织架构映射</label></div><div style="margin-left:auto;display:flex;gap:8px;"><button class="btn btn-primary btn-sm admin-only" onclick="openAmzSyncModal()">从 AMZ 同步</button><button class="btn btn-outline btn-sm admin-only" onclick="document.getElementById('orgFileInput').click()">导入架构</button><input type="file" id="orgFileInput" accept=".csv,.xlsx,.xls" style="display:none" onchange="handleOrgFileSelect(event)"><button class="btn btn-primary btn-sm admin-only" onclick="showAddGroupModal()">添加组别</button></div></div>
   <div id="orgReviewerBar" class="org-reviewer-bar"></div>
   <div class="org-grid" id="orgGrid"></div>
   <div style="margin-top:16px;padding:12px 16px;background:var(--info-bg);border-radius:6px;font-size:13px;color:var(--info);">💡 说明：组织架构用于数据看板中的「组别统计」和「组别筛选」。每组可设 1 名组长，组长拥有本组申诉的复核权限（可逐项重新打分）。修改客服名字后，已有质检数据中的客服名不会自动更新，但看板会按映射关系归类统计。</div>
@@ -1650,19 +1659,31 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 </style>
 <style id="detail-compact-20261127">
 /* 【20261127】详情页紧凑化：缩短区块间距与表格行高，整体记录详情不再过长 */
-.detail-section { margin-bottom:12px; }
-.detail-section h4 { margin-bottom:5px; padding-bottom:4px; }
-.score-detail-table th, .score-detail-table td { padding:5px 12px; line-height:1.45; }
-.data-table td, .data-table th { line-height:1.45; }
-.rc-card { margin-bottom:8px; }
-.rc-card-head { padding:6px 14px; }
-.rc-card-body { padding:7px 14px; }
-.rc-base-row { padding-bottom:6px; margin-bottom:6px; }
-.rc-reg-row { gap:10px 22px; }
-.rc-reg-row.rc-reg-main { padding-bottom:6px; }
-.rc-reg-row.rc-reg-sub { padding-top:6px; }
-.rc-reg-v { padding:0 8px; }
+.detail-section { margin-bottom:10px; }
+.detail-section h4 { margin-bottom:4px; padding-bottom:3px; }
+.score-detail-table th, .score-detail-table td { padding:4px 12px; line-height:1.35; }
+.data-table td, .data-table th { line-height:1.35; }
+/* 基本信息表：每行再压紧一点 */
+.qc-basic-info-table td { padding:3px 10px; line-height:1.3; }
+/* 回邮数据卡片头部三行：紧凑 */
+.rc-card { margin-bottom:7px; }
+.rc-card-head { padding:4px 14px; }
+.rc-card-body { padding:5px 14px 6px; }
+.rc-base-row { padding-bottom:4px; margin-bottom:4px; }
+.rc-base { font-size:12px; }
+.rc-reg-row { gap:5px 18px; }
+.rc-reg-row.rc-reg-main { padding-bottom:4px; }
+.rc-reg-row.rc-reg-sub { padding-top:4px; }
+.rc-reg { font-size:12px; }
+.rc-reg-v { padding:0 7px; }
+/* 质检明细主表：行高缩短 */
+#detailTable tbody td { padding:5px 12px; line-height:1.3; }
+#detailTable thead th { padding:7px 6px; }
+/* 导出弹窗 */
+.qc-export-opt { display:flex; align-items:flex-start; gap:8px; padding:7px 9px; border:1px solid var(--gray-200); border-radius:6px; margin-bottom:6px; cursor:pointer; font-size:13px; }
+.qc-export-opt:hover { background:var(--gray-50); }
+.qc-export-opt input { margin-top:3px; }
 </style>
-<script src="app20261117h.js?v=20261127c2"></script>
+<script src="app20261117h.js?v=20261127c3"></script>
 </body>
 </html>
