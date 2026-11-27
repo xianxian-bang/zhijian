@@ -2330,8 +2330,8 @@ function inspectOne(item) {
   var customerText = extracted.customerText || customer;
   var amazonCount = extracted.amazonCount || 0;
   var robotCount = extracted.robotCount || 0;
-  // 【20261125a·需求5】robot 块已从质检文本中剔除；后续流程校验 / 禁忌上下文也用剔除后的回邮
-  var replyForCheck = qcReplyWithoutRobot(reply);
+  // 【20261127】robot 回邮正常参与质检：流程校验 / 平台禁忌上下文使用完整回邮，不再剔除 robot。
+  var replyForCheck = reply;
   // 亚马逊系统来信处理（2026-10-14 调整）：
   // 过去「排除亚马逊系统来信后没有可质检内容」会整条判为「无法质检」；
   // 现改为把亚马逊系统来信一并纳入质检范围正常打分，仅在没有其他可质检内容时才启用该回退，
@@ -2347,13 +2347,13 @@ function inspectOne(item) {
   if (allAmazonSession || (!hasAgentReply && reply.indexOf('收起') >= 0)) {
     var _noReplyIssue = allAmazonSession
       ? '回邮段落全部为亚马逊系统来信且没有客服回邮，无法进行质检'
-      : (robotCount > 0 ? '回邮中仅包含 robot 机器人自动回复，已跳过质检（不计入质检样本）' : '回邮中没有客服回邮段落，无法进行质检');
+      : '回邮中没有客服回邮段落，无法进行质检';
     return applyKnowledgeToResult({ account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
       reply: reply, customer: customer,
       scores: { '语言语法表达': -1, '方案合理性': -1, '流程&操作完整性': -1, '服务技巧': -1, '服务态度': -1, '平台禁忌': -1 },
       totalScore: -1, grade: '无法质检',
       issues: [_noReplyIssue],
-      details: {}, noAgentReply: true, amazonOnlySession: allAmazonSession, robotSkipped: robotCount > 0 }, agentText, customerText);
+      details: {}, noAgentReply: true, amazonOnlySession: allAmazonSession, robotIncluded: robotCount > 0 }, agentText, customerText);
   }
   if (amazonCount > 0 && !agentText.trim()) {
     var withAmazon = extractAgentReplies(reply, true);
@@ -2410,7 +2410,7 @@ function inspectOne(item) {
   var total = scores['语言语法表达'] + scores['方案合理性'] + scores['流程&操作完整性'] + scores['服务技巧'] + scores['服务态度'];
     var finalResult = { account: item.account, agent: item.agent, order: item.order, date: item.date || getCurrentDate(),
       reply: reply, customer: customer, scores: scores, totalScore: total, grade: determineGrade(total), issues: issues, details: details,
-      amazonExcluded: amazonExcludedCount, amazonIncluded: amazonIncludedCount };
+      amazonExcluded: amazonExcludedCount, amazonIncluded: amazonIncludedCount, robotIncluded: robotCount > 0 };
     return applyKnowledgeToResult(finalResult, agentText, customerText);
 }
 
@@ -2476,10 +2476,10 @@ function inspectNonMail(item, bizType) {
 }
 
 // ============================================================
-// 【20261125a·需求5】robot 机器人回邮过滤
+// 【20261127】robot 机器人回邮纳入质检
 // 规则：回邮块「发件人/来源」标记为 robot（robot / bot / 机器人 / 自动回复 等）时，
-// 整块隐藏、跳过全部质检逻辑：不计入质检样本、不产出缺陷、不参与任何维度与流程交叉校验。
-// 同一会话里其余客服人工回复照常完整质检。
+// 与人工客服回邮一样进入质检文本、参与维度判分 / 流程交叉校验 / 平台禁忌检测；
+// 仅在优秀排除「人工第一封即退款」里继续按「非机器人」口径识别人工邮件。
 // ============================================================
 var QC_ROBOT_HEAD_RE = /(^|[^a-z0-9])(robot|chatbot|auto[\s-]?reply|auto[\s-]?response|机器人|自动回复|智能回复)([^a-z0-9]|$)/i;
 function qcBlockHead(block) {
@@ -2498,7 +2498,7 @@ function qcCountRobotBlocks(text) {
   for (var i = 0; i < blocks.length; i++) if (qcBlockIsRobot(blocks[i])) n++;
   return n;
 }
-// 去掉 robot 块后的回邮文本（用于流程交叉校验 / 平台禁忌上下文，防止 robot 内容影响判分）
+// 去掉 robot 块后的回邮文本（仅用于优秀排除「人工第一封即退款」识别人工首封，不再用于日常质检）
 function qcReplyWithoutRobot(text) {
   if (!text || text === '无联客记录') return text;
   var blocks = String(text).split('收起'), out = [];
@@ -2526,8 +2526,8 @@ function extractAgentReplies(text, includeAmazon) {
   var blocks = text.split('收起');
   for (var i = 0; i < blocks.length; i++) {
     var block = blocks[i];
-    // 【20261125a·需求5】robot 自动回复：整块跳过（不计样本、不判分、不参与上下文）
-    if (qcBlockIsRobot(block)) { robotCount++; continue; }
+    // 【20261127】robot 自动回复正常参与质检：仅计数，不再跳过。
+    if (qcBlockIsRobot(block)) robotCount++;
     if (isAmazonBlock(block)) { amazonCount++; if (!includeAmazon) continue; } // 亚马逊系统来信（如销售伙伴支持团队）默认不参与客诉质检
     nonAmazonText += block + '\n';
     var sm = block.match(/\[(发送成功|发送失败|已撤回)\]([\s\S]*?)(?=\d{4}-\d{2}-\d{2}|$)/);
@@ -4303,6 +4303,8 @@ function populateFilters() {
   for (var di = 0; di < DIM_NAMES.length; di++) dimHtml += '<option value="' + escHtml(DIM_NAMES[di]) + '">' + escHtml(DIM_NAMES[di]) + '</option>';
   document.getElementById('detailFilterDim').innerHTML = dimHtml;
   document.getElementById('detailFilterAppeal').value = '';
+  var fRobotEl = document.getElementById('detailFilterRobot');
+  if (fRobotEl) fRobotEl.value = '';
   var fAsEl = document.getElementById('detailFilterAssessed');
   if (fAsEl) fAsEl.value = '';
   document.getElementById('dashFilterGroup').innerHTML = buildOpts(groups, '全部组别');
@@ -4616,7 +4618,7 @@ function resetAllDetailFilters() {
   multiSelState = { account: [], agent: [], grade: [] };
   bulkTerms = [];
   detailOrderExact = '';
-  var ids = ['detailFilterGroup', 'detailFilterAppeal', 'detailFilterAssessed', 'detailFilterDim', 'detailBulk'];
+  var ids = ['detailFilterGroup', 'detailFilterAppeal', 'detailFilterRobot', 'detailFilterAssessed', 'detailFilterDim', 'detailBulk'];
   for (var i = 0; i < ids.length; i++) { var el = document.getElementById(ids[i]); if (el) el.value = ''; }
   var h = document.getElementById('bulkHint'); if (h) h.textContent = '';
   OV_SEARCH = { agent: { text: '', active: false, hits: [] }, account: { text: '', active: false, hits: [] }, focus: { text: '', active: false, hits: [] } };
@@ -5035,6 +5037,17 @@ function qcNormalizeAmountOdrFields(d) {
   }
   return d;
 }
+// 【20261127】搜索栏 robot 回邮筛选：优先按「收起」块头识别；纯文本再按解析出的发送者名兜底。
+function qcRecordHasRobotReply(r) {
+  var reply = String((r && r.reply) || '');
+  if (!reply || reply === '无联客记录') return false;
+  try { if (qcCountRobotBlocks(reply) > 0) return true; } catch (e) {}
+  try {
+    var msgs = parseReplyChatFull(reply, []);
+    for (var i = 0; i < msgs.length; i++) if (qcRcIsRobotMsg(msgs[i])) return true;
+  } catch (e2) {}
+  return false;
+}
 function renderDetailTable() {
   var fG = document.getElementById('detailFilterGroup').value;
   var fA = getMultiValues('account');
@@ -5042,6 +5055,7 @@ function renderDetailTable() {
   var fGr = getMultiValues('grade');
   var fAp = document.getElementById('detailFilterAppeal').value;
   var fAs = document.getElementById('detailFilterAssessed') ? document.getElementById('detailFilterAssessed').value : '';
+  var fRobot = document.getElementById('detailFilterRobot') ? document.getElementById('detailFilterRobot').value : '';
   var fDim = document.getElementById('detailFilterDim') ? document.getElementById('detailFilterDim').value : '';
   var filtered = [];
   for (var i = 0; i < results.length; i++) {
@@ -5052,6 +5066,8 @@ function renderDetailTable() {
     if (!multiMatches((isReferenceCaseResult(r) ? '参考案例' : r.grade) || '', 'grade')) continue;
     if (!bulkMatches(r)) continue;
     if (fAp && getAppealStatus(r) !== fAp) continue;
+    if (fRobot === 'yes' && !qcRecordHasRobotReply(r)) continue;
+    if (fRobot === 'no' && qcRecordHasRobotReply(r)) continue;
     if (fAs && (sessionParticipation(r).assessed ? '是' : '否') !== fAs) continue;
     if (fDim && !(r.scores[fDim] >= 0 && r.details[fDim] && r.details[fDim].grade === '不达标')) continue;
     if (detailOrderExact && r.order !== detailOrderExact) continue;
@@ -5110,7 +5126,7 @@ function renderDetailTable() {
         html += '<td class="cell-group-end"><span class="score-badge ' + tc + '">' + r.totalScore + '</span></td><td><span class="score-badge ' + tc + '">' + r.grade + '</span>' + _batchTag + '</td>';
       }
       var appealStatus = getAppealStatus(r);
-      html += '<td class="cell-group-start">' + appealStatusBadge(appealStatus) + '</td><td class="cell-group-end"><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span> <span class="clickable" onclick="openAppealModal(' + r._index + ')">申诉</span></td>';
+      html += '<td class="cell-group-start">' + appealStatusBadge(appealStatus) + '</td><td class="cell-group-end"><span class="clickable" onclick="showDetail(' + r._index + ')">查看详情</span></td>';
       var _os = orderSendStat(r);
       var _part = sessionParticipation(r);
       var _agentTotal = sendStat.byAgent[canonicalAgentName(r.agent) || '（未填写客服）'] || 0;
@@ -5511,32 +5527,9 @@ function buildReplyDataBlockHtml(r, boxId) {
   html += '</div>';
   return html;
 }
-function showDetail(index) {
-  var r = results[index];
-  if (!r) return;
-  normalizeResultAppeal(r);
-  var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
-  html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (qcFmtOdr(rcOdr(r)) !== '' ? escHtml(qcFmtOdr(rcOdr(r))) : '-') + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (rcOrderAmount(r) !== '' ? escHtml(rcOrderAmount(r)) : '-') + '</td></tr>';
-  html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
-  var _dp = sessionParticipation(r);
-  html += '<tr><td style="font-weight:600;">客服去信</td><td>该客服 ' + _dp.mine + ' 封 / 本单客服合计 ' + _dp.total + ' 封 · 占比 ' + _dp.pct.toFixed(1) + '%'
-        + ' <span class="score-badge ' + (_dp.assessed ? 'score-pass' : 'score-na') + '">' + (_dp.assessed ? '参与考核' : '不参与考核') + '</span></td></tr>';
-  html += '<tr><td style="font-weight:600;">总分</td><td><span class="score-badge ';
-  if (r.totalScore === -1) html += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
-  else if (isReferenceCaseResult(r)) html += 'score-na">参考案例（不参与统计）';
-  else if (r.grade === '优秀') html += 'score-excellent">' + r.totalScore + ' 分（优秀）';
-  else if (r.grade === '达标') html += 'score-pass">' + r.totalScore + ' 分（达标）';
-  else html += 'score-fail">' + r.totalScore + ' 分（不达标）';
-  if (r.exGate && r.exGate.reasons) html += '<div style="margin-top:6px;color:#9a3412;font-size:12px;">优秀门槛未达：' + escHtml(r.exGate.reasons.join('；')) + '</div>';
-  html += '</span></td></tr></table></div>';
-  // 【20261127】各维度只展示分数与等级，不再逐项列理由；整体判断依据在表格下方汇总一段。
-  // 取值口径：AI 定型单优先 r.aiV2why（V2.0 四步判定结论），其余单回退 issues 汇总 / 优秀门槛未达原因。
-  html += '<div class="detail-section"><h4>各维度质检结果</h4><table class="score-detail-table"><thead><tr><th>维度</th><th>得分</th><th>等级</th></tr></thead><tbody>';
+// 【20261127】质检结果摘要：详情页与申诉面板共用，保证申诉里看到的分数、等级、结论与「查看详情」完全一致。
+function qcQualityResultHtml(r) {
+  var html = '<div class="detail-section"><h4>各维度质检结果</h4><table class="score-detail-table"><thead><tr><th>维度</th><th>得分</th><th>等级</th></tr></thead><tbody>';
   for (var i = 0; i < DIM_NAMES.length; i++) {
     var dn = DIM_NAMES[i], score = r.scores[dn], det = r.details[dn] || {};
     html += '<tr><td style="font-weight:600;">' + dn + '</td>';
@@ -5550,10 +5543,8 @@ function showDetail(index) {
     html += '</tr>';
   }
   html += '</tbody></table>';
-  // 【20261127】综合判定结论：回邮概况 / 为什么判此等级 / 最终结论（纯展示组装，不重判、不改分数）
-  // 计算口径不体现在界面，只保留对本单具体事实的说明；口径写在源码注释里便于回溯。
+  // 综合判定结论：新判单优先 AI 结构化三段；老单由展示层从 aiRaw + 回邮原文组装，不重判。
   var _cc = null;
-  // 新判单：AI 已直接给出三段结构化结论，优先用；老单：由展示层从 aiRaw + 回邮原文组装
   if (r.aiCaseSummary && (r.aiCaseSummary.reply || r.aiCaseSummary.gradeWhy || r.aiCaseSummary.final)) {
     _cc = r.aiCaseSummary;
   } else if (typeof qcBuildCaseConclusion === 'function') {
@@ -5580,7 +5571,33 @@ function showDetail(index) {
     if (!_finalWhy && r.exGate && r.exGate.reasons && r.exGate.reasons.length) _finalWhy = '优秀门槛未达：' + r.exGate.reasons.join('；');
     if (_finalWhy) html += '<div style="margin-top:10px;padding:8px 11px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.7;"><b>最终判断依据：</b>' + escHtml(String(_finalWhy).slice(0, 600)) + '</div>';
   }
-  html += '</div>';
+  return html + '</div>';
+}
+function showDetail(index) {
+  var r = results[index];
+  if (!r) return;
+  normalizeResultAppeal(r);
+  var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table" style="font-size:13px;">';
+  html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">ODR</td><td>' + (qcFmtOdr(rcOdr(r)) !== '' ? escHtml(qcFmtOdr(rcOdr(r))) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (rcOrderAmount(r) !== '' ? escHtml(rcOrderAmount(r)) : '-') + '</td></tr>';
+  html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
+  var _dp = sessionParticipation(r);
+  html += '<tr><td style="font-weight:600;">客服去信</td><td>该客服 ' + _dp.mine + ' 封 / 本单客服合计 ' + _dp.total + ' 封 · 占比 ' + _dp.pct.toFixed(1) + '%'
+        + ' <span class="score-badge ' + (_dp.assessed ? 'score-pass' : 'score-na') + '">' + (_dp.assessed ? '参与考核' : '不参与考核') + '</span></td></tr>';
+  html += '<tr><td style="font-weight:600;">总分</td><td><span class="score-badge ';
+  if (r.totalScore === -1) html += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
+  else if (isReferenceCaseResult(r)) html += 'score-na">参考案例（不参与统计）';
+  else if (r.grade === '优秀') html += 'score-excellent">' + r.totalScore + ' 分（优秀）';
+  else if (r.grade === '达标') html += 'score-pass">' + r.totalScore + ' 分（达标）';
+  else html += 'score-fail">' + r.totalScore + ' 分（不达标）';
+  if (r.exGate && r.exGate.reasons) html += '<div style="margin-top:6px;color:#9a3412;font-size:12px;">优秀门槛未达：' + escHtml(r.exGate.reasons.join('；')) + '</div>';
+  html += '</span></td></tr></table></div>';
+  // 【20261127】各维度分数 + 等级 + 综合判定结论：与申诉面板共用同一个函数，避免两边结论不同步。
+  html += qcQualityResultHtml(r);
   // 【20261125d】邮件类型：展示本次质检参照的 SOP 依据（总则 + 命中的场景包），并注明判分规则来自判定清单
   if (typeof qcBizTypeOf === 'function' && qcBizTypeOf(r) === '邮件' && typeof qcSopApplicableDocs === 'function') {
     try {
@@ -5599,7 +5616,11 @@ function showDetail(index) {
   }
   if (r.knowledgeEvidence && r.knowledgeEvidence.length) { html += '<div class="detail-section"><h4>知识库命中记录</h4><div class="detail-msg-box">'; for (var ke = 0; ke < r.knowledgeEvidence.length; ke++) { var kev = r.knowledgeEvidence[ke]; html += '<div style="margin-bottom:8px;"><b>' + escHtml(kev.title) + '</b>（' + escHtml(knowledgeTypeLabel(kev.type)) + '）<br>' + escHtml(kev.content); var kevb = findKnowledgeById(kev.id); if (kevb && kevb.sourceType === 'url') html += ' <a href="' + escHtml(kevb.url) + '" target="_blank" style="color:var(--primary);text-decoration:underline;">🔗 打开文档</a>'; else if (kevb && kevb.sourceType === 'file') html += ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(kevb.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 打开附件</a>'; html += '</div>'; } html += '</div></div>'; }
   html += buildReplyDataBlockHtml(r, 'replyChat_' + index);
-  html += '<div class="detail-section"><h4>申诉状态</h4>' + appealStatusBadge(getAppealStatus(r)) + ' <button class="btn btn-outline btn-sm" onclick="closeRecordModal();openAppealModal(' + index + ')">查看/处理申诉</button></div>';
+  // 【20261127】旧「查看/处理申诉」按钮已删除；统一在查看详情下方展开申诉申请。
+  html += '<div class="detail-section" id="detailAppealSection"><h4>申诉</h4>'
+       + '<div style="margin-bottom:8px;">当前状态：' + appealStatusBadge(getAppealStatus(r)) + '</div>'
+       + '<button class="btn btn-outline btn-sm" id="detailAppealBtn" onclick="qcDetailAppealToggle(' + index + ')">申诉</button>'
+       + '<div id="detailAppealPanel" style="display:none;margin-top:12px;"></div></div>';
   // 【R20】AI 主判分：展示本单判分来源与定型状态（复核按钮已移除，改由质检标准页全量重判入口）
   if (r.aiFinalized || r.aiPending || r.aiAdopted) {
     var _aiTag = r.aiFinalized
@@ -5622,6 +5643,148 @@ function showDetail(index) {
   }
   document.getElementById('recordModalBody').innerHTML = html;
   document.getElementById('recordModal').classList.add('show');
+}
+
+// ============================================================
+// 【20261127】详情页内申诉：展开填写理由 + 附件，形成申请记录；同意/拒绝仅管理员可用。
+// 申诉面板直接复用 qcQualityResultHtml(r)，保证「申诉里的结论」与「查看详情里的质检结果」完全一致。
+// ============================================================
+function qcDetailAppealToggle(index) {
+  var panel = document.getElementById('detailAppealPanel');
+  if (!panel) return;
+  if (panel.style.display === 'block') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  qcDetailAppealRender(index);
+}
+function qcDetailOpenAppealAttachment(index, attachmentIndex) {
+  var r = results[index];
+  var a = r && r.appeal && r.appeal.attachments ? r.appeal.attachments[attachmentIndex] : null;
+  if (!a || !a.path) { showToast('附件地址不可用', 'error'); return; }
+  openAppealAttachment(a.path, a.name);
+}
+function qcDetailAppealRender(index) {
+  var r = results[index];
+  var panel = document.getElementById('detailAppealPanel');
+  if (!r || !panel) return;
+  normalizeResultAppeal(r);
+  var a = r.appeal;
+  var h = '<div style="font-size:12px;color:#64748b;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:10px;line-height:1.7;">下方质检结果与「查看详情」使用同一份数据；提交申请后管理员可在本页同意或拒绝。</div>';
+  h += qcQualityResultHtml(r);
+  h += '<div class="detail-section"><h4>申请记录</h4>';
+  if (a.status === '无申诉') {
+    h += '<div style="font-size:12px;color:#94a3b8;">暂无申请记录</div>';
+  } else {
+    h += '<div style="padding:10px 12px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;color:#334155;line-height:1.8;">'
+      + '<div><b>状态：</b>' + appealStatusBadge(a.status) + '</div>'
+      + '<div><b>关联质检结论：</b>' + escHtml(r.grade || '-') + ' · ' + (r.totalScore === undefined || r.totalScore === null ? '-' : r.totalScore) + ' 分</div>'
+      + '<div><b>申诉理由：</b>' + escHtml(a.reason || '-') + '</div>'
+      + '<div><b>提交时间：</b>' + escHtml(String(a.submittedAt || '-').replace('T', ' ').slice(0, 19)) + '</div>';
+    if (a.reviewReason) h += '<div><b>审核说明：</b>' + escHtml(a.reviewReason) + '</div>';
+    if (a.reviewer) h += '<div><b>审核人：</b>' + escHtml(a.reviewer) + ' · ' + escHtml(String(a.reviewedAt || '').replace('T', ' ').slice(0, 19)) + '</div>';
+    var atts = a.attachments || [];
+    if (atts.length) {
+      h += '<div style="margin-top:5px;"><b>附件：</b>';
+      for (var ai = 0; ai < atts.length; ai++) {
+        h += '<button class="btn-link" style="margin-right:8px;" onclick="qcDetailOpenAppealAttachment(' + index + ',' + ai + ')">' + escHtml(atts[ai].name || ('附件' + (ai + 1))) + '</button>';
+      }
+      h += '</div>';
+    }
+    if (a.status === '待审核' && AUTH && AUTH.role === 'admin') {
+      h += '<div style="margin-top:10px;display:flex;gap:8px;">'
+        + '<button class="btn btn-success btn-sm" onclick="qcDetailAppealDecide(' + index + ',\'approve\')">同意</button>'
+        + '<button class="btn btn-outline btn-sm" style="color:#b91c1c;border-color:#fca5a5;" onclick="qcDetailAppealDecide(' + index + ',\'reject\')">拒绝</button></div>';
+    }
+    h += '</div>';
+  }
+  h += '</div>';
+  if (a.status === '无申诉') {
+    var mods = getAppealSubmitModules(r);
+    if (!mods.length) mods = getAppealModules(r);
+    h += '<div class="detail-section"><h4>新增申诉</h4>'
+      + '<textarea id="detailAppealReason" rows="4" placeholder="请输入申诉理由（必填）" style="width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid var(--gray-300);border-radius:6px;font-size:12px;line-height:1.6;resize:vertical;"></textarea>'
+      + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">申诉模块（默认全选未达标模块）</label><div id="detailAppealModuleList" style="display:flex;flex-wrap:wrap;gap:8px;">';
+    for (var mi = 0; mi < mods.length; mi++) {
+      var md = mods[mi], det = (r.details && r.details[md]) || {}, sc = r.scores ? r.scores[md] : undefined;
+      h += '<label style="font-size:12px;color:#334155;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px;">'
+        + '<input type="checkbox" name="detailAppealModules" value="' + escHtml(md) + '" checked> ' + escHtml(md)
+        + ' <span style="color:#64748b;">' + (sc === undefined || sc === null || Number(sc) < 0 ? '-' : sc) + ' 分 / ' + escHtml(det.grade || '-') + '</span></label>';
+    }
+    h += '</div></div>'
+      + '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--gray-600);display:block;margin-bottom:6px;">附件（可选，最多5个，每个不超过10MB）</label>'
+      + '<input type="file" id="detailAppealFiles" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf" multiple></div>'
+      + '<div style="margin-top:12px;"><button class="btn btn-primary btn-sm" id="detailAppealSubmitBtn" onclick="qcDetailAppealSubmit(' + index + ')">提交申诉</button></div></div>';
+  }
+  panel.innerHTML = h;
+}
+function qcDetailAppealSubmit(index) {
+  var r = results[index];
+  if (!r) return;
+  normalizeResultAppeal(r);
+  if (r.appeal.status !== '无申诉') { showToast('该质检已提交过申诉，不能重复提交', 'error'); return; }
+  var reasonEl = document.getElementById('detailAppealReason');
+  var reason = String((reasonEl && reasonEl.value) || '').trim();
+  if (!reason) { showToast('请填写申诉理由', 'error'); return; }
+  var mods = getCheckedValues('detailAppealModuleList', 'detailAppealModules');
+  if (!mods.length) { showToast('请至少选择一个申诉模块', 'error'); return; }
+  var filesEl = document.getElementById('detailAppealFiles');
+  var files = filesEl ? filesEl.files : [];
+  var btn = document.getElementById('detailAppealSubmitBtn');
+  if (btn) btn.disabled = true;
+  uploadAppealFiles(index, files).then(function(newFiles) {
+    r.appeal.status = '待审核';
+    r.appeal.reason = reason;
+    r.appeal.submittedAt = new Date().toISOString();
+    r.appeal.reviewer = ''; r.appeal.reviewReason = ''; r.appeal.reviewedAt = '';
+    r.appeal.modules = mods;
+    r.appeal.moduleDecisions = {}; r.appeal.moduleReviewReasons = {}; r.appeal.moduleScores = {};
+    r.appeal.attachments = (r.appeal.attachments || []).concat(newFiles);
+    renderDetailTable();
+    saveDataToUrl();
+    try { qcAuditAppend(r, 'submit'); } catch (e) {}
+    return cloudSaveState();
+  }).then(function() {
+    showToast('申诉已提交，状态为待审核', 'success');
+    qcDetailAppealRender(index);
+  }).catch(function(err) {
+    showToast((err && err.message) || '申诉提交失败，请重试', 'error');
+  }).finally(function() { if (btn) btn.disabled = false; });
+}
+function qcDetailAppealDecide(index, action) {
+  if (!AUTH || AUTH.role !== 'admin') { showToast('只有管理员可以同意或拒绝申诉', 'error'); return; }
+  var r = results[index];
+  if (!r) return;
+  normalizeResultAppeal(r);
+  if (r.appeal.status !== '待审核') { showToast('只有「待审核」状态可以处理', 'error'); return; }
+  var beforeTotal = Number(r.totalScore);
+  if (isNaN(beforeTotal)) beforeTotal = 0;
+  var reason = action === 'approve' ? '管理员同意申诉' : '管理员拒绝申诉';
+  var rv = (AUTH && AUTH.name) ? (AUTH.name + '（管理员）') : '管理员';
+  r.appeal.reviewer = rv;
+  r.appeal.reviewedAt = new Date().toISOString();
+  r.appeal.reviewReason = reason;
+  r.appeal.modules = r.appeal.modules.length ? r.appeal.modules : getAppealModules(r);
+  for (var i = 0; i < r.appeal.modules.length; i++) {
+    var dim = r.appeal.modules[i];
+    r.appeal.moduleDecisions[dim] = action === 'approve' ? '通过' : '被拒';
+    r.appeal.moduleReviewReasons[dim] = reason;
+  }
+  updateAppealStatusFromModules(r);
+  if (action === 'approve') applyAppealApprovedGrade(r);
+  if (r.appealAdjusted) {
+    r.appeal.status = Number(r.totalScore) > beforeTotal ? '申诉通过' : '申诉被拒';
+  } else {
+    r.appeal.status = '申诉被拒';
+  }
+  renderDetailTable();
+  try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
+  saveDataToUrl();
+  try { qcAuditAppend(r, action); } catch (e) {}
+  return cloudSaveState().then(function() {
+    showToast(action === 'approve' ? ('已同意申诉：总分 ' + beforeTotal + ' → ' + r.totalScore + '（' + r.grade + '）') : '已拒绝申诉，原质检结果保持不变', 'success');
+    qcDetailAppealRender(index);
+  }).catch(function(err) {
+    showToast((err && err.message) || '申诉处理失败，请重试', 'error');
+  });
 }
 
 // ============================================================
@@ -5882,7 +6045,7 @@ function qcAiExcellentExclude(rawItem) {
       var rHit = excClauseHit(reply, EXC_REFUND_EXEC, EXC_REFUND_NEG);
       if (rHit && EXC_REFUND_CTX.test(reply)) reasons.push('甲·客服已执行退款且属退货/拦截/取消场景（按全额退款计，「' + rHit + '」）');
     }
-    // 乙：顾客来信后人工第一封即提供退款方案（先剔除 robot 块）
+    // 乙：顾客来信后人工第一封即提供退款方案（继续只识别人工首封，robot 不算人工）
     var clean = qcReplyWithoutRobot(reply);
     var msgs = splitReplyEmails(clean, true);
     var custSeen = false, firstAgentBody = '';
@@ -5909,7 +6072,7 @@ function qcAiCapToPass(dim, score) {
 }
 // 【R24·需求1】AI 主判分前：本地确定性平台禁忌红线检测（红线规则 + 平台禁忌敏感词库）
 // 命中即整单0分，不调用 AI（省免费额度、确定性、不依赖模型是否遵守 prompt）。
-// 检测文本与规则引擎 inspectOne 完全一致：客服回邮（剔除 robot）+ amazon 兜底。
+// 检测文本与规则引擎 inspectOne 完全一致：客服回邮（含 robot）+ amazon 兜底。
 // 【R29】红线检测专用：剔除「客户来信（拉取时间）」段与亚马逊官方系统信模板段，
 // 只保留客服 [发送成功/失败/已撤回] 的回邮，避免把亚马逊模板信里的 remove feedback /
 // sellercentral 帮助链接误判成客服的平台禁忌红线。仅对无「收起」会话结构的单块回邮生效；
@@ -6078,7 +6241,7 @@ function qcAiRedlineCheck(item) {
   var safe = qcRedlineStripCustomer(reply);
   var ex = extractAgentReplies(safe);
   var agentText = ex.agentText || '';
-  var replyForCheck = qcReplyWithoutRobot(safe);
+  var replyForCheck = safe;
   if ((ex.amazonCount || 0) > 0 && !agentText.trim()) {
     var withAmazon = extractAgentReplies(safe, true);
     agentText = withAmazon.agentText || ex.nonAmazonText || replyForCheck || '';
@@ -6728,7 +6891,7 @@ function qcAiBuildMessages(ctx) {
     + '④【档位铁律】每个维度的分数只能是【档位固定分清单】里的分数，禁止任何中间值（方案只给40/32/15，流程只给25/10，技巧只给15/10/5，态度只给15/10/5，语言只给5/0）。判定为哪一档就给该档对应固定分。'
     + '⑤正文写完后【必须】另起一行输出机器可读结果，只输出 JSON 对象本身，不要代码块、不要多余文字。格式：QC_SCORES_JSON:{"语言语法表达":5,"方案合理性":32,"流程&操作完整性":25,"服务技巧":10,"服务态度":10,"_grade":{"语言语法表达":"达标","方案合理性":"达标","流程&操作完整性":"达标","服务技巧":"达标","服务态度":"达标"},"_why":{"语言语法表达":"判达标：回邮有完整问候与落款、语法通顺；依据质检标准语言语法表达-达标：表达完整、语气礼貌。","方案合理性":"判达标：客服回邮第2封明确答复退款并闭环；依据质检标准方案合理性-达标：给出有效方案。"},"_mail":{"语言语法表达":{"role":"客服回邮","quote":"Best regards 落款原句"},"方案合理性":{"role":"客服回邮","quote":"我们已为您办理退款的原句"}},"_v2grade":"达标","_v2why":"门槛成立但未命中任一增量","_reply":"客户来信反馈收到的商品缺少测量仪等配件、与描述不符；客服在第1封回邮即致歉并说明全额退款流程，第2封跟进确认退款已提交，整个诉求已闭环。","_gradeWhy":"门槛成立（客服全程跟进、诉求已实质解决）；未命中任一增量（无超预期补偿、无主动回访、客户未明确认可）；无阻断，客户未表达强烈负面，故封顶达标。","_final":"本单判定为达标：客诉已妥善闭环、流程无缺失，但服务止于本职、缺少超预期表现，未达优秀；建议在处理同类缺件场景时主动提供补发选项并确认客户是否满意。"}'
     + '字段说明：_why 每维用【一句中肯的话】写明结论(判哪档)+最关键的回邮证据+依据条款，会写入质检明细替换旧理由，务必具体、别空泛，每维控制在 90 字以内；_grade 填中文等级（优秀/达标/不达标）；_mail 每维给出该判定依据的邮件线索（role 填「客服回邮」或「客户来信」，quote 填该邮件里最有辨识度的原句片段15-60字，用于精确定位是哪一封；禁止所有维度都填同一封或同一句，证据确实来自同一封时可相同）；_v2grade/_v2why 填 V2.0 四步判定的总等级与一句依据。_v2why 仍是一句依据（不要展开）；_reply 用 1~2 句概括整个客诉回邮过程（客户诉求→客服各封如何处理→是否闭环），必须综合全部回邮、不能只写第一封；_gradeWhy 用 2~3 句说明为什么判这个等级：优秀要写清命中哪条增量、达标要写清门槛是否成立及为何未达优秀、不达标要写清是哪条硬伤/阻断/本职基线未过；_final 用 1~2 句给出最终结论并附一句改进建议。这三段的口径属于内部判定，不要写"依据标准第X条"这类条目编号，只写本单具体事实。若命中优秀排除甲乙，_v2grade 不得填优秀、最高达标。'
-    + '注意：无客服回邮或仅有机器人自动回复的单不参与质检；敏感词须在评价操纵语境才判违规；SOP标注「质检不判/后台真值NA」的项不得据此扣分。用中文、结构化。';
+    + '注意：无客服回邮的单不参与质检；机器人自动回复与人工客服回邮一样参与质检；敏感词须在评价操纵语境才判违规；SOP标注「质检不判/后台真值NA」的项不得据此扣分。用中文、结构化。';
   var m = [{ role: 'system', content: sys }];
   // 拆成多条 user 消息，每条控制在云函数 16000 字清洗上限内
   function pushPart(prefix, text, limit) {
@@ -8548,7 +8711,6 @@ function qcSaveWeeklyStatRange(id, fromInputId, toInputId) {
   var nSync = qcApplyEditedBatchDates(results, rawData);
   var syncNote = stat.batchId ? '；已同步本批次 ' + nSync + ' 条明细的日期' : '；旧批次无绑定标识，仅修改统计日期';
   renderDetailTable();
-  renderWeeklyStatsAdmin();
   renderDashboard();
   return cloudSaveState().then(function(saved) {
     if (!saved) { showToast('日期已在当前页面更新，但未确认云端保存' + syncNote, 'error'); return; }
@@ -8598,8 +8760,6 @@ function qcSaveWeeklyStatEdit(id, fromInputId, toInputId, cntId, avgId, passId, 
   var nSync = stat.batchId ? qcApplyEditedBatchDates(results, rawData) : 0;
   var syncNote = stat.batchId ? '；本批次 ' + nSync + ' 条明细日期已同步' : '';
   renderDetailTable();
-  renderWeeklyStatsAdmin();
-  renderWeeklyKpi();
   renderDashboard();
   return cloudSaveState().then(function(saved) {
     if (!saved) { showToast('修改已在当前页面生效，但未确认云端保存', 'error'); return; }
@@ -8619,8 +8779,6 @@ function qcDeleteWeeklyStat(id) {
   if (rec.id && QC_WS_DELETED.indexOf(rec.id) === -1) QC_WS_DELETED.push(rec.id);
   if (rec.batchId && QC_WS_DELETED.indexOf(rec.batchId) === -1) QC_WS_DELETED.push(rec.batchId);
   QC_WEEKLY_STATS.splice(idx, 1);
-  renderWeeklyStatsAdmin();
-  renderWeeklyKpi();
   renderDashboard();
   return cloudSaveState().then(function(saved) {
     if (!saved) { showToast('记录已在当前页面删除，但未确认云端保存（其他设备暂未同步）', 'error'); return; }
@@ -8683,7 +8841,6 @@ function renderDashboard() {
   // 环比上下文用全部 results（含未参与考核的单）建立，避免筛选变化时基准周漂移
   wowBuildContext(_src);
   renderKPI(dashboardData, skippedUnassessed);
-  try { if (typeof renderWeeklyKpi === 'function') renderWeeklyKpi(dashboardData); } catch (e) {}
   wowDecorateKPI(dashboardData);
   var _dim = (document.getElementById('summaryDimension') || {}).value || 'agent';
   renderGroupStats(dashboardData);
@@ -10390,8 +10547,6 @@ function renderStandard() {
   if (notice) notice.innerHTML = canEdit
     ? '⚠️ 修改标准后请点击「保存标准」，保存后将应用于后续质检。如需对已质检数据重新质检，请重新上传数据。'
     : '👁 只读：质检标准与等级阈值只有管理员可以修改。';
-  // 【2026-11-23 周度统计】管理员在此页编辑每条统计记录的日期
-  try { renderWeeklyStatsAdmin(); } catch (e) {}
 }
 // 「刷新数据」：管理员按当前质检标准重新质检全部明细（历史+新数据一并应用）—— 2026-11-19
 function qcRefreshData() {
@@ -11510,11 +11665,10 @@ function rcBubbleHtml(x, focus) {  var isCust = x.role === 'customer';
     ? '（拉取时间：' + qcEsc(x.pullTime) + (statusHtml ? '，' + statusHtml : '') + '）'
     : (statusHtml ? ' ' + statusHtml : '');
   return '<div class="rc-msg ' + (isCust ? 'rc-cust' : 'rc-agent') + (isBot ? ' rc-bot' : '') + hl + '">'
-    + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span>' + hlTag + (isBot ? '<span style="margin-left:6px;font-size:11px;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;border-radius:4px;padding:1px 5px;">机器人自动回复 · 不参与质检</span>' : '') + ' <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
+    + '<div class="rc-meta"><span class="rc-name">' + qcEsc(name) + '</span>' + hlTag + (isBot ? '<span style="margin-left:6px;font-size:11px;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;border-radius:4px;padding:1px 5px;">机器人自动回复 · 参与质检</span>' : '') + ' <span class="rc-time">' + qcEsc(x.sendTime) + '</span>' + metaTail + '</div>'
     + '<div class="rc-bubble">' + qcRcBodyHtml(x.body) + '</div></div>';
 }
-// 【20261125f·需求】robot 消息：正常展示（与人工邮件一样出现在会话气泡里），不再隐藏；
-//   但是否参与质检由质检层决定——extractAgentReplies/qcReplyWithoutRobot 仍整块剔除 robot，不计样本、不判分。
+// 【20261127】robot 消息：正常展示并正常参与质检；旧版“不参与质检”规则已取消。
 function qcRcIsRobotMsg(x) {
   return !!(x && x.role !== 'customer' && /^(robot|bot|机器人|自动回复|智能回复)$/i.test(String(x.name || '').trim()));
 }
@@ -11522,7 +11676,7 @@ function renderReplyChatHtml(text, boxId, agentNames, focus) {
   boxId = boxId || 'replyChat';
   var arr = parseReplyChatFull(text, agentNames);
   if (!arr.length) return '<div class="detail-msg-box">' + qcEsc(text || '') + '</div>';
-  // 【20261125f】不再 filter robot：机器人邮件正常展示；气泡上标注「不参与质检」，判定层仍跳过它
+  // 【20261127】机器人邮件正常展示并标注「参与质检」；判定层已纳入。
   var bar = '';
   if (focus) {
     bar = '<div class="rc-focus-bar ' + (focus.kind === 'good' ? 'rc-focus-good' : 'rc-focus-bad') + '">'
@@ -12553,8 +12707,8 @@ function qcInboxGoDetail(idx) {
   qcCloseAppealInbox();
   try { switchTabByName('detail'); } catch (e) {}
   setTimeout(function () {
-    try { openAppealModal(idx); }
-    catch (e) { try { showDetail(idx); } catch (e2) {} }
+    try { showDetail(idx); qcDetailAppealToggle(idx); }
+    catch (e) { try { openAppealModal(idx); } catch (e2) {} }
   }, 60);
 }
 
