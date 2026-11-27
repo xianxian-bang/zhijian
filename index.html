@@ -1687,3 +1687,204 @@ body:not(.admin-mode) #knowledgeLibraryWrap td:last-child { display: none !impor
 <script src="app20261117h.js?v=20261127c3"></script>
 </body>
 </html>
+<script>
+function buildReplyDataBlockHtml(r, boxId) {
+var _bt0 = rcBizType(r);
+if (_bt0 === 'AZ' || _bt0 === '中差评') return buildAppealDataBlockHtml(r, boxId, _bt0);
+var html = '<div class="detail-section">';
+html += '<div class="rc-card">';
+html += '<div class="rc-card-head"><h4 class="rc-title">回邮数据</h4></div>';
+html += '<div class="rc-card-body">';
+var _replyOdr = qcFmtOdr(rcOdr(r));
+html += '<div class="rc-base-row">'
++ '<div class="rc-base"><span class="rc-base-l">账号</span><span class="rc-base-v">' + escHtml(r.account) + '</span></div>'
++ '<div class="rc-base"><span class="rc-base-l">ODR</span><span class="rc-base-v">' + escHtml(_replyOdr || '-') + '</span></div>'
++ '<div class="rc-base"><span class="rc-base-l">平台订单号</span><span class="rc-base-v">' + escHtml(r.order) + '</span></div>'
++ '<div class="rc-base rc-base-amt"><span class="rc-base-l">订单金额</span><span class="rc-base-v rc-amt-v">' + (function(){ var _a = rcOrderAmount(r); return _a !== '' ? escHtml(_a) : '-'; })() + '</span></div>'
++ '<div class="rc-base"><span class="rc-base-l">客服</span><span class="rc-base-v">' + escHtml(canonicalAgentName(r.agent)) + '</span></div>'
++ '</div>';
+var _regMain = [['是否需要检查流程操作', qcYesNo(r.processCheck)], ['是否有补件', qcYesNo(r.replenishment)], ['是否有退款登记', qcYesNo(r.refundReg)], ['是否有问题反馈', qcYesNo(r.issueFeedback)]];
+var _regSub = [['退货', rcReturnInfo(r)], ['AZ', rcAzInfo(r)], ['中差评', rcNegReview(r)], ['客户情绪', rcCustEmotion(r)]];
+function _regRowHtml(list, cls) {
+var h = '<div class="rc-reg-row ' + cls + '">';
+for (var _i = 0; _i < list.length; _i++) {
+h += '<div class="rc-reg"><span class="rc-reg-l">' + list[_i][0] + '</span><span class="rc-reg-v">' + escHtml(list[_i][1] || '') + '</span></div>';
+}
+return h + '</div>';
+}
+html += _regRowHtml(_regMain, 'rc-reg-main') + _regRowHtml(_regSub, 'rc-reg-sub');
+html += '</div></div>';
+if (r.noAgentReply) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;color:#475569;font-size:12px;">本单' + (r.amazonOnlySession ? '回邮段落全部为亚马逊系统来信、' : '') + '没有客服回邮，已标记为「无法质检」并 <b>不纳入任何统计</b>（不计入质检量 / 达标率 / 不达标率 / 等级分布）。</div>';
+else if (r.amazonExcluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#fff7e6;border:1px solid #ffe0a3;border-radius:4px;color:#9a6700;font-size:12px;">已识别并排除 ' + r.amazonExcluded + ' 段亚马逊系统来信（如销售伙伴支持团队），这些内容不参与客诉质检。</div>';
+else if (r.amazonIncluded > 0) html += '<div style="margin-bottom:8px;padding:6px 10px;background:#eaf3ff;border:1px solid #b6d4fe;border-radius:4px;color:#1a5fb4;font-size:12px;">本单含亚马逊系统来信，因存在客服回邮，已按正常质检流程纳入判分。</div>';
+var dr = r.reply || '';
+var _qcAgentNames = [];
+for (var _qa = 0; _qa < rawData.length; _qa++) { var _qn = rawData[_qa] && String(rawData[_qa].agent || '').trim(); if (_qn && _qcAgentNames.indexOf(_qn) < 0) _qcAgentNames.push(_qn); }
+for (var _qb = 0; _qb < _qcAgentNames.length; _qb++) { var _qc = canonicalAgentName(_qcAgentNames[_qb]); if (_qc && _qcAgentNames.indexOf(_qc) < 0) _qcAgentNames.push(_qc); }
+if (_qcAgentNames.indexOf('robot') < 0) _qcAgentNames.push('robot');
+var _focus = null;
+try { _focus = qcReplyFocus(r); } catch (_fE) { _focus = null; }
+html += '<div class="detail-msg-box rc-msgbox">' + renderReplyChatHtml(dr, boxId, _qcAgentNames, _focus) + '</div>';
+html += '</div>';
+return html;
+}
+function showDetail(index) {
+var r = results[index];
+if (!r) return;
+normalizeResultAppeal(r);
+var html = '<div class="detail-section"><h4>基本信息</h4><table class="data-table qc-basic-info-table" style="font-size:13px;">';
+html += '<tr><td style="width:100px;font-weight:600;">组别</td><td>' + escHtml(getGroupByAgent(r.agent)) + '</td></tr>';
+html += '<tr><td style="font-weight:600;">账号</td><td>' + escHtml(r.account) + '</td></tr>';
+html += '<tr><td style="font-weight:600;">ODR</td><td>' + (qcFmtOdr(rcOdr(r)) !== '' ? escHtml(qcFmtOdr(rcOdr(r))) : '-') + '</td></tr>';
+html += '<tr><td style="font-weight:600;">客服</td><td>' + escHtml(canonicalAgentName(r.agent)) + '</td></tr>';
+html += '<tr><td style="font-weight:600;">平台单号</td><td>' + escHtml(r.order) + '</td></tr>';
+html += '<tr><td style="font-weight:600;">订单金额</td><td>' + (rcOrderAmount(r) !== '' ? escHtml(rcOrderAmount(r)) : '-') + '</td></tr>';
+html += '<tr><td style="font-weight:600;">日期</td><td>' + escHtml(r.date) + '</td></tr>';
+var _dp = sessionParticipation(r);
+html += '<tr><td style="font-weight:600;">客服去信</td><td>该客服 ' + _dp.mine + ' 封 / 本单客服合计 ' + _dp.total + ' 封 · 占比 ' + _dp.pct.toFixed(1) + '%'
++ ' <span class="score-badge ' + (_dp.assessed ? 'score-pass' : 'score-na') + '">' + (_dp.assessed ? '参与考核' : '不参与考核') + '</span></td></tr>';
+html += '<tr><td style="font-weight:600;">总分</td><td><span class="score-badge ';
+if (r.totalScore === -1) html += 'score-na">无法质检' + (r.noAgentReply ? '（无客服回邮）' : '');
+else if (isReferenceCaseResult(r)) html += 'score-na">参考案例（不参与统计）';
+else if (r.grade === '优秀') html += 'score-excellent">' + r.totalScore + ' 分（优秀）';
+else if (r.grade === '达标') html += 'score-pass">' + r.totalScore + ' 分（达标）';
+else html += 'score-fail">' + r.totalScore + ' 分（不达标）';
+if (r.exGate && r.exGate.reasons) html += '<div style="margin-top:6px;color:#9a3412;font-size:12px;">优秀门槛未达：' + escHtml(r.exGate.reasons.join('；')) + '</div>';
+html += '</span></td></tr></table></div>';
+html += qcQualityResultHtml(r);
+if (typeof qcBizTypeOf === 'function' && qcBizTypeOf(r) === '邮件' && typeof qcSopApplicableDocs === 'function') {
+try {
+var _sopDocs = qcSopApplicableDocs(String(r.reply || '') + '\n' + String(r.customer || ''));
+if (_sopDocs.length) {
+html += '<div class="detail-section"><h4 onclick="qcSopToggle(this)" style="cursor:pointer;user-select:none;">本单适用的 SOP 质检依据（邮件 · v2）<span class="qc-sop-arrow" style="float:right;font-size:12px;color:var(--gray-500);font-weight:400;">▸ 展开</span></h4><div class="detail-msg-box qc-sop-body" style="display:none;">';
+html += '<div style="margin-bottom:8px;color:var(--gray-600);font-size:12px;">以下 SOP 文档为本次判分的规则来源；扣分点来自其判定清单中 P0/P1 的违规表述命中，未命中不扣分。</div>';
+for (var sd = 0; sd < _sopDocs.length; sd++) {
+var sod = _sopDocs[sd];
+html += '<div style="margin-bottom:6px;">• <b>' + escHtml(sod.title) + '</b>'
++ ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(sod.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 查看原文</a></div>';
+}
+html += '</div></div>';
+}
+} catch (e) {}
+}
+if (r.knowledgeEvidence && r.knowledgeEvidence.length) { html += '<div class="detail-section"><h4>知识库命中记录</h4><div class="detail-msg-box">'; for (var ke = 0; ke < r.knowledgeEvidence.length; ke++) { var kev = r.knowledgeEvidence[ke]; html += '<div style="margin-bottom:8px;"><b>' + escHtml(kev.title) + '</b>（' + escHtml(knowledgeTypeLabel(kev.type)) + '）<br>' + escHtml(kev.content); var kevb = findKnowledgeById(kev.id); if (kevb && kevb.sourceType === 'url') html += ' <a href="' + escHtml(kevb.url) + '" target="_blank" style="color:var(--primary);text-decoration:underline;">🔗 打开文档</a>'; else if (kevb && kevb.sourceType === 'file') html += ' <a href="#" onclick="openKnowledgeFileById(\'' + escHtml(kevb.id) + '\');return false;" style="color:var(--primary);text-decoration:underline;">📄 打开附件</a>'; html += '</div>'; } html += '</div></div>'; }
+html += buildReplyDataBlockHtml(r, 'replyChat_' + index);
+html += '<div class="detail-section" id="detailAppealSection"><h4>申诉</h4>'
++ '<div style="margin-bottom:8px;">当前状态：' + appealStatusBadge(getAppealStatus(r)) + '</div>'
++ '<button class="btn btn-outline btn-sm" id="detailAppealBtn" onclick="qcDetailAppealToggle(' + index + ')">申诉</button>'
++ '<div id="detailAppealPanel" style="display:none;margin-top:12px;"></div></div>';
+if (typeof isAdminMode === 'function' && isAdminMode() && !r.aiFinalized) {
+html += '<div class="detail-section" id="qcAiRerunBox"><h4>AI 模型重跑</h4>'
++ '<div style="font-size:12px;color:var(--gray-600);line-height:1.7;margin-bottom:8px;">对<b>当前这一单</b>单独跑一次 AI 主判分（与「质检标准 → AI 主判分」同一套判定依据：实时链接知识库＋质检标准）。判定后立即定型并同步云端；已定型单不可再跑。</div>'
++ '<button class="btn btn-primary btn-sm" id="qcAiRerunBtn" onclick="qcAiRerunOne(' + index + ')">🤖 AI 模型重跑（仅本单）</button>'
++ (r.aiPending ? ' <button class="btn btn-outline btn-sm" onclick="qcDoubaoOpen(' + index + ')" title="免费模型判分失败时用">🟡 豆包兜底</button>' : '')
++ ' <span id="qcAiRerunStatus" style="font-size:12px;color:var(--gray-500);"></span></div>';
+}
+document.getElementById('recordModalBody').innerHTML = html;
+document.getElementById('recordModal').classList.add('show');
+}
+function qcImportBatches(rows) {
+var map = {}, out = [];
+for (var i = 0; i < (rows || []).length; i++) {
+var r = rows[i]; if (!r) continue;
+var id = String(r.batchId || '无批次');
+if (!map[id]) { map[id] = { id: id, rows: [], at: '' }; out.push(map[id]); }
+map[id].rows.push(r);
+}
+var meta = {};
+try { for (var w = 0; w < QC_WEEKLY_STATS.length; w++) { var s = QC_WEEKLY_STATS[w]; if (s && s.batchId) meta[s.batchId] = s.createdAt || ''; } } catch (e) {}
+for (var j = 0; j < out.length; j++) {
+var b = out[j], m = /^b-(\d+)/.exec(b.id);
+b.at = meta[b.id] || (m ? new Date(Number(m[1])).toISOString() : '');
+if (!b.at && b.rows.length) b.at = String(b.rows[0].date || '');
+}
+out.sort(function (a, c) { return String(a.at).localeCompare(String(c.at)); });
+return out;
+}
+function qcImportFmtVal(metric, v) {
+if (v === null || v === undefined || !isFinite(v)) return '—';
+if (metric === 'passRate' || metric === 'failRate' || metric.indexOf('dimFailRate:') === 0 || metric.indexOf('dimPassRate:') === 0) return v.toFixed(1) + '%';
+if (metric === 'avg' || metric.indexOf('dimAvg:') === 0 || metric.indexOf('dimGap:') === 0) return v.toFixed(1) + '分';
+if (metric === 'total' || metric === 'valid' || metric.indexOf('dimFailCount:') === 0 || metric.indexOf('grade:') === 0) return Math.round(v) + '条';
+return String(Math.round(v * 10) / 10);
+}
+function qcImportLabel(metric) {
+if (metric === 'total') return '质检量';
+if (metric === 'valid') return '有效质检';
+if (metric === 'avg') return '平均分';
+if (metric === 'passRate') return '达标率';
+if (metric === 'failRate') return '不达标率';
+if (metric.indexOf('dimFailRate:') === 0) return metric.slice(12) + '不达标率';
+if (metric.indexOf('dimFailCount:') === 0) return metric.slice(14) + '不达标量';
+if (metric.indexOf('dimAvg:') === 0) return metric.slice(7) + '均分';
+if (metric.indexOf('dimGap:') === 0) return metric.slice(7) + '差距';
+if (metric.indexOf('dimPassRate:') === 0) return metric.slice(13) + '达标率';
+if (metric.indexOf('grade:') === 0) return metric.slice(6);
+return metric;
+}
+function qcImportTrendTip(rows, metric, compact) {
+var batches = qcImportBatches(rows);
+if (!batches.length) return '';
+var lines = [], prev = null, label = qcImportLabel(metric);
+for (var i = 0; i < batches.length; i++) {
+var b = batches[i], v = wowRawMetric(b.rows, metric);
+var delta = (prev !== null && v !== null) ? v - prev : null;
+var when = b.at ? String(b.at).replace('T', ' ').slice(0, 16) : b.id;
+var ds = delta === null ? '' : '（' + (delta > 0 ? '+' : delta < 0 ? '−' : '±') + qcImportFmtVal(metric, Math.abs(delta)) + '）';
+lines.push(when + '  ' + label + ' ' + qcImportFmtVal(metric, v) + ds);
+prev = v;
+}
+if (lines.length > 12) lines = lines.slice(-12);
+return (compact ? '' : '历次导入趋势（实时）：\n') + lines.join(compact ? ' ｜ ' : '\n');
+}
+function qcDecorateImportTrendKPI(data) {
+var grid = document.getElementById('kpiGrid');
+if (!grid) return;
+var cards = grid.querySelectorAll('.kpi-card');
+var metrics = ['total', 'avg', 'passRate', 'failRate'];
+for (var i = 0; i < cards.length && i < metrics.length; i++) cards[i].setAttribute('title', qcImportTrendTip(data, metrics[i]));
+}
+function wowTip(rows, metric) {
+return qcImportTrendTip(rows, metric);
+}
+function wowDecorateKPI(data) {
+qcDecorateImportTrendKPI(data);
+}
+function wowChartLine(rows, metric) {
+return qcImportTrendTip(rows, metric, true);
+}
+function qcOpenExportModal() {
+var m = document.getElementById('qcExportModal');
+if (!m) return;
+m.classList.add('show');
+}
+function qcCloseExportModal() {
+var m = document.getElementById('qcExportModal');
+if (m) m.classList.remove('show');
+}
+function qcDoExport() {
+var m = document.getElementById('qcExportModal');
+if (!m) return;
+var modEl = m.querySelector('input[name="qcExportModule"]:checked');
+var fmtEl = m.querySelector('input[name="qcExportFormat"]:checked');
+var mod = modEl ? modEl.value : 'detail';
+var fmt = fmtEl ? fmtEl.value : 'excel';
+if ((mod === 'standard' || mod === 'knowledge' || mod === 'org' || mod === 'all' || mod === 'template') && fmt === 'csv') {
+showToast('该模块仅支持 Excel / 备份格式，已按默认格式导出', 'info');
+fmt = 'excel';
+}
+try {
+if (mod === 'detail') exportDetail(fmt);
+else if (mod === 'dashboard') exportDashboard(fmt);
+else if (mod === 'standard') exportStandard();
+else if (mod === 'knowledge') exportKnowledgeBase();
+else if (mod === 'org') exportOrg();
+else if (mod === 'all') exportAllData();
+else if (mod === 'template') downloadTemplate();
+} catch (e) {
+showToast('导出失败：' + (e && e.message ? e.message : e), 'error');
+return;
+}
+qcCloseExportModal();
+}
+                                 </script>
