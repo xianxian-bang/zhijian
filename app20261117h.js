@@ -6881,6 +6881,9 @@ function qcAiAdopt() {
 // 【R25】AI 全量重判：管理员触发，并发 worker 池判分并定型，断点续判、限流退避、最终写云端
 // 提速要点：默认 3 条并发（可调 1/3/5），去掉原来固定 700ms 串行节流；仍保留 429 指数退避、断点续判、每20条落盘、申诉优先。
 var QC_AI_BULK = { running: false, aborted: false, done: 0, fail: 0, skip: 0, total: 0, cursor: 0, active: 0, conc: 3, finished: false };
+// 【20261127 测试阶段】仅由「🧪 测试重跑」置 true，允许按当前口径重判最多 20 条已定型单；默认入口永远 false。
+var QC_AI_TEST_RERUN = false;
+var QC_AI_TEST_BACKUP_KEY = 'qc_ai_test_backup_v1';
 // 【R28】最近一次重判批次（刷新后仍可识别"本次重判"的单）；批次存本机，不写云端配置
 var QC_AI_LAST_BATCH = (function(){ try { return localStorage.getItem('qc_ai_last_batch_v1') || ''; } catch (e) { return ''; } })();
 // 【R32】记住最近 5 个批次：单条「AI 模型重跑」会生成新批次，不能把上一次全量重判的🆕标识抹掉
@@ -7014,9 +7017,11 @@ function qcAiRefreshKnowledgeBeforeRun() {
     if (row) { try { qcKbApplyPayload(row, { useAuthoritative: false }); } catch (e) {} }
   }).catch(function() {});
 }
-function qcAiGradeAll() {
-  if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
-  if (QC_AI_BULK.running) { showToast('AI 判分正在进行中，请等待完成', 'error'); return; }
+function qcAiGradeAll(testMode) {
+  QC_AI_TEST_RERUN = !!testMode; // 每次开跑显式复位，避免上一次测试标记残留
+  function _abortBeforeRun(msg) { qcAiLockRelease(); QC_AI_TEST_RERUN = false; if (msg) showToast(msg, 'error'); return; }
+  if (typeof requireAdmin === 'function' && !requireAdmin(QC_AI_TEST_RERUN ? '测试重跑（已定型单）' : 'AI 全量重判')) return _abortBeforeRun();
+  if (QC_AI_BULK.running) return _abortBeforeRun('AI 判分正在进行中，请等待完成');
   var _prov = qcAiProvider();
   var key = (function(){
     try {
@@ -7025,17 +7030,17 @@ function qcAiGradeAll() {
       return String((b && b.value) || (m && m.value) || qcAiLoadKey(_prov.id)).trim();
     } catch (e) { return qcAiLoadKey(_prov.id); }
   })();
-  if (!key) { showToast('请先填写「' + _prov.label + '」的 API Key（点面板右上「去申请 Key」）', 'error'); return; }
+  if (!key) return _abortBeforeRun('请先填写「' + _prov.label + '」的 API Key（点面板右上「去申请 Key」）');
   qcAiSaveKey(key, _prov.id);
   var _mirror = document.getElementById('qcAiKey'); if (_mirror) _mirror.value = key;
-  if (!_prov.direct && !qcAiGetProxyUrl()) { showToast('当前服务商需云函数代理，但代理不可用；请改选「直连」服务商（SiliconFlow / 阿里百炼 / OpenRouter）', 'error'); return; }
+  if (!_prov.direct && !qcAiGetProxyUrl()) return _abortBeforeRun('当前服务商需云函数代理，但代理不可用；请改选「直连」服务商（SiliconFlow / 阿里百炼 / OpenRouter）');
   // 【R23 需求1】只判「是否考核=是」的单；非考核单不调用 AI、不改动原结果
-  // 【20261127 硬约束】AI 只处理从未判过的单：aiFinalized 一律跳过，不再提供「重判已定型单」开关。
-  //   已定型单若有疑问，只能走规则引擎 / 豆包 / 人工申诉改，绝不再次调用大模型。
+  // 【20261127 硬约束】默认只处理从未判过的单；仅管理员显式点「🧪 测试重跑」时才纳入已定型单（限20条、可撤销）。
+  //   测试结束后 QC_AI_TEST_RERUN 复位，默认入口恢复永久锁定。
   var targets = [];
   for (var t = 0; t < results.length; t++) {
     if (typeof isAssessedResult === 'function' && !isAssessedResult(results[t])) continue; // 非考核单跳过
-    if (results[t].aiFinalized) continue; // 已定型永久锁定：任何情况下都不重判
+    if (results[t].aiFinalized && !QC_AI_TEST_RERUN) continue; // 已定型默认永久锁定
     targets.push(t);
   }
   // 【R28】可选"本次重判条数"：>0 时只取前 N 条目标（按明细表顺序）
@@ -7044,7 +7049,32 @@ function qcAiGradeAll() {
   // 【R28】生成本次重判批次ID，写入本机供刷新后继续识别"本次重判"
   var batchId = qcAiBatchNow();
   qcAiMarkBatch(batchId);
-  var conc = qcAiGradeAllSpeed();
+  // 【测试重跑】开跑前把每条旧判定完整备份到本机，随时可一键撤销；备份失败则直接取消，不写云端。
+  if (QC_AI_TEST_RERUN) {
+    var _bakItems = [];
+    for (var _bi = 0; _bi < targets.length; _bi++) {
+      var _br = results[targets[_bi]];
+      _bakItems.push({
+        i: targets[_bi], grade: _br.grade, totalScore: _br.totalScore,
+        scores: JSON.parse(JSON.stringify(_br.scores || {})),
+        details: JSON.parse(JSON.stringify(_br.details || {})),
+        issues: JSON.parse(JSON.stringify(_br.issues || [])),
+        aiV2why: _br.aiV2why || '', aiRaw: _br.aiRaw || '',
+        aiBatch: _br.aiBatch || '', aiJudgeAt: _br.aiJudgeAt || '',
+        aiFinalized: !!_br.aiFinalized, aiPrev: _br.aiPrev || null
+      });
+    }
+    try {
+      localStorage.setItem(QC_AI_TEST_BACKUP_KEY, JSON.stringify({ batch: batchId, at: Date.now(), items: _bakItems }));
+    } catch (e) {
+      qcAiLockRelease();
+      QC_AI_TEST_RERUN = false;
+      showToast('测试备份写入失败，已取消重跑（不会影响已有数据）', 'error');
+      return;
+    }
+  }
+  // 测试重跑强制 1 并发：最稳，避免限流/覆盖，且便于逐条对比新旧结果
+  var conc = QC_AI_TEST_RERUN ? 1 : qcAiGradeAllSpeed();
   var total = targets.length;
   QC_AI_BULK = { running: true, aborted: false, done: 0, fail: 0, skip: 0, total: total, cursor: 0, active: 0, conc: conc, finished: false, batch: batchId };
   _qcAiBulkSavedAt = 0;
@@ -7056,6 +7086,7 @@ function qcAiGradeAll() {
     QC_AI_BULK.finished = true;
     QC_AI_BULK.running = false;
     qcAiLockRelease(); // 释放云端互斥锁，允许下一个人接手
+    QC_AI_TEST_RERUN = false; // 测试标记复位：默认入口恢复「已定型永久锁定」
     log(msg);
     try { renderDetailTable(); } catch (e) {}
     try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); } catch (e) {}
@@ -7114,8 +7145,8 @@ function qcAiGradeAll() {
       setTimeout(worker, 120);  // 失败worker稍作间隔再领下一条
     });
   }
-  log('AI 判分开始（批次 ' + batchId + ' · 并发 ' + conc + '），本次 ' + total + ' 条' + (limit > 0 ? '（上限 ' + limit + ' 条）' : '（全部）') + '，仅未判分单（依据实时链接知识库＋质检标准）…');
-  if (total === 0) { finish('没有需要 AI 判分的考核单（仅有未定型单才会判）。'); return; }
+  log('AI 判分开始（批次 ' + batchId + ' · 并发 ' + conc + '），本次 ' + total + ' 条' + (limit > 0 ? '（上限 ' + limit + ' 条）' : '（全部）') + (QC_AI_TEST_RERUN ? '，测试重跑（含已定型，已备份可撤销）' : '，仅未判分单') + '（依据实时链接知识库＋质检标准）…');
+  if (total === 0) { QC_AI_TEST_RERUN = false; finish('没有需要 AI 判分的考核单（仅有未定型单才会判）。'); return; }
   // 启动 min(conc,total) 个 worker；错峰 120ms 启动，避免瞬间并发尖峰
   var startN = Math.min(conc, total);
   for (var w = 0; w < startN; w++) { QC_AI_BULK.active++; setTimeout(worker, 60 + w * 120); }
@@ -7481,7 +7512,7 @@ function qcAiGradeAllStop() {
   QC_AI_BULK.aborted = true;
   // 中止时若所有 worker 都已停止领任务但尚有在途请求，等它们回来后由 cursor>=total 分支收尾；
   // 这里兜底：若已无 active worker 立即给出中止提示
-  try { if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) { QC_AI_BULK.finished = true; QC_AI_BULK.running = false; qcAiLockRelease(); var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = '已中止。已完成 ' + QC_AI_BULK.done + ' 条。'; } } catch (e) {}
+  try { if (QC_AI_BULK.active <= 0 && !QC_AI_BULK.finished) { QC_AI_BULK.finished = true; QC_AI_BULK.running = false; qcAiLockRelease(); QC_AI_TEST_RERUN = false; var p = document.getElementById('qcAiBulkStatus'); if (p) p.textContent = '已中止。已完成 ' + QC_AI_BULK.done + ' 条。'; } } catch (e) {}
 }
 // 【R21】中途落盘：每 20 条写一次云端，防止跑一半崩掉/关页面全部丢失
 var _qcAiBulkSavedAt = 0;
@@ -7501,9 +7532,9 @@ function qcAiPrimaryToggle(on) {
   try { showToast(on ? '已启用 AI 主判分：请点「AI 全量重判」让新明细定型' : '已回退规则引擎：点「刷新数据」按规则重算', 'success'); } catch (e) {}
   if (!on && typeof runQualityCheck === 'function') { try { runQualityCheck(); } catch (e) {} }
 }
-// 【R20】从质检标准页面板启动全量重判：把 Key 传入弹窗输入框供 qcAiGradeAll 读取
-function qcAiGradeAllStart() {
-  if (typeof requireAdmin === 'function' && !requireAdmin('AI 全量重判')) return;
+// 【R20】从质检标准页面板启动判分：默认只处理未判分单；testMode=true 仅由「🧪 测试重跑」调用
+function qcAiGradeAllStartWithMode(testMode) {
+  if (typeof requireAdmin === 'function' && !requireAdmin(testMode ? '测试重跑（已定型单）' : 'AI 全量重判')) return;
   if (QC_AI_BULK.running) { showToast('AI 判分正在进行中，请等待完成', 'error'); return; }
   var _prov = qcAiProvider();
   var bulkKey = document.getElementById('qcAiBulkKey');
@@ -7514,6 +7545,14 @@ function qcAiGradeAllStart() {
   qcAiSaveKey(key, _prov.id);
   if (modalKey) modalKey.value = key;
   if (bulkKey) bulkKey.value = key;
+  if (testMode) {
+    // 测试重跑硬上限 20 条：足够验证效果，又不会拖垮免费模型/云端流量
+    var limEl = document.getElementById('qcAiLimitInput');
+    var lim = parseInt(limEl && limEl.value, 10);
+    if (!lim || lim < 1) lim = 20;
+    if (lim > 20) { showToast('测试重跑最多 20 条（保护链接稳定性），请把「本次条数」改小', 'error'); return; }
+    if (limEl) limEl.value = lim;
+  }
   // 【20261127】云端互斥锁：先抢锁，成功才开跑，防止多人同时判分互相覆盖
   var st = document.getElementById('qcAiBulkStatus');
   if (st) st.textContent = '正在检查是否有其他人在判分…';
@@ -7527,8 +7566,39 @@ function qcAiGradeAllStart() {
     if (st) st.textContent = '正在从云端加载最新知识库与质检标准…';
     qcAiRefreshKnowledgeBeforeRun().then(function() {
       if (st) st.textContent = '';
-      qcAiGradeAll();
+      qcAiGradeAll(!!testMode);
     });
+  });
+}
+function qcAiGradeAllStart() { qcAiGradeAllStartWithMode(false); }
+function qcAiTestRerunStart() { qcAiGradeAllStartWithMode(true); }
+// 【测试阶段】撤销上次测试重跑：从本机备份恢复原判定，写回云端，锁保护避免并发覆盖
+function qcAiTestRerunUndo() {
+  if (typeof requireAdmin === 'function' && !requireAdmin('撤销测试重跑')) return;
+  if (QC_AI_BULK.running) { showToast('判分进行中，请先「⏹ 中止」再撤销', 'error'); return; }
+  var raw = '';
+  try { raw = localStorage.getItem(QC_AI_TEST_BACKUP_KEY); } catch (e) {}
+  if (!raw) { showToast('没有测试重跑备份可撤销', 'error'); return; }
+  var bak = null;
+  try { bak = JSON.parse(raw); } catch (e) { showToast('备份读取失败，请联系管理员', 'error'); return; }
+  qcAiLockAcquire().then(function(r) {
+    if (!r.ok) { showToast('已有「' + (r.holder || '其他管理员') + '」正在操作，请稍后再撤销', 'error'); return; }
+    var items = bak.items || [];
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j], rr = results[it.i];
+      if (!rr) continue;
+      for (var f in it) {
+        if (!Object.prototype.hasOwnProperty.call(it, f) || f === 'i') continue;
+        rr[f] = it[f];
+      }
+    }
+    try { localStorage.removeItem(QC_AI_TEST_BACKUP_KEY); } catch (e) {}
+    try { renderDetailTable(); } catch (e) {}
+    try { if (typeof qcSyncDashboard === 'function') qcSyncDashboard(); else renderDashboard(); } catch (e) { try { renderDashboard(); } catch (e2) {} }
+    try { saveDataToUrl(); } catch (e) {}
+    try { var _sv = cloudSaveState(); if (_sv && _sv.catch) _sv.catch(function () {}); } catch (e) {}
+    qcAiLockRelease();
+    showToast('已撤销测试重跑，恢复 ' + items.length + ' 条原判定', 'success');
   });
 }
 
